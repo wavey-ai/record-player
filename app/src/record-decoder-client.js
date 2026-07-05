@@ -47,7 +47,6 @@ export class RecordDecoderClient {
       recordProfile,
       record: { id: "local-record", recordProfile },
       runtime: { id: "wasm", label: "WASM CPU", executionProviders: ["wasm"] },
-      waveformBucketCount: 0,
       cacheDecodedSegments: true
     }, [buffer], onProgress);
   }

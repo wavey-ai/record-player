@@ -47,7 +47,12 @@ header {
   aspect-ratio: 1;
   border: 2px solid #050505;
   border-radius: 50%;
-  background: repeating-radial-gradient(circle, transparent 0 3px, rgba(0, 0, 0, 0.2) 4px 5px), #111;
+  background:
+    repeating-radial-gradient(
+      circle,
+      transparent 0 8px,
+      rgba(5, 5, 5, 0.16) 8.5px 9.5px
+    );
   color: #050505;
   display: grid;
   place-items: center;
@@ -64,7 +69,8 @@ header {
   width: 34%;
   aspect-ratio: 1;
   border-radius: 50%;
-  background: #f6d800;
+  background: transparent;
+  border: 1px solid rgba(5, 5, 5, 0.28);
   display: grid;
   place-items: center;
   font-weight: 900;
@@ -160,4 +166,20 @@ output {
 .rpm-controls button.selected {
   background: #050505;
   color: #f00020;
+}
+
+#player-canvas {
+  width: min(94vw, 820px);
+  height: min(92vh, 900px);
+  display: block;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.legacy-platter[hidden] {
+  display: none;
+}
+
+.fallback-controls {
+  max-width: 720px;
 }

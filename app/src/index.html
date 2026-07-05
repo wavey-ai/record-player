@@ -3,34 +3,35 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Bitneedle Record Player</title>
+  <title>vin.yl.player</title>
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
   <main class="player-shell">
     <header>
       <span>YL.VIN</span>
-      <strong>BITNEEDLE RECORD PLAYER</strong>
+      <strong>VIN.YL.PLAYER</strong>
     </header>
     <section class="deck" aria-label="Record player">
-      <button id="platter" class="platter" type="button" aria-label="Scratch record">
-        <img id="record-image" alt="Loaded Bitneedle record">
-        <span class="label">BITNEEDLE</span>
-      </button>
-      <div class="transport">
+      <canvas id="player-canvas" aria-label="Interactive Bitneedle record player"></canvas>
+      <div class="transport fallback-controls">
         <button id="load" type="button">LOAD RECORD</button>
         <button id="play" type="button" disabled>START</button>
         <button id="needle" type="button" disabled>NEEDLE UP</button>
       </div>
-      <div class="rpm-controls" aria-label="Record speed">
+      <button id="platter" class="legacy-platter" type="button" aria-label="Scratch record" hidden>
+        <img id="record-image" alt="Loaded Bitneedle record">
+        <span class="label">BITNEEDLE</span>
+      </button>
+      <div class="fallback-controls rpm-controls" aria-label="Record speed">
         <span>RPM</span>
         <button id="rpm-33" type="button">33⅓</button>
         <button id="rpm-45" type="button">45</button>
       </div>
-      <label class="timeline">
-        <span>POSITION</span>
-        <input id="seek" type="range" min="0" max="1" step="0.0001" value="0" disabled>
-      </label>
+      <label class="fallback-controls timeline"><span>VARIABLE RPM</span><input id="rpm" type="range" min="16" max="90" step="0.01" value="33.333333"></label>
+      <label class="fallback-controls timeline"><span>VOLUME</span><input id="volume" type="range" min="0" max="1" step="0.001" value="1"></label>
+      <label class="fallback-controls timeline"><span>XFADE</span><input id="xfade" type="range" min="0" max="1" step="0.001" value="0.5"></label>
+      <label class="fallback-controls timeline"><span>POSITION</span><input id="seek" type="range" min="0" max="1" step="0.0001" value="0" disabled></label>
       <dl id="record-metadata" class="metadata" hidden>
         <div><dt>PROFILE</dt><dd id="meta-profile"></dd></div>
         <div><dt>CONTAINER</dt><dd id="meta-container"></dd></div>

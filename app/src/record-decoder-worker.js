@@ -38,8 +38,7 @@ const MOSS_NANO_RECORD_PROFILE_CHUNK_SECONDS = Object.freeze({
 });
 
 let onnxRuntimeModulePromise = null;
-let recordRenderWasmModulePromise = null;
-let playerAppWasmModulePromise = null;
+let playerWasmModulePromise = null;
 let playerAppWasmModule = null;
 let mossNanoWasmModulePromise = null;
 let mossNanoDecodeSessionPromise = null;
@@ -164,36 +163,31 @@ async function ensureOnnxRuntimeModule() {
   return onnxRuntimeModulePromise;
 }
 
-async function ensureRecordRenderWasmModule() {
-  if (!recordRenderWasmModulePromise) {
-    recordRenderWasmModulePromise = (async () => {
-      const module = await import(versionedWorkerAssetUrl("./wasm/record-render/bitneedle_record.js"));
+async function ensurePlayerWasmModule() {
+  if (!playerWasmModulePromise) {
+    playerWasmModulePromise = (async () => {
+      const module = await import(versionedWorkerAssetUrl("./wasm/player-wasm/player_wasm.js"));
       await module.default({
-        module_or_path: versionedWorkerAssetUrl("./wasm/record-render/bitneedle_record_bg.wasm"),
-      });
-      module.initPanicHook?.();
-      return module;
-    })();
-  }
-  return recordRenderWasmModulePromise;
-}
-
-async function ensurePlayerAppWasmModule() {
-  if (!playerAppWasmModulePromise) {
-    playerAppWasmModulePromise = (async () => {
-      const module = await import(versionedWorkerAssetUrl("./wasm/bitneedle-player/bitneedle_player.js"));
-      await module.default({
-        module_or_path: versionedWorkerAssetUrl("./wasm/bitneedle-player/bitneedle_player_bg.wasm"),
+        module_or_path: versionedWorkerAssetUrl("./wasm/player-wasm/player_wasm_bg.wasm"),
       });
       module.initPanicHook?.();
       playerAppWasmModule = module;
       return module;
     })().catch((error) => {
-      playerAppWasmModulePromise = null;
+      playerWasmModulePromise = null;
+      playerAppWasmModule = null;
       throw error;
     });
   }
-  return playerAppWasmModulePromise;
+  return playerWasmModulePromise;
+}
+
+async function ensureRecordRenderWasmModule() {
+  return ensurePlayerWasmModule();
+}
+
+async function ensurePlayerAppWasmModule() {
+  return ensurePlayerWasmModule();
 }
 
 function requirePlayerAppWasmFunction(name) {
@@ -994,30 +988,6 @@ function createS16OverlapAddWriter({ meta, frames, audioLength, layout }) {
     return segments;
   }
 
-  function computePeaks(bucketCount = 0) {
-    const safeBucketCount = Math.max(0, Math.floor(Number(bucketCount) || 0));
-    if (!(safeBucketCount > 0) || !(safeAudioLength > 0)) {
-      return null;
-    }
-    const samplesPerBucket = Math.max(1, Math.floor(safeAudioLength / safeBucketCount));
-    const sampleStride = Math.max(1, Math.floor(samplesPerBucket / 64));
-    const peaks = new Float32Array(safeBucketCount);
-    for (let bucketIndex = 0; bucketIndex < safeBucketCount; bucketIndex += 1) {
-      const start = bucketIndex * samplesPerBucket;
-      const end = bucketIndex === safeBucketCount - 1
-        ? safeAudioLength
-        : Math.min(safeAudioLength, start + samplesPerBucket);
-      let peak = 0;
-      for (let channel = 0; channel < channels; channel += 1) {
-        const data = channelData[channel];
-        for (let sampleIndex = start; sampleIndex < end; sampleIndex += sampleStride) {
-          peak = Math.max(peak, Math.abs((data[sampleIndex] || 0) / 32768));
-        }
-      }
-      peaks[bucketIndex] = peak;
-    }
-    return peaks;
-  }
 
   return {
     addCachedRange,
@@ -1032,12 +1002,9 @@ function createS16OverlapAddWriter({ meta, frames, audioLength, layout }) {
       emitUntil(safeAudioLength);
       return collectEmittedSegments();
     },
-    result(bucketCount = 0) {
+    result() {
       this.flush();
-      return {
-        channelData,
-        peaks: computePeaks(bucketCount),
-      };
+      return { channelData };
     },
   };
 }
@@ -1085,31 +1052,6 @@ function postRawDecodedPcmSegments(id, segments, { sampleRate, channels, audioLe
   const transfer = [];
   const rawDecodedPcmSegments = normalizedProgressSegments(segments, { sampleRate, channels, audioLength }, transfer);
   postDecodeProgress(id, { rawDecodedPcmSegments }, transfer);
-}
-
-function computeS16Peaks(channelData, audioLength, bucketCount = 0) {
-  const safeAudioLength = Math.max(0, Math.floor(Number(audioLength) || 0));
-  const safeBucketCount = Math.max(0, Math.floor(Number(bucketCount) || 0));
-  if (!(safeAudioLength > 0) || !(safeBucketCount > 0) || !Array.isArray(channelData) || !channelData.length) {
-    return null;
-  }
-  const samplesPerBucket = Math.max(1, Math.floor(safeAudioLength / safeBucketCount));
-  const sampleStride = Math.max(1, Math.floor(samplesPerBucket / 64));
-  const peaks = new Float32Array(safeBucketCount);
-  for (let bucketIndex = 0; bucketIndex < safeBucketCount; bucketIndex += 1) {
-    const start = bucketIndex * samplesPerBucket;
-    const end = bucketIndex === safeBucketCount - 1
-      ? safeAudioLength
-      : Math.min(safeAudioLength, start + samplesPerBucket);
-    let peak = 0;
-    for (const channel of channelData) {
-      for (let sampleIndex = start; sampleIndex < end; sampleIndex += sampleStride) {
-        peak = Math.max(peak, Math.abs((channel[sampleIndex] || 0) / 32768));
-      }
-    }
-    peaks[bucketIndex] = peak;
-  }
-  return peaks;
 }
 
 function seamRepairProfileFromMeta(meta) {
@@ -1284,13 +1226,9 @@ function createHermiteChunkAssembler({ channels, audioLength, ownedSamples, repa
       pendingSegment = null;
       return [final];
     },
-    result(bucketCount = 0) {
+    result() {
       const flushed = this.flush();
-      return {
-        flushed,
-        channelData: finalChannelData,
-        peaks: computeS16Peaks(finalChannelData, audioLength, bucketCount),
-      };
+      return { flushed, channelData: finalChannelData };
     },
   };
 }
@@ -1376,7 +1314,6 @@ async function decodeMossNanoPlayback({
   payloadBuffer,
   recordProfile,
   runtime,
-  waveformBucketCount = 0,
   cacheDecodedSegments = false,
 }) {
   assertMossNanoDecodeEnabled();
@@ -1474,7 +1411,6 @@ async function decodeMossNanoPlayback({
       msg: "Preparing playback",
       progressPercent: 100,
     });
-    const peaks = computeS16Peaks(channelData, audioLength, waveformBucketCount);
     workerPerfEnd(id, perfMark, {
       chunks: chunkCount,
       duration: audioLength / sampleRate,
@@ -1482,7 +1418,6 @@ async function decodeMossNanoPlayback({
     });
     return {
       s16ChannelData: channelData,
-      peaks,
       channels,
       sampleRate,
       audioLength,
@@ -1542,7 +1477,7 @@ function spliceSilenceIntoChannelData(channelData, audioLength, samplesPerChunk,
   return { channelData: splicedChannelData, audioLength: splicedAudioLength };
 }
 
-async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, bundleName = "", meta, runtime, audioLength, record = null, waveformBucketCount = 0, cacheDecodedSegments = false, cachedPcmSegments = [], silenceMap = [] }) {
+async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, bundleName = "", meta, runtime, audioLength, record = null, cacheDecodedSegments = false, cachedPcmSegments = [], silenceMap = [] }) {
   workerDecodeDebug("[play:client-playback-worker.js] decodePlayback", { id, ecdcBytes: ecdcBuffer?.byteLength || 0, bundleName, cacheDecodedSegments, silenceSpans: Array.isArray(silenceMap) ? silenceMap.length : 0 });
   if (!ecdcBuffer) {
     throw new Error("Client playback worker requires the ECDC round-trip payload.");
@@ -1763,7 +1698,7 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
         msg: "Preparing playback",
         progressPercent: 100,
       });
-      const s16Result = assembler.result(waveformBucketCount);
+      const s16Result = assembler.result();
       if (s16Result.flushed.length) {
         postDecodedPcmSegments(id, s16Result.flushed, {
           sampleRate,
@@ -1774,11 +1709,9 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
       workerPerfEnd(id, perfMark, {
         bundleName: selectedBundleName,
         duration: durationSeconds,
-        peaks: s16Result.peaks?.length || 0,
       });
       return {
         s16ChannelData: s16Result.channelData,
-        peaks: s16Result.peaks,
         channels,
         sampleRate,
         audioLength: safeAudioLength,
@@ -1967,27 +1900,21 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
         audioLength: safeAudioLength,
       });
     }
-    const s16Result = s16Writer.result(waveformBucketCount);
+    const s16Result = s16Writer.result();
     const samplesPerChunk = Math.max(
       1,
       Math.floor(Number(selectedMeta?.owned_samples ?? selectedMeta?.ownedSamples) || 0)
         || Math.round(safeAudioLength / Math.max(1, encodedFrames.length)),
     );
-    // Peaks/waveform buckets are computed over the pre-splice (audio-only)
-    // length; they are a visual aid and are not re-bucketed for the inserted
-    // silence, so the waveform display is very slightly out of sync with the
-    // spliced duration during silent spans.
     const { channelData: splicedChannelData, audioLength: splicedAudioLength } =
       spliceSilenceIntoChannelData(s16Result.channelData, safeAudioLength, samplesPerChunk, silenceMap);
 
     workerPerfEnd(id, perfMark, {
       bundleName: selectedBundleName,
       duration: durationSeconds,
-      peaks: s16Result.peaks?.length || 0,
     });
     return {
       s16ChannelData: splicedChannelData,
-      peaks: s16Result.peaks,
       channels: Number(selectedMeta.channels) || 2,
       sampleRate,
       audioLength: splicedAudioLength,
@@ -2003,7 +1930,7 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
   }
 }
 
-async function decodeRecordPngPlayback({ id, pngBytes, record = {}, recordProfile, runtime, waveformBucketCount = 0 }) {
+async function decodeRecordPngPlayback({ id, pngBytes, record = {}, recordProfile, runtime }) {
   workerDecodeDebug("[play:client-playback-worker.js] decodeRecordPngPlayback", { id, pngBytes: pngBytes?.byteLength || 0, recordProfile });
   const perfMark = workerPerfStart("decode record PNG end-to-end", {
     pngBytes: pngBytes?.byteLength || 0,
@@ -2020,7 +1947,6 @@ async function decodeRecordPngPlayback({ id, pngBytes, record = {}, recordProfil
       record,
       recordProfile: extracted.recordProfile,
       runtime,
-      waveformBucketCount,
       silenceMap: extracted.silenceMap,
     });
     workerPerfEnd(id, perfMark, {
@@ -2102,15 +2028,13 @@ async function decodePayloadPlayback({ payloadBuffer, payloadContainer = "", pay
 
 function postWorkerDecodeResult(id, result) {
   const s16ChannelBuffers = (result.s16ChannelData || []).map((channel) => channel.buffer);
-  const peaksBuffer = result.peaks?.buffer || null;
-  const transfer = peaksBuffer ? [...s16ChannelBuffers, peaksBuffer] : s16ChannelBuffers;
+  const transfer = s16ChannelBuffers;
   self.postMessage(
     {
       id,
       ok: true,
       result: {
         s16ChannelBuffers,
-        peaksBuffer,
         channels: result.channels,
         sampleRate: result.sampleRate,
         audioLength: result.audioLength,

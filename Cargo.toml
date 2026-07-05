@@ -1,11 +1,13 @@
 [workspace]
-members = [".", "simulation"]
+members = [".", "player-wasm"]
+default-members = ["."]
+resolver = "2"
 
 [package]
-name = "bitneedle-record-player-core"
+name = "record-player"
 version = "0.1.0"
 edition = "2021"
-description = "Typed Bitneedle player state engine and browser command protocol"
+description = "Standalone Bitneedle record player, acoustic scratch engine, and browser command protocol"
 license = "Apache-2.0"
 repository = "https://github.com/bitneedle/bitneedle"
 
@@ -14,13 +16,14 @@ crate-type = ["rlib", "cdylib"]
 
 [features]
 default = []
-wasm = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen"]
+wasm = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
-wasm-bindgen = { version = "0.2", optional = true }
-serde-wasm-bindgen = { version = "0.6", optional = true }
+wasm-bindgen = "0.2"
+serde-wasm-bindgen = "0.6"
 
 [dev-dependencies]
+approx = "0.5"
 serde_json = "1"
