@@ -1,0 +1,17 @@
+[package]
+name = "record-player-simulation-wasm"
+version = "0.2.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Typed stylus calibration and scratch simulation for Bitneedle players"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+wasm-bindgen = "0.2"
+
+[dev-dependencies]
+approx = "0.5"
