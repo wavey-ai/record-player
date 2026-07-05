@@ -1,4 +1,5 @@
 if (typeof importScripts === "function") {
+  if (!globalThis.VinylPlayerMessageLogger) importScripts("./player-message-logger-global.js");
   if (!globalThis.BitneedleBrowserFormatting) {
     importScripts("./browser-formatting.js");
   }
@@ -16,6 +17,11 @@ if (typeof importScripts === "function") {
   }
 }
 
+
+const playerMessageLog = globalThis.VinylPlayerMessageLogger.createLogger("decoder-worker");
+globalThis.VinylPlayerMessageLogger.setEnabled(new URL(self.location.href).searchParams.get("player_log") !== "0");
+const rawPostMessage = self.postMessage.bind(self);
+self.postMessage = (message, transfer) => { playerMessageLog.send(message?.progress ? "progress" : message?.ok ? "response" : message?.type || "message", message, { transferCount: Array.isArray(transfer) ? transfer.length : 0 }); return transfer === undefined ? rawPostMessage(message) : rawPostMessage(message, transfer); };
 const WORKER_GENERATION_CACHE_VERSION =
   new URL(self.location.href).searchParams.get("v") || "dev";
 const WORKER_PERF_LOG_ENABLED =
@@ -1042,6 +1048,20 @@ function postDecodedPcmSegments(id, segments, { sampleRate, channels, audioLengt
   }
   const transfer = [];
   const decodedPcmSegments = normalizedProgressSegments(segments, { sampleRate, channels, audioLength }, transfer);
+  playerMessageLog.action("pcm-segments-ready", {
+    requestId: id,
+    segmentCount: decodedPcmSegments.length,
+    sampleRate,
+    channels,
+    audioLength,
+    segments: decodedPcmSegments.map(segment => ({
+      chunkIndex: segment.chunkIndex,
+      startFrame: segment.startFrame,
+      endFrame: segment.endFrame,
+      frameCount: Math.max(0, segment.endFrame - segment.startFrame),
+      byteLength: segment.channelBuffers.reduce((sum, buffer) => sum + (buffer?.byteLength || 0), 0),
+    })),
+  });
   postDecodeProgress(id, { decodedPcmSegments }, transfer);
 }
 
@@ -1383,13 +1403,11 @@ async function decodeMossNanoPlayback({
         stream.pushDecodedPlanar(chunk.planar, channels, chunk.frames);
         if (segment) {
           segment.chunkIndex = chunkIndex;
-          if (cacheDecodedSegments) {
-            postDecodedPcmSegments(id, [segment], {
-              sampleRate,
-              channels,
-              audioLength,
-            });
-          }
+          postDecodedPcmSegments(id, [segment], {
+            sampleRate,
+            channels,
+            audioLength,
+          });
           writeFrame = segment.endFrame;
         }
       } catch (error) {
@@ -1771,12 +1789,12 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
               channels: Number(selectedMeta.channels) || 2,
               audioLength: safeAudioLength,
             });
-            postDecodedPcmSegments(id, emittedSegments, {
-              sampleRate,
-              channels: Number(selectedMeta.channels) || 2,
-              audioLength: safeAudioLength,
-            });
           }
+          postDecodedPcmSegments(id, emittedSegments, {
+            sampleRate,
+            channels: Number(selectedMeta.channels) || 2,
+            audioLength: safeAudioLength,
+          });
           if (encodedFrames[index]) {
             encodedFrames[index].codes = null;
           }
@@ -1843,12 +1861,12 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
             channels: Number(selectedMeta.channels) || 2,
             audioLength: safeAudioLength,
           });
-          postDecodedPcmSegments(id, emittedSegments, {
-            sampleRate,
-            channels: Number(selectedMeta.channels) || 2,
-            audioLength: safeAudioLength,
-          });
         }
+        postDecodedPcmSegments(id, emittedSegments, {
+          sampleRate,
+          channels: Number(selectedMeta.channels) || 2,
+          audioLength: safeAudioLength,
+        });
       } catch (error) {
         reportSkippedDecodePacket(
           id,
@@ -1863,12 +1881,12 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
             channels: Number(selectedMeta.channels) || 2,
             audioLength: safeAudioLength,
           });
-          postDecodedPcmSegments(id, emittedSegments, {
-            sampleRate,
-            channels: Number(selectedMeta.channels) || 2,
-            audioLength: safeAudioLength,
-          });
         }
+        postDecodedPcmSegments(id, emittedSegments, {
+          sampleRate,
+          channels: Number(selectedMeta.channels) || 2,
+          audioLength: safeAudioLength,
+        });
       } finally {
         disposeOrtTensorMap(feeds);
         disposeOrtTensorMap(outputs);
@@ -1887,19 +1905,19 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
       msg: "Preparing playback",
       progressPercent: 100,
     });
+    const flushedSegments = s16Writer.flush();
     if (cacheDecodedSegments) {
-      const flushedSegments = s16Writer.flush();
       postRawDecodedPcmSegments(id, flushedSegments, {
         sampleRate,
         channels: Number(selectedMeta.channels) || 2,
         audioLength: safeAudioLength,
       });
-      postDecodedPcmSegments(id, flushedSegments, {
-        sampleRate,
-        channels: Number(selectedMeta.channels) || 2,
-        audioLength: safeAudioLength,
-      });
     }
+    postDecodedPcmSegments(id, flushedSegments, {
+      sampleRate,
+      channels: Number(selectedMeta.channels) || 2,
+      audioLength: safeAudioLength,
+    });
     const s16Result = s16Writer.result();
     const samplesPerChunk = Math.max(
       1,
@@ -2055,6 +2073,8 @@ function postWorkerDecodeResult(id, result) {
 }
 
 self.onmessage = async (event) => {
+  if (event.data?.type === "set-logging") { globalThis.VinylPlayerMessageLogger.setEnabled(event.data.enabled); playerMessageLog.action("logging-changed", { enabled: event.data.enabled }); return; }
+  playerMessageLog.receive(event.data?.type || "message", event.data);
   const { id, type } = event.data || {};
   if (type === "init") {
     self.postMessage({ id, ok: true, result: { crossOriginIsolated: self.crossOriginIsolated === true } });

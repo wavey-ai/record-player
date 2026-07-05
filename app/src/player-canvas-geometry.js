@@ -5,9 +5,12 @@ export const CANVAS_COMPONENTS = Object.freeze({
   spindle: true,
   stylus: true,
   needlePoint: true,
-  tonearmGuide: true,
+  // Dotted travel arc hidden by default; the needle stays draggable via the
+  // invisible needle-arc hit region (components.seek).
+  tonearmGuide: false,
   startStop: true,
   needle: true,
+  loadRecord: true,
   rpm: true,
   volume: true,
   crossfader: true,

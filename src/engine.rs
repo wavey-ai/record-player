@@ -70,8 +70,9 @@ impl PlayerEngine {
                     d.playback.duration_seconds = duration_seconds.max(0.0);
                 }
                 let should_start = status == LoadStatus::Ready
-                    && self.deck(deck).playback.pending_play_when_ready
-                    && self.deck(deck).transport.motor_on;
+                    && self.deck(deck).transport.motor_on
+                    && !self.deck(deck).needle.lifted
+                    && !self.deck(deck).playback.playing;
                 if should_start {
                     let offset_seconds = self.deck(deck).playback.current_seconds;
                     let rate = self.deck(deck).playback.playback_rate;
@@ -114,8 +115,25 @@ impl PlayerEngine {
         self.commands.push(HostCommand::SetMotor { deck, running });
         let rate = if running { self.deck(deck).playback.playback_rate } else { 0.0 };
         self.commands.push(HostCommand::SetScratchTransport { deck, hand_contact: false, motor_rate: rate });
-        if !running {
+        if running {
+            let should_play = self.deck(deck).playback.load_status == LoadStatus::Ready
+                && !self.deck(deck).needle.lifted
+                && !self.deck(deck).playback.playing;
+            if should_play {
+                let offset_seconds = self.deck(deck).playback.current_seconds;
+                let playback_rate = self.deck(deck).playback.playback_rate;
+                self.deck_mut(deck).playback.playing = true;
+                self.commands.push(HostCommand::SetPacketGain { deck, gain: 1.0, ramp_ms: 0 });
+                self.commands.push(HostCommand::StartPacketPlayback {
+                    deck,
+                    offset_seconds,
+                    rate: playback_rate,
+                    platter_handoff: false,
+                });
+            }
+        } else {
             self.deck_mut(deck).playback.playing = false;
+            self.deck_mut(deck).playback.pending_play_when_ready = false;
             self.deck_mut(deck).playback.suspended_at_seconds = None;
             self.commands.push(HostCommand::StopPacketPlayback { deck, platter_handoff: true });
         }
@@ -133,9 +151,11 @@ impl PlayerEngine {
             return Ok(());
         }
         if self.deck(deck).playback.playing {
-            self.deck_mut(deck).playback.playing = false;
-            self.deck_mut(deck).playback.suspended_at_seconds = None;
-            self.commands.push(HostCommand::StopPacketPlayback { deck, platter_handoff: false });
+            // Original STOP (player.js 12347–12351): the motor turns off (the
+            // platter brakes), the needle lifts, and any surface region stops.
+            self.set_transport(deck, false);
+            self.deck_mut(deck).needle.lifted = true;
+            self.stop_regions();
         } else {
             self.deck_mut(deck).transport.motor_on = true;
             self.deck_mut(deck).needle.lifted = false;
@@ -164,12 +184,16 @@ impl PlayerEngine {
             self.commands.push(HostCommand::SetPacketGain { deck, gain: 0.0, ramp_ms: 0 });
         } else {
             self.commands.push(HostCommand::SetPacketGain { deck, gain: 1.0, ramp_ms: 0 });
-            if let Some(t) = self.deck_mut(deck).playback.suspended_at_seconds.take() {
-                if self.deck(deck).transport.motor_on && self.freezable(deck) {
-                    self.deck_mut(deck).playback.current_seconds = t;
-                    self.commands.push(HostCommand::SetScratchPosition { deck, position_frames: t * self.config.sample_rate, impulse: 0.25 });
-                    self.commands.push(HostCommand::StartPacketPlayback { deck, offset_seconds: t, rate: self.deck(deck).playback.playback_rate, platter_handoff: true });
-                }
+            let resume_at = self.deck_mut(deck).playback.suspended_at_seconds.take();
+            if self.deck(deck).transport.motor_on
+                && self.deck(deck).playback.load_status == LoadStatus::Ready
+                && self.freezable(deck)
+            {
+                let t = resume_at.unwrap_or(self.deck(deck).playback.current_seconds);
+                self.deck_mut(deck).playback.current_seconds = t;
+                self.deck_mut(deck).playback.playing = true;
+                self.commands.push(HostCommand::SetScratchPosition { deck, position_frames: t * self.config.sample_rate, impulse: 0.25 });
+                self.commands.push(HostCommand::StartPacketPlayback { deck, offset_seconds: t, rate: self.deck(deck).playback.playback_rate, platter_handoff: true });
             }
         }
         self.emit_mixer(); self.commands.push(HostCommand::RefreshView); Ok(())
@@ -203,11 +227,18 @@ impl PlayerEngine {
         if self.deck(deck).playback.load_status != LoadStatus::Ready { return Err(PlayerError::AudioNotReady); }
         self.stop_regions(); self.stop_clip_loop();
         let was_playing = self.deck(deck).playback.playing;
-        if was_playing { self.commands.push(HostCommand::StopPacketPlayback { deck, platter_handoff: true }); }
         let frames = seconds * self.config.sample_rate;
-        let d = self.deck_mut(deck); d.needle.lifted = false; d.playback.playing = false; d.playback.current_seconds = seconds; d.scratch = ScratchState { active: true, pointer_id: Some(pointer_id), was_playing, started_at_seconds: seconds, target_position_frames: frames, rendered_position_frames: frames, target_rate: 0.0, base_rotation_degrees: rotation };
+        let d = self.deck_mut(deck); d.needle.lifted = false; d.playback.current_seconds = seconds; d.scratch = ScratchState { active: true, pointer_id: Some(pointer_id), was_playing, started_at_seconds: seconds, target_position_frames: frames, rendered_position_frames: frames, target_rate: 0.0, base_rotation_degrees: rotation };
         self.commands.push(HostCommand::SetPacketGain { deck, gain: 1.0, ramp_ms: 0 });
-        self.commands.push(HostCommand::SetScratchTransport { deck, hand_contact: true, motor_rate: self.deck(deck).playback.playback_rate });
+        self.commands.push(HostCommand::SetScratchTransport {
+            deck,
+            hand_contact: true,
+            motor_rate: if self.deck(deck).transport.motor_on {
+                self.deck(deck).playback.playback_rate
+            } else {
+                0.0
+            },
+        });
         self.commands.push(HostCommand::SetScratchTarget { deck, position_frames: frames, rate: 0.0, impulse: 0.0 });
         self.commands.push(HostCommand::CaptureScratchStart { deck, start_seconds: seconds, rotation_degrees: rotation }); self.commands.push(HostCommand::RefreshView); Ok(())
     }
@@ -226,7 +257,7 @@ impl PlayerEngine {
         self.commands.push(HostCommand::CaptureScratchFinish { deck, end_seconds: seconds, rotation_degrees: rotation, save_sample: save });
         { let d = self.deck_mut(deck); d.scratch = ScratchState::default(); d.playback.current_seconds = seconds; d.playback.playing = was_playing && resume; }
         self.commands.push(HostCommand::SetScratchTransport { deck, hand_contact: false, motor_rate: if self.deck(deck).transport.motor_on { self.deck(deck).playback.playback_rate } else { 0.0 } });
-        if was_playing && resume { self.commands.push(HostCommand::StartPacketPlayback { deck, offset_seconds: seconds, rate: self.deck(deck).playback.playback_rate, platter_handoff: handoff }); }
+        let _ = handoff;
         self.commands.push(HostCommand::RefreshView); Ok(())
     }
 
@@ -243,8 +274,9 @@ impl PlayerEngine {
         let a = a * self.state.decks[0].mixer.channel_gain;
         let b_needle = if self.state.decks[1].needle.lifted { 0.0 } else { 1.0 };
         let b = if self.two_deck_mode && self.state.decks[1].loaded { b * self.state.decks[1].mixer.channel_gain * b_needle } else { 0.0 };
-        self.commands.push(HostCommand::SetMixerTrackGain { track: 0, gain: a, ramp_ms: 12 });
-        self.commands.push(HostCommand::SetMixerTrackGain { track: 1, gain: b, ramp_ms: 12 });
+        // Original mixer ramps default to 5 ms (player-audio-mixer.js rampGain).
+        self.commands.push(HostCommand::SetMixerTrackGain { track: 0, gain: a, ramp_ms: 5 });
+        self.commands.push(HostCommand::SetMixerTrackGain { track: 1, gain: b, ramp_ms: 5 });
     }
 }
 
@@ -289,7 +321,10 @@ mod tests {
         e.dispatch(PlayerEvent::BeginScratch { deck: DeckId::A, pointer_id: 1, playback_seconds: 2.0, rotation_degrees: 40.0 }).unwrap(); e.drain_commands();
         e.dispatch(PlayerEvent::MoveScratch { deck: DeckId::A, position_frames: 200000.0, rendered_position_frames: 180000.0, rate: 1.0, rotation_degrees: 80.0, impulse: 0.0 }).unwrap(); e.drain_commands();
         e.dispatch(PlayerEvent::EndScratch { deck: DeckId::A, rendered_position_frames: 180000.0, rotation_degrees: 80.0, resume_playback: true, save_sample: true, can_platter_handoff: true }).unwrap();
-        assert!(e.drain_commands().iter().any(|c| matches!(c, HostCommand::StartPacketPlayback { offset_seconds, .. } if (*offset_seconds-3.75).abs()<1e-9)));
+        let commands = e.drain_commands();
+        assert!(!commands.iter().any(|c| matches!(c, HostCommand::StartPacketPlayback { .. })));
+        assert!((e.state().decks[0].playback.current_seconds-3.75).abs()<1e-9);
+        assert!(e.state().decks[0].playback.playing);
     }
     #[test] fn sharp_crossfader_preserves_full_middle() { let (a,b)=sharp_crossfader_gains(0.5,0.08); assert_eq!((a,b),(1.0,1.0)); }
     #[test] fn scratch_interrupts_surface_region() {

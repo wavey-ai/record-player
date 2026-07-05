@@ -52,7 +52,7 @@ export function strobeLampGeometry(geometry) {
 }
 
 export function drawStrobe(ctx, geometry, state, theme, lightOn, timestamp) {
-  const playing = Boolean(state.playing || state.scratching);
+  const playing = Boolean(state.motorRunning || state.scratching);
   const rate = Number(state.playbackRate) || 0;
   const timeSec = timestamp / 1000;
   const baseDot = Math.max(1.15, geometry.scale * 1.45);

@@ -26,8 +26,12 @@ export function resolveStylusGeometry(geometry, state, options = {}) {
   const armLength = pivotDistance * ARM_LENGTH_FACTOR;
   const progress = clamp(Number(state.positionRatio) || 0, 0, 1);
   const grooveProgress = typeof options.calibrateProgress === "function" ? clamp(options.calibrateProgress(progress), 0, 1) : progress;
-  const outerGroove = geometry.recordRadius * 0.94;
-  const innerGroove = geometry.recordRadius * 0.38;
+  const profile = String(state.recordProfile || "").trim().toLowerCase();
+  const canonicalOuterRadius = 287;
+  const payloadOuterRadius = 280;
+  const payloadInnerRadius = profile === "single45" ? 169 : 109;
+  const outerGroove = geometry.recordRadius * (payloadOuterRadius / canonicalOuterRadius);
+  const innerGroove = geometry.recordRadius * (payloadInnerRadius / canonicalOuterRadius);
   const grooveRadius = outerGroove + (innerGroove - outerGroove) * grooveProgress;
   const tip = tonearmTipForGroove(geometry.cx, geometry.cy, anchorX, anchorY, pivotDistance, armLength, grooveRadius);
   const outerTip = tonearmTipForGroove(geometry.cx, geometry.cy, anchorX, anchorY, pivotDistance, armLength, outerGroove);
@@ -49,9 +53,9 @@ export function drawStylus(ctx, geometry, state, theme, components, timestamp, o
     if (components.tonearmGuide) {
       const angle0 = Math.atan2(resolved.outerTip.y - resolved.anchorY, resolved.outerTip.x - resolved.anchorX);
       const angle1 = Math.atan2(resolved.innerTip.y - resolved.anchorY, resolved.innerTip.x - resolved.anchorX);
-      ctx.setLineDash([4 * geometry.scale, 5 * geometry.scale]);
+      ctx.setLineDash([Math.max(0.8, geometry.scale), 5 * geometry.scale]);
       ctx.strokeStyle = theme.tonearmGuide;
-      ctx.lineWidth = 1;
+      ctx.lineWidth = Math.max(0.7, 0.8 * geometry.scale);
       ctx.beginPath();
       ctx.arc(resolved.anchorX, resolved.anchorY, resolved.armLength, Math.min(angle0, angle1), Math.max(angle0, angle1));
       ctx.stroke();
@@ -82,19 +86,31 @@ export function drawStylus(ctx, geometry, state, theme, components, timestamp, o
 
   if (components.needlePoint) {
     const active = !state.needleLifted && Boolean(state.playing || state.scratching);
-    const pulse = active ? 0.75 + Math.sin(timestamp / 62) * 0.2 : 0.4;
+    const pulse = active ? 0.78 + Math.sin(timestamp / 62) * 0.12 : 0.46;
+    const glowRadius = Math.max(4, 7 * geometry.scale);
+    const headRadius = Math.max(1.2, 1.6 * geometry.scale);
     ctx.save();
-    ctx.shadowColor = theme.stylusGlow;
-    ctx.shadowBlur = active ? 16 * geometry.scale : 5 * geometry.scale;
-    ctx.globalAlpha = pulse;
-    ctx.fillStyle = theme.stylus;
+    ctx.globalCompositeOperation = "hard-light";
+    if (active) {
+      const gradient = ctx.createRadialGradient(tipX, tipY, 0, tipX, tipY, glowRadius);
+      gradient.addColorStop(0, theme.stylus);
+      gradient.addColorStop(0.22, theme.stylusGlow);
+      gradient.addColorStop(0.62, `rgba(255,255,255,${0.14 + pulse * 0.12})`);
+      gradient.addColorStop(1, "rgba(255,255,255,0)");
+      ctx.fillStyle = gradient;
+      ctx.beginPath();
+      ctx.arc(tipX, tipY, glowRadius, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = active ? 0.78 + pulse * 0.12 : 0.64;
+    ctx.fillStyle = active ? theme.stylus : theme.tonearm;
     ctx.beginPath();
-    ctx.arc(tipX, tipY, Math.max(2.5, 3.5 * geometry.scale), 0, Math.PI * 2);
+    ctx.arc(tipX, tipY, headRadius, 0, Math.PI * 2);
     ctx.fill();
-    ctx.globalAlpha = 1;
-    ctx.shadowBlur = 0;
     ctx.restore();
   }
 
-  return { ...resolved, tipX, tipY, liftedOffset };
+  const guideAngle0 = Math.atan2(resolved.outerTip.y - resolved.anchorY, resolved.outerTip.x - resolved.anchorX);
+  const guideAngle1 = Math.atan2(resolved.innerTip.y - resolved.anchorY, resolved.innerTip.x - resolved.anchorX);
+  return { ...resolved, tipX, tipY, liftedOffset, guideAngle0, guideAngle1 };
 }

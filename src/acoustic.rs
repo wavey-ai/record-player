@@ -1,3 +1,4 @@
+use js_sys::{Array, Float32Array};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
@@ -26,6 +27,88 @@ const CONTACT_IMPULSE_DECAY: f64 = 0.985;
 const WINDOW_REQUEST_MARGIN_SECONDS: f64 = 0.75;
 const WINDOW_REQUEST_PROJECT_SECONDS: f64 = 0.18;
 const WINDOW_MISS_FADE_SECONDS: f64 = 0.006;
+
+// Needle-surface bed and needle-drop foley (original: player.js 3915–4249).
+const LEAD_IN_STATIC_GAIN: f64 = 0.048;
+const DEADWAX_STATIC_GAIN: f64 = 0.052;
+const NEEDLE_SURFACE_SAMPLE_PAD_SECONDS: f64 = 0.05;
+const SURFACE_BED_ATTACK_SECONDS: f64 = 0.08;
+const SURFACE_BED_RELEASE_SECONDS: f64 = 0.16;
+const SURFACE_ENV_FLOOR: f64 = 0.0001;
+const NEEDLE_DROP_BURST_SECONDS: f64 = 0.34;
+const NEEDLE_DROP_BURST_FILTER_HZ: f64 = 6200.0;
+const NEEDLE_DROP_BURST_FILTER_Q: f64 = 0.5;
+const NEEDLE_DROP_THUMP_GAIN: f64 = 0.045;
+pub const SURFACE_REGION_LEAD_IN: u8 = 0;
+pub const SURFACE_REGION_DEADWAX: u8 = 1;
+
+// RBJ lowpass biquad — matches the Web Audio BiquadFilterNode "lowpass" response.
+#[derive(Clone, Copy, Debug, Default)]
+struct BiquadLowpass {
+    b0: f64,
+    b1: f64,
+    b2: f64,
+    a1: f64,
+    a2: f64,
+    x1: f64,
+    x2: f64,
+    y1: f64,
+    y2: f64,
+}
+
+impl BiquadLowpass {
+    fn new(cutoff_hz: f64, q: f64, sample_rate: f64) -> Self {
+        let w0 = std::f64::consts::TAU * (cutoff_hz / sample_rate).clamp(0.0, 0.5);
+        let alpha = w0.sin() / (2.0 * q.max(1e-4));
+        let cos_w0 = w0.cos();
+        let a0 = 1.0 + alpha;
+        Self {
+            b0: ((1.0 - cos_w0) / 2.0) / a0,
+            b1: (1.0 - cos_w0) / a0,
+            b2: ((1.0 - cos_w0) / 2.0) / a0,
+            a1: (-2.0 * cos_w0) / a0,
+            a2: (1.0 - alpha) / a0,
+            ..Default::default()
+        }
+    }
+
+    fn process(&mut self, x: f64) -> f64 {
+        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2 - self.a1 * self.y1 - self.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = y;
+        y
+    }
+}
+
+// Continuous needle-surface bed for lead-in / deadwax traversal.
+#[derive(Clone, Debug)]
+struct SurfaceBed {
+    position: f64,
+    looping: bool,
+    elapsed_frames: f64,
+    duration_seconds: f64,
+    gain: f64,
+    filters: [BiquadLowpass; 2],
+}
+
+// One-shot stylus thump: sine 130 Hz → exp → 52 Hz over 70 ms, exp gain envelope.
+#[derive(Clone, Copy, Debug)]
+struct NeedleThump {
+    elapsed_seconds: f64,
+    phase: f64,
+    gain: f64,
+}
+
+// One-shot crackle burst from the surface asset as the stylus settles.
+#[derive(Clone, Debug)]
+struct SurfaceBurst {
+    position: f64,
+    elapsed_frames: f64,
+    peak: f64,
+    filters: [BiquadLowpass; 2],
+}
 
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,6 +186,12 @@ pub struct ScratchAcousticDsp {
     frames_since_window_request: usize,
     output: Vec<f32>,
     requested_window_position: Option<f64>,
+    surface_asset: Vec<Vec<f32>>,
+    surface_asset_rate: f64,
+    surface_gain_multiplier: f64,
+    surface_bed: Option<SurfaceBed>,
+    needle_thump: Option<NeedleThump>,
+    needle_burst: Option<SurfaceBurst>,
 }
 
 #[wasm_bindgen]
@@ -121,7 +210,11 @@ impl ScratchAcousticDsp {
         if !config.max_rate.is_finite() || config.max_rate <= 0.0 {
             return Err(JsValue::from_str("maxRate must be positive"));
         }
-        Ok(Self {
+        Ok(Self::new_internal(output_sample_rate, config))
+    }
+
+    fn new_internal(output_sample_rate: f64, config: AcousticConfig) -> Self {
+        Self {
             config,
             output_sample_rate,
             source_sample_rate: 48_000.0,
@@ -154,13 +247,19 @@ impl ScratchAcousticDsp {
             frames_since_window_request: output_sample_rate as usize,
             output: Vec::new(),
             requested_window_position: None,
-        })
+            surface_asset: Vec::new(),
+            surface_asset_rate: 48_000.0,
+            surface_gain_multiplier: 1.0,
+            surface_bed: None,
+            needle_thump: None,
+            needle_burst: None,
+        }
     }
 
     #[wasm_bindgen(js_name = setWindow)]
     pub fn set_window(
         &mut self,
-        channels: JsValue,
+        channels: Array,
         source_sample_rate: f64,
         window_start: u32,
         total_frames: u32,
@@ -169,20 +268,28 @@ impl ScratchAcousticDsp {
         if !source_sample_rate.is_finite() || source_sample_rate <= 0.0 {
             return Err(JsValue::from_str("sourceSampleRate must be positive"));
         }
-        let channels: Vec<Vec<f32>> = serde_wasm_bindgen::from_value(channels)
-            .map_err(|error| JsValue::from_str(&error.to_string()))?;
-        if channels.is_empty() || channels[0].is_empty() {
+        let mut copied_channels = Vec::with_capacity(channels.length() as usize);
+        for value in channels.iter() {
+            if !value.is_instance_of::<Float32Array>() {
+                return Err(JsValue::from_str("source channels must be Float32Array values"));
+            }
+            let typed = Float32Array::new(&value);
+            let mut samples = vec![0.0_f32; typed.length() as usize];
+            typed.copy_to(&mut samples);
+            copied_channels.push(samples);
+        }
+        if copied_channels.is_empty() || copied_channels[0].is_empty() {
             return Err(JsValue::from_str("at least one non-empty source channel is required"));
         }
-        let length = channels[0].len();
-        if channels.iter().any(|channel| channel.len() != length) {
+        let length = copied_channels[0].len();
+        if copied_channels.iter().any(|channel| channel.len() != length) {
             return Err(JsValue::from_str("source channels must have equal lengths"));
         }
         self.source_sample_rate = source_sample_rate;
         self.window_start = window_start as usize;
         self.window_end = self.window_start.saturating_add(length);
         self.total_frames = (total_frames as usize).max(self.window_end);
-        self.channels = channels;
+        self.channels = copied_channels;
         if let Some(position) = reset_position {
             self.reset_position(position);
         }
@@ -204,7 +311,9 @@ impl ScratchAcousticDsp {
         self.grip = 0.0;
         self.motor_delivered_rate = 0.0;
         self.hand_contact = true;
-        self.position = self.clamp_source_position(self.position.max(self.target_position));
+        // Original: `this.position || this.targetPosition || 0` — first non-zero wins.
+        let seed_position = if self.position != 0.0 { self.position } else { self.target_position };
+        self.position = self.clamp_source_position(seed_position);
         self.target_position = self.position;
         self.rate = 0.0;
         self.rate_velocity = 0.0;
@@ -294,6 +403,7 @@ impl ScratchAcousticDsp {
             return;
         }
         if !self.active || self.channels.is_empty() || self.total_frames <= 1 {
+            self.mix_foley(frame_count, output_channel_count);
             return;
         }
         self.drag_lowpass_state.resize(output_channel_count, 0.0);
@@ -380,7 +490,13 @@ impl ScratchAcousticDsp {
                     continue;
                 }
                 let source_index = channel_index.min(self.channels.len() - 1);
-                let detail = self.sample_channel(source_index, self.position);
+                // Original: a stationary stylus (movementGain 0) never reads the window and
+                // never flags a window miss — the sample is a plain 0 through the drag filter.
+                let detail = if movement_gain > 0.0 {
+                    self.sample_channel(source_index, self.position)
+                } else {
+                    Some((0.0, 0.0, 0.0))
+                };
                 let (music, source_texture) = match detail {
                     None => {
                         missed_window = true;
@@ -418,6 +534,7 @@ impl ScratchAcousticDsp {
                 0
             };
         }
+        self.mix_foley(frame_count, output_channel_count);
         self.maybe_request_window(frame_count);
     }
 
@@ -436,6 +553,7 @@ impl ScratchAcousticDsp {
             }
             self.window_miss_frames = self.window_miss_frames.saturating_add(1);
         }
+        self.mix_foley(frame_count, output_channel_count);
     }
 
     #[wasm_bindgen(getter, js_name = outputPtr)]
@@ -469,9 +587,245 @@ impl ScratchAcousticDsp {
         self.ended = false;
         ended
     }
+
+    /// Decoded needle-surface asset PCM (original `assets/audio/needle-surface.opus`),
+    /// provided by the host off the real-time thread.
+    #[wasm_bindgen(js_name = setSurfaceAsset)]
+    pub fn set_surface_asset(&mut self, channels: Array, sample_rate: f64) -> Result<(), JsValue> {
+        if !sample_rate.is_finite() || sample_rate <= 0.0 {
+            return Err(JsValue::from_str("surface asset sampleRate must be positive"));
+        }
+        let mut copied = Vec::with_capacity(channels.length() as usize);
+        for value in channels.iter() {
+            if !value.is_instance_of::<Float32Array>() {
+                return Err(JsValue::from_str("surface asset channels must be Float32Array values"));
+            }
+            let typed = Float32Array::new(&value);
+            let mut samples = vec![0.0_f32; typed.length() as usize];
+            typed.copy_to(&mut samples);
+            copied.push(samples);
+        }
+        if copied.is_empty() || copied[0].is_empty() {
+            return Err(JsValue::from_str("surface asset requires at least one non-empty channel"));
+        }
+        self.surface_asset = copied;
+        self.surface_asset_rate = sample_rate;
+        Ok(())
+    }
+
+    /// Mobile speaker compensation (original `resolveNeedleSurfaceGain`: ×2.25 on mobile).
+    #[wasm_bindgen(js_name = setSurfaceGainMultiplier)]
+    pub fn set_surface_gain_multiplier(&mut self, multiplier: f64) {
+        self.surface_gain_multiplier = if multiplier.is_finite() && multiplier > 0.0 { multiplier } else { 1.0 };
+    }
+
+    /// Start the lead-in (region 0) or deadwax (region 1) surface bed.
+    #[wasm_bindgen(js_name = startSurfaceRegion)]
+    pub fn start_surface_region(&mut self, region: u8, duration_seconds: f64) {
+        if !(duration_seconds > 0.0) || self.needle_lifted {
+            return;
+        }
+        let (gain, filter_hz, filter_q) = if region == SURFACE_REGION_DEADWAX {
+            (DEADWAX_STATIC_GAIN, 4600.0, 0.4)
+        } else {
+            (LEAD_IN_STATIC_GAIN, 5200.0, 0.45)
+        };
+        let (offset, looping) = self.select_surface_sample(duration_seconds);
+        let filter = BiquadLowpass::new(filter_hz, filter_q, self.output_sample_rate);
+        self.surface_bed = Some(SurfaceBed {
+            position: offset * self.surface_asset_rate,
+            looping,
+            elapsed_frames: 0.0,
+            duration_seconds,
+            gain: gain * self.surface_gain_multiplier,
+            filters: [filter, filter],
+        });
+    }
+
+    #[wasm_bindgen(js_name = stopSurfaceRegion)]
+    pub fn stop_surface_region(&mut self) {
+        self.surface_bed = None;
+    }
+
+    /// One-shot needle-drop foley: stylus thump plus a settling crackle burst.
+    #[wasm_bindgen(js_name = triggerNeedleDrop)]
+    pub fn trigger_needle_drop(&mut self) {
+        if self.needle_lifted {
+            return;
+        }
+        self.needle_thump = Some(NeedleThump {
+            elapsed_seconds: 0.0,
+            phase: 0.0,
+            gain: NEEDLE_DROP_THUMP_GAIN * self.surface_gain_multiplier,
+        });
+        let (offset, _) = self.select_surface_sample(NEEDLE_DROP_BURST_SECONDS);
+        let filter = BiquadLowpass::new(
+            NEEDLE_DROP_BURST_FILTER_HZ,
+            NEEDLE_DROP_BURST_FILTER_Q,
+            self.output_sample_rate,
+        );
+        self.needle_burst = Some(SurfaceBurst {
+            position: offset * self.surface_asset_rate,
+            elapsed_frames: 0.0,
+            peak: LEAD_IN_STATIC_GAIN * 1.9 * self.surface_gain_multiplier,
+            filters: [filter, filter],
+        });
+    }
 }
 
 impl ScratchAcousticDsp {
+    // Original `selectNeedleSurfaceSample`: pad 0.05 s, loop when the asset is shorter
+    // than the requested duration + pad, random offset within the remaining span.
+    // Divergence noted in the audit: uses the DSP LCG instead of Math.random().
+    fn select_surface_sample(&mut self, duration_seconds: f64) -> (f64, bool) {
+        if self.surface_asset.is_empty() {
+            // Synthetic fallback (original: "needle surface asset unavailable;
+            // synthesizing groove noise") — noise has no meaningful offset.
+            return (0.0, true);
+        }
+        let buffer_duration = self.surface_asset[0].len() as f64 / self.surface_asset_rate;
+        let requested = duration_seconds.max(0.0);
+        let looping = buffer_duration <= requested + NEEDLE_SURFACE_SAMPLE_PAD_SECONDS;
+        let max_offset = if looping {
+            (buffer_duration - NEEDLE_SURFACE_SAMPLE_PAD_SECONDS).max(0.0)
+        } else {
+            (buffer_duration - requested - NEEDLE_SURFACE_SAMPLE_PAD_SECONDS).max(0.0)
+        };
+        let random01 = (self.next_noise() + 1.0) * 0.5;
+        (if max_offset > 0.0 { random01 * max_offset } else { 0.0 }, looping)
+    }
+
+    fn surface_asset_sample(&self, channel_index: usize, position: f64, looping: bool) -> f64 {
+        let channel = &self.surface_asset[channel_index.min(self.surface_asset.len() - 1)];
+        let len = channel.len();
+        if len == 0 {
+            return 0.0;
+        }
+        let mut index = position.floor() as i64;
+        if looping {
+            index = index.rem_euclid(len as i64);
+        } else if index < 0 || index >= len as i64 {
+            return 0.0;
+        }
+        channel[index as usize] as f64
+    }
+
+    // Original bed gain automation: setValue(0.0001) → linearRamp(gain, +80 ms) →
+    // hold → linearRamp(0.0001) over the final 160 ms.
+    fn surface_bed_envelope(elapsed_seconds: f64, duration_seconds: f64, gain: f64) -> f64 {
+        let fade_start = (duration_seconds - SURFACE_BED_RELEASE_SECONDS).max(SURFACE_BED_ATTACK_SECONDS);
+        if elapsed_seconds < SURFACE_BED_ATTACK_SECONDS {
+            SURFACE_ENV_FLOOR + (gain - SURFACE_ENV_FLOOR) * (elapsed_seconds / SURFACE_BED_ATTACK_SECONDS)
+        } else if elapsed_seconds < fade_start {
+            gain
+        } else if elapsed_seconds < duration_seconds {
+            let t = (elapsed_seconds - fade_start) / (duration_seconds - fade_start).max(1e-9);
+            gain + (SURFACE_ENV_FLOOR - gain) * t
+        } else {
+            0.0
+        }
+    }
+
+    // Original burst automation: 0.0001 → peak @14 ms → peak×0.32 @120 ms → 0.0001 @340 ms.
+    fn burst_envelope(elapsed_seconds: f64, peak: f64) -> f64 {
+        if elapsed_seconds < 0.014 {
+            SURFACE_ENV_FLOOR + (peak - SURFACE_ENV_FLOOR) * (elapsed_seconds / 0.014)
+        } else if elapsed_seconds < 0.12 {
+            let t = (elapsed_seconds - 0.014) / (0.12 - 0.014);
+            peak + (peak * 0.32 - peak) * t
+        } else if elapsed_seconds < NEEDLE_DROP_BURST_SECONDS {
+            let t = (elapsed_seconds - 0.12) / (NEEDLE_DROP_BURST_SECONDS - 0.12);
+            (peak * 0.32) + (SURFACE_ENV_FLOOR - peak * 0.32) * t
+        } else {
+            0.0
+        }
+    }
+
+    // Original thump: sine 130 Hz exponentialRamp→ 52 Hz @70 ms; gain 0.0001
+    // exponentialRamp→ gain @6 ms exponentialRamp→ 0.0001 @95 ms; stops at 100 ms.
+    fn thump_value(thump: &mut NeedleThump, dt: f64) -> Option<f64> {
+        let t = thump.elapsed_seconds;
+        if t >= 0.1 {
+            return None;
+        }
+        let frequency = if t < 0.07 {
+            130.0 * (52.0_f64 / 130.0).powf(t / 0.07)
+        } else {
+            52.0
+        };
+        let envelope = if t < 0.006 {
+            SURFACE_ENV_FLOOR * (thump.gain / SURFACE_ENV_FLOOR).powf(t / 0.006)
+        } else if t < 0.095 {
+            thump.gain * (SURFACE_ENV_FLOOR / thump.gain).powf((t - 0.006) / (0.095 - 0.006))
+        } else {
+            SURFACE_ENV_FLOOR
+        };
+        let value = (thump.phase * std::f64::consts::TAU).sin() * envelope;
+        thump.phase += frequency * dt;
+        thump.elapsed_seconds += dt;
+        Some(value)
+    }
+
+    // Mixes the surface bed, thump, and burst into the interleaved output buffer.
+    // These run regardless of transport state — the original routed them as
+    // independent WebAudio nodes into the same output mix.
+    fn mix_foley(&mut self, frame_count: usize, output_channel_count: usize) {
+        if self.surface_bed.is_none() && self.needle_thump.is_none() && self.needle_burst.is_none() {
+            return;
+        }
+        let dt = 1.0 / self.output_sample_rate;
+        let asset_step = self.surface_asset_rate / self.output_sample_rate;
+        for frame in 0..frame_count {
+            let mut per_channel = [0.0_f64; 2];
+            if let Some(bed) = self.surface_bed.clone() {
+                let elapsed_seconds = bed.elapsed_frames * dt;
+                if elapsed_seconds >= bed.duration_seconds + 0.02 {
+                    self.surface_bed = None;
+                } else {
+                    let envelope = Self::surface_bed_envelope(elapsed_seconds, bed.duration_seconds, bed.gain);
+                    for channel_index in 0..output_channel_count.min(2) {
+                        let raw = self.surface_asset_sample(channel_index, bed.position, bed.looping);
+                        let bed = self.surface_bed.as_mut().unwrap();
+                        per_channel[channel_index] += bed.filters[channel_index].process(raw) * envelope;
+                    }
+                    let bed = self.surface_bed.as_mut().unwrap();
+                    bed.position += asset_step;
+                    bed.elapsed_frames += 1.0;
+                }
+            }
+            if let Some(mut thump) = self.needle_thump.take() {
+                if let Some(value) = Self::thump_value(&mut thump, dt) {
+                    for channel_value in per_channel.iter_mut().take(output_channel_count.min(2)) {
+                        *channel_value += value;
+                    }
+                    self.needle_thump = Some(thump);
+                }
+            }
+            if let Some(burst) = self.needle_burst.clone() {
+                let elapsed_seconds = burst.elapsed_frames * dt;
+                if elapsed_seconds >= NEEDLE_DROP_BURST_SECONDS + 0.02 {
+                    self.needle_burst = None;
+                } else {
+                    let envelope = Self::burst_envelope(elapsed_seconds, burst.peak);
+                    for channel_index in 0..output_channel_count.min(2) {
+                        let raw = self.surface_asset_sample(channel_index, burst.position, false);
+                        let burst = self.needle_burst.as_mut().unwrap();
+                        per_channel[channel_index] += burst.filters[channel_index].process(raw) * envelope;
+                    }
+                    let burst = self.needle_burst.as_mut().unwrap();
+                    burst.position += asset_step;
+                    burst.elapsed_frames += 1.0;
+                }
+            }
+            for channel_index in 0..output_channel_count.min(2) {
+                let output_index = frame * output_channel_count + channel_index;
+                if let Some(slot) = self.output.get_mut(output_index) {
+                    *slot = (*slot as f64 + per_channel[channel_index]).clamp(-1.0, 1.0) as f32;
+                }
+            }
+        }
+    }
+
     fn reset_position(&mut self, position: f64) {
         self.position = self.clamp_source_position(position);
         self.target_position = self.position;
@@ -679,6 +1033,58 @@ fn compute_source_texture_gain(abs_rate: f64, rate_delta: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn simulation_dsp() -> ScratchAcousticDsp {
+        let mut dsp = ScratchAcousticDsp::new_internal(48_000.0, AcousticConfig::default());
+        dsp.source_sample_rate = 48_000.0;
+        dsp.channels = vec![vec![0.0_f32; 4_800_000]];
+        dsp.window_start = 0;
+        dsp.window_end = 4_800_000;
+        dsp.total_frames = 4_800_000;
+        dsp
+    }
+
+    // Mirrors the worklet's exact message sequence for a canvas scratch:
+    // play (motor 1×), settle, hand grab, drag backwards at −1× with motion
+    // updates every 16 ms. The rendered groove must follow the hand.
+    #[test]
+    fn hand_drag_backwards_overrides_the_motor() {
+        let mut dsp = simulation_dsp();
+        dsp.start();
+        dsp.set_position(2_400_000.0, 0.0);
+        dsp.set_transport(false, 1.0, 0.0);
+        for _ in 0..375 {
+            dsp.render(128, 2); // 1 s: motor reaches nominal speed
+        }
+        assert!(dsp.last_effective_rate > 0.9, "motor should be at speed, got {}", dsp.last_effective_rate);
+        let grab_position = dsp.position;
+        dsp.set_transport(true, 1.0, 0.0);
+        let mut hand_position = grab_position;
+        let mut min_rate = f64::MAX;
+        for step in 0..60 {
+            hand_position -= 768.0; // −1× for 16 ms
+            dsp.set_transport(true, 1.0, -1.0);
+            dsp.set_motion(hand_position, -1.0, 0.0);
+            for _ in 0..6 {
+                dsp.render(128, 2);
+            }
+            if step >= 30 {
+                min_rate = min_rate.min(dsp.last_effective_rate);
+            }
+        }
+        assert!(
+            dsp.last_effective_rate < -0.7,
+            "hand should own the record after ~1 s of dragging, got rate {}",
+            dsp.last_effective_rate
+        );
+        assert!(
+            dsp.position < grab_position,
+            "groove should have moved backwards: grab {} now {}",
+            grab_position,
+            dsp.position
+        );
+        let _ = min_rate;
+    }
 
     #[test]
     fn movement_gain_is_silent_in_deadzone() {
@@ -1186,7 +1592,7 @@ fn map_physical_playback_rate(playback_rate: f64, config: ScratchConfig) -> f64 
 }
 
 #[cfg(test)]
-mod tests {
+mod scratch_tests {
     use super::*;
     use approx::assert_abs_diff_eq;
 

@@ -236,7 +236,7 @@ player.canvas.setComponentVisible("needlePoint", true);
 
 The physical sync dots continuously rotate. Inside the lamp beam, the renderer draws the calibrated stroboscopic sample so the matching pitch row appears stationary while the same dots continue moving elsewhere.
 
-Dragging the record scratches. Dragging the needle point seeks along the visible groove path. Radial PITCH, CH, XFADE and POSITION controls call the same player methods as non-canvas controls.
+Dragging the record scratches. Dragging either the subtle stylus point or its dotted travel arc seeks through the record. Radial PITCH, CH and XFADE controls call the same player methods as non-canvas controls; pitch also has a dedicated RESET button for the 0% detent.
 
 ## WASM crate boundary
 
@@ -256,3 +256,30 @@ The workspace contains two browser-facing Rust crates:
 - `player-wasm`: the player-only record reader and ECDC decoder loaded by the decoder worker.
 
 `player-wasm` deliberately exports only the functions used by `app/src/record-decoder-worker.js`. It does not expose record authoring, rendering, sidecar inspection, cache encryption, remote-scratch identity or wallet helpers. Its generated browser package is `app/dist/wasm/player-wasm/player_wasm.js`.
+
+## Progressive startup
+
+Record decoding begins playback-capable windowing after the first completed PCM segment. `loadRecord()` still resolves after the full decode and cache write, but subscribers may observe `loaded: true` and start playback earlier while the remainder continues decoding.
+
+
+## Transport motor
+
+The platter motor is independent from programme audio and the needle.
+
+```js
+await player.startTransport();
+await player.stopTransport();
+await player.toggleTransport();
+```
+
+`START - STOP` uses this motor API. With the needle raised, the record and strobe continue to rotate silently. Lowering the needle while the motor is running starts audio as soon as at least one decoded PCM chunk is available.
+
+## Logging
+
+```js
+vin.yl.player.setLogging(true);
+vin.yl.player.setLogging(false);
+vin.yl.player.loggingEnabled;
+```
+
+Logging is shared across the host, core worker, decoder worker, and AudioWorklet. The URL parameter `player_log=0` disables it globally at startup; `player_log=1` enables it.

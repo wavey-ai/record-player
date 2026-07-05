@@ -1,7 +1,24 @@
+import { createLogger, setPlayerLoggingEnabled, isPlayerLoggingEnabled, setPlayerLogLevel, getPlayerLogLevel, setPlayerTelemetryInterval } from "./player-message-logger.js";
 import { createVinylPlayerCanvas } from "./player-canvas.js";
 import { RecordDecoderClient } from "./record-decoder-client.js";
-import { readPcmCache, recordCacheKey, writePcmCache } from "./pcm-cache.js";
+import { recordCacheKey } from "./pcm-cache.js";
 import { clearScratchPerformances, deleteScratchPerformance, getScratchPerformance, listScratchPerformances, saveScratchPerformance } from "./scratch-performance-store.js";
+
+const log = createLogger("host");
+const initialLoggingParam = new URLSearchParams(globalThis.location?.search || "").get("player_log");
+if (initialLoggingParam === "0") setPlayerLoggingEnabled(false);
+if (initialLoggingParam === "1") setPlayerLoggingEnabled(true);
+
+// Original player-environment-config.js mobile detection, reproduced exactly:
+// UA sniff plus iPadOS-style MacIntel-with-touch WebKit.
+const IS_IOS_WEBKIT =
+  /iP(ad|hone|od)/i.test(navigator.userAgent || "") ||
+  ((navigator.platform || "") === "MacIntel" && (navigator.maxTouchPoints || 0) > 1);
+const IS_MOBILE_DEVICE = /Mobi|Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || "") || IS_IOS_WEBKIT;
+// Original resolveNeedleSurfaceGain: surface foley is 2.25× louder on mobile speakers.
+const MOBILE_SURFACE_GAIN_MULTIPLIER = 2.25;
+// Original profile_turns(): lead-in and deadwax both traverse 2 revolutions.
+const DEADWAX_TURNS = 2;
 
 const elements = {
   file: document.querySelector("#file"),
@@ -45,6 +62,8 @@ const state = {
   rotation: 0,
   rpm: 33.3333333333,
   lastReportedPosition: 0,
+  lastCoreObservedPositionFrames: -1,
+  lastCoreObservedAtMs: 0,
   decoder: null,
   recordObjectUrl: "",
   streamInitialised: false,
@@ -55,11 +74,6 @@ const state = {
   seekTimer: 0,
   seekInFlight: false,
   queuedSeekSeconds: null,
-  pcmWindowWorker: null,
-  pcmWindowRequestId: 0,
-  pcmWindowPending: new Map(),
-  sharedWindowBanks: [],
-  sharedWindowFrames: 0,
   gainNode: null,
   packetGain: 1,
   mixerGain: 1,
@@ -72,12 +86,39 @@ const state = {
   scratchReplayRequests: new Map(),
   scratchReplayId: 0,
   activeScratchRecorder: null,
-  canvasController: null
+  canvasController: null,
+  streamInitialised: false,
+  streamReady: false,
+  streamDecodedFrames: 0,
+  streamAppendChain: Promise.resolve(),
+  decodeProgressText: "",
+  regionTimer: 0,
+  needleAutoBehaviorEnabled: true
 };
 
 function setStatus(message) {
+  log.state("status", { message });
   elements.status.value = message;
   elements.status.textContent = message;
+}
+
+
+function formatDecodeProgress(progress) {
+  const message = String(progress?.msg || progress?.message || progress?.status || "Decoding groove audio").trim();
+  const percent = Number(progress?.progressPercent);
+  const processed = Number(progress?.processedSeconds);
+  const duration = Number(progress?.duration);
+  const details = [];
+  if (Number.isFinite(percent)) details.push(`${Math.max(0, Math.min(100, Math.round(percent)))}%`);
+  if (Number.isFinite(processed) && Number.isFinite(duration) && duration > 0) {
+    details.push(`${processed.toFixed(1)}/${duration.toFixed(1)}s`);
+  }
+  return details.length ? `${message} · ${details.join(" · ")}` : message;
+}
+
+function renderDecodeStatus() {
+  if (!state.decodeProgressText) return;
+  setStatus(state.streamReady ? `Ready · ${state.decodeProgressText}` : state.decodeProgressText);
 }
 
 function profileRpm(recordProfile) {
@@ -98,91 +139,74 @@ async function setRpm(rpm) {
   await dispatch({ type: "set_playback_rate", deck: "a", rate });
 }
 
-async function ensurePcmWindowWorker() {
-  if (state.pcmWindowWorker) return;
-  state.pcmWindowWorker = new Worker("./pcm-window-worker.js", { type: "module" });
-  state.pcmWindowWorker.onmessage = event => {
-    const message = event.data || {};
-    if (message.type === "window-ready") {
-      state.node.port.postMessage({ type: "shared-window-ready", ...message });
-      const pending = state.pcmWindowPending.get(message.requestId);
-      if (pending) {
-        state.pcmWindowPending.delete(message.requestId);
-        pending.resolve(message);
-      }
-    }
-  };
-}
-
-function createSharedWindowBanks(channelCount, windowFrames) {
-  return Array.from({ length: 2 }, () =>
-    Array.from({ length: channelCount }, () =>
-      new SharedArrayBuffer(windowFrames * Float32Array.BYTES_PER_ELEMENT)
-    )
-  );
-}
-
-function requestPcmWindow(position, resetPosition = false) {
-  if (!state.pcmWindowWorker) return Promise.resolve(null);
-  const requestId = ++state.pcmWindowRequestId;
-  const promise = new Promise((resolve, reject) => {
-    state.pcmWindowPending.set(requestId, { resolve, reject });
-  });
-  state.pcmWindowWorker.postMessage({ type: "request-window", position, resetPosition, requestId });
-  return promise;
-}
-
-async function loadWindowedPcm({ sampleRate, audioLength, s16ChannelBuffers }) {
-  await ensurePcmWindowWorker();
-  const sourceBuffers = Array.isArray(s16ChannelBuffers) ? s16ChannelBuffers : [];
-  if (!sourceBuffers.length) throw new Error("Record contains no PCM channels");
-  const channelCount = Math.max(2, Math.min(2, sourceBuffers.length));
+async function initialiseProgressiveStream({ sampleRate, audioLength, channels }) {
+  if (state.streamInitialised) return;
+  const channelCount = Math.max(1, Math.min(2, Number(channels) || 2));
   state.sampleRate = Math.max(1, Number(sampleRate) || 48000);
   state.duration = Math.max(1, Number(audioLength) || 1) / state.sampleRate;
   state.positionFrames = 0;
   state.lastReportedPosition = 0;
-  state.sharedWindowFrames = Math.max(16384, Math.round(state.sampleRate * 12));
-  state.sharedWindowBanks = createSharedWindowBanks(channelCount, state.sharedWindowFrames);
+  state.streamDecodedFrames = 0;
+  log.send("worklet:stream-init", { sampleRate: state.sampleRate, audioLength: Math.max(1, Number(audioLength) || 1), channels: channelCount });
   state.node.port.postMessage({
-    type: "shared-window-init",
+    type: "stream-init",
     sampleRate: state.sampleRate,
-    totalFrames: Math.max(1, Number(audioLength) || 1),
-    windowFrames: state.sharedWindowFrames,
-    bankBuffers: state.sharedWindowBanks
+    audioLength: Math.max(1, Number(audioLength) || 1),
+    channels: channelCount
   });
-  const transfers = sourceBuffers.slice(0, channelCount);
-  const requestId = ++state.pcmWindowRequestId;
-  const ready = new Promise((resolve, reject) => {
-    state.pcmWindowPending.set(requestId, { resolve, reject });
-  });
-  state.pcmWindowWorker.postMessage({
-    type: "init",
-    sampleRate: state.sampleRate,
-    totalFrames: Math.max(1, Number(audioLength) || 1),
-    channelCount,
-    chunkFrames: state.sampleRate,
-    windowFrames: state.sharedWindowFrames,
-    bankBuffers: state.sharedWindowBanks,
-    channelBuffers: transfers,
-    requestId
-  }, transfers);
-  await ready;
+  state.streamInitialised = true;
 }
 
-async function loadCachedPcm(cached) {
-  await loadWindowedPcm({
-    sampleRate: cached.sampleRate,
-    audioLength: cached.audioLength,
-    s16ChannelBuffers: Array.isArray(cached.s16ChannelBuffers)
-      ? cached.s16ChannelBuffers.map(buffer => buffer.slice(0))
-      : []
+async function appendProgressiveSegments(segments) {
+  if (!Array.isArray(segments) || !segments.length) return;
+  const first = segments[0] || {};
+  await initialiseProgressiveStream({
+    sampleRate: first.sampleRate,
+    audioLength: first.audioLength,
+    channels: first.channels
   });
+  for (const segment of segments) {
+    const channelBuffers = Array.isArray(segment.channelBuffers) ? segment.channelBuffers : [];
+    if (!channelBuffers.length) continue;
+    const startFrame = Math.max(0, Math.floor(Number(segment.startFrame ?? segment.offset ?? 0) || 0));
+    const inferredFrames = new Int16Array(channelBuffers[0]).length;
+    const endFrame = Math.max(startFrame, Math.floor(Number(segment.endFrame) || (startFrame + inferredFrames)));
+    log.send("worklet:append-pcm", { startFrame, endFrame, channels: channelBuffers.length, bytes: channelBuffers.reduce((sum, buffer) => sum + (buffer?.byteLength || 0), 0) });
+    state.node.port.postMessage({
+      type: "append-pcm",
+      startFrame,
+      endFrame,
+      channelBuffers
+    }, channelBuffers);
+    state.streamDecodedFrames = Math.max(state.streamDecodedFrames, endFrame);
+    if (!state.streamReady && endFrame > startFrame) {
+      state.streamReady = true;
+      await markLoadedReady();
+      renderDecodeStatus();
+    }
+  }
+}
+
+async function loadDecodedPcm({ sampleRate, audioLength, s16ChannelBuffers }) {
+  const sourceBuffers = Array.isArray(s16ChannelBuffers) ? s16ChannelBuffers : [];
+  if (!sourceBuffers.length) throw new Error("Record contains no PCM channels");
+  await initialiseProgressiveStream({
+    sampleRate,
+    audioLength,
+    channels: sourceBuffers.length
+  });
+  const endFrame = Math.max(1, Number(audioLength) || new Int16Array(sourceBuffers[0]).length);
+  state.node.port.postMessage({
+    type: "append-pcm",
+    startFrame: 0,
+    endFrame,
+    channelBuffers: sourceBuffers
+  }, sourceBuffers);
+  state.streamDecodedFrames = endFrame;
 }
 
 async function markLoadedReady() {
   await dispatch({ type: "set_load_state", deck: "a", status: "ready", loaded: true, duration_seconds: state.duration });
-  await dispatch({ type: "set_needle", deck: "a", lifted: false, observed_playback_seconds: 0 });
-  state.node.port.postMessage({ type: "needle", lifted: false });
   elements.play.disabled = false;
   elements.needle.disabled = false;
   elements.seek.disabled = false;
@@ -190,9 +214,16 @@ async function markLoadedReady() {
 
 async function flushQueuedSeek() {
   if (state.seekInFlight || state.queuedSeekSeconds == null) return;
-  const seconds = state.queuedSeekSeconds;
+  let seconds = state.queuedSeekSeconds;
   state.queuedSeekSeconds = null;
   state.seekInFlight = true;
+  // Original seekPlaybackToRatio: cueing a spinning record by eye lands
+  // 50–140 ms early (DJs aim ahead of the beat) and plays the needle-drop
+  // foley while the stylus settles.
+  if (deckView()?.playing) {
+    seconds = Math.max(0, seconds - (0.05 + Math.random() * 0.09));
+    state.node?.port.postMessage({ type: "needle-drop" });
+  }
   try {
     await dispatch({ type: "seek", deck: "a", seconds });
   } finally {
@@ -212,16 +243,28 @@ function queueSeek(seconds) {
 function coreRequest(type, payload = {}) {
   return new Promise((resolve, reject) => {
     const id = ++state.requestId;
-    state.pending.set(id, { resolve, reject });
+    state.pending.set(id, { resolve, reject, type, startedAt: performance.now() });
+    log.send(`core:${type}`, { id, payload });
     state.worker.postMessage({ id, type, payload });
   });
 }
 
 async function dispatch(event) {
+  log.action(`dispatch:${event?.type || "unknown"}`, event);
   const result = await coreRequest("dispatch", { event });
   state.view = result.view;
   for (const command of result.commands) executeCommand(command);
   render();
+  await maybeAutoLowerNeedle();
+}
+
+async function maybeAutoLowerNeedle() {
+  if (!state.needleAutoBehaviorEnabled) return;
+  const view = deckView();
+  if (!view || !view.transport_on || !view.loaded || !view.needle_lifted) return;
+  await dispatch({ type: "set_needle", deck: "a", lifted: false, observed_playback_seconds: framesToSeconds(state.positionFrames) });
+  state.node?.port.postMessage({ type: "needle", lifted: false });
+  state.node?.port.postMessage({ type: "needle-drop" });
 }
 
 function deckView() {
@@ -237,7 +280,8 @@ function framesToSeconds(frames) {
 }
 
 function executeCommand(command) {
-  if (!state.node) return;
+  log.action(`command:${command?.type || "unknown"}`, command);
+  if (!state.node) { log.warn("command-without-worklet", command); return; }
   if (command.type === "set_motor") {
     state.node.port.postMessage({ type: "transport", running: command.running });
   } else if (command.type === "start_packet_playback") {
@@ -258,6 +302,16 @@ function executeCommand(command) {
   } else if (command.type === "set_mixer_track_gain" && Number(command.track) === 0) {
     state.mixerGain = Math.max(0, Number(command.gain) || 0);
     updateOutputGain(command.ramp_ms);
+  } else if (command.type === "start_surface_region") {
+    const durationSeconds = Math.max(0, Number(command.duration_seconds) || 0);
+    state.node.port.postMessage({ type: "surface-region", action: "start", region: command.region, durationSeconds });
+    clearTimeout(state.regionTimer);
+    state.regionTimer = setTimeout(() => {
+      void dispatch({ type: "timed_region_elapsed", region: command.region });
+    }, durationSeconds * 1000);
+  } else if (command.type === "stop_surface_region") {
+    clearTimeout(state.regionTimer);
+    state.node.port.postMessage({ type: "surface-region", action: "stop", region: command.region });
   }
 }
 
@@ -265,7 +319,6 @@ function seekWorklet(position) {
   const generation = ++state.pendingSeekGeneration;
   state.positionFrames = position;
   state.node.port.postMessage({ type: "seek", position, generation });
-  void requestPcmWindow(position, true);
 }
 
 async function initialiseAudio() {
@@ -279,13 +332,41 @@ async function initialiseAudio() {
     numberOfInputs: 0,
     numberOfOutputs: 1,
     outputChannelCount: [2],
-    processorOptions: { wasmModule: recordPlayerWasmModule }
+    processorOptions: { wasmModule: recordPlayerWasmModule, loggingEnabled: isPlayerLoggingEnabled() }
   });
   state.gainNode = state.context.createGain();
   state.gainNode.gain.value = 1;
   state.node.connect(state.gainNode);
   state.gainNode.connect(state.context.destination);
-  state.node.port.onmessage = handleWorkletMessage;
+  state.node.port.onmessage = event => {
+    log.receive(`worklet:${event.data?.type || "message"}`, event.data);
+    handleWorkletMessage(event);
+  };
+  if (IS_MOBILE_DEVICE) {
+    state.node.port.postMessage({ type: "surface-gain", multiplier: MOBILE_SURFACE_GAIN_MULTIPLIER });
+  }
+  void loadNeedleSurfaceAsset();
+}
+
+// Decode the original needle-surface recording off the real-time thread and hand
+// its PCM to the Rust DSP. On failure the DSP's synthetic groove noise remains the
+// fallback, mirroring the original's warning path.
+async function loadNeedleSurfaceAsset() {
+  try {
+    const response = await fetch("./assets/audio/needle-surface.opus", { cache: "force-cache" });
+    if (!response.ok) throw new Error(`Needle surface audio asset failed: ${response.status} ${response.statusText}`);
+    const audioBuffer = await state.context.decodeAudioData(await response.arrayBuffer());
+    if (!(audioBuffer?.duration > 0)) throw new Error("Needle surface audio asset decoded empty.");
+    const channels = [];
+    for (let index = 0; index < Math.min(2, audioBuffer.numberOfChannels); index += 1) {
+      channels.push(audioBuffer.getChannelData(index).slice().buffer);
+    }
+    state.node.port.postMessage({ type: "surface-asset", sampleRate: audioBuffer.sampleRate, channels }, channels);
+    log.action("needle-surface-asset-loaded", { sampleRate: audioBuffer.sampleRate, frames: audioBuffer.length });
+  } catch (error) {
+    log.warn("needle-surface-asset-unavailable", { message: error instanceof Error ? error.message : String(error) });
+    console.warn("[vin.yl.player] needle surface asset unavailable; synthesizing groove noise", error);
+  }
 }
 
 function handleWorkletMessage(event) {
@@ -303,17 +384,42 @@ function handleWorkletMessage(event) {
     }
     const view = deckView();
     if (view && !message.scratching) {
-      void dispatch({ type: "playback_position_observed", deck: "a", seconds: framesToSeconds(message.position) });
+      const now = performance.now();
+      const deltaFrames = Math.abs(message.position - state.lastCoreObservedPositionFrames);
+      const minimumDeltaFrames = Math.max(1, Math.round(state.sampleRate * 0.05));
+      if (now - state.lastCoreObservedAtMs >= 250 && deltaFrames >= minimumDeltaFrames) {
+        state.lastCoreObservedAtMs = now;
+        state.lastCoreObservedPositionFrames = message.position;
+        void dispatch({ type: "playback_position_observed", deck: "a", seconds: framesToSeconds(message.position) });
+      }
     }
     publishState();
   } else if (message.type === "seeked") {
     state.acknowledgedSeekGeneration = Math.max(state.acknowledgedSeekGeneration, message.generation ?? 0);
     state.positionFrames = message.position;
-  } else if (message.type === "window-request") {
-    void requestPcmWindow(message.position, false);
+  } else if (message.type === "buffering") {
+    setStatus("Buffering decoded groove audio…");
+  } else if (message.type === "worklet-error") {
+    setStatus(`Audio engine error: ${message.message || message.stage || "unknown error"}`);
+    console.error("[vin.yl.player] AudioWorklet error", message);
   } else if (message.type === "ended") {
     state.positionFrames = message.position;
-    void dispatch({ type: "playback_ended", deck: "a" });
+    void (async () => {
+      await dispatch({ type: "playback_ended", deck: "a" });
+      // Original: programme end runs the stylus into the deadwax for
+      // 2 revolutions of surface bed before playback is considered over
+      // (player.js 11267–11273). The engine rejects it when the needle is
+      // lifted, a scratch is active, or a clip loop runs — same guards as
+      // the original startDeadwaxPlayback.
+      const durationSeconds = state.rpm > 0 ? DEADWAX_TURNS * (60 / state.rpm) : 0;
+      if (durationSeconds > 0) {
+        try {
+          await dispatch({ type: "start_timed_region", region: "deadwax", now_ms: performance.now(), duration_seconds: durationSeconds });
+        } catch {
+          // Needle lifted / not ready: no deadwax traversal, as in the original.
+        }
+      }
+    })();
   } else if (message.type === "scratch-replay-ended") {
     const request = state.scratchReplayRequests.get(message.id);
     if (request) {
@@ -326,10 +432,15 @@ function handleWorkletMessage(event) {
 async function loadFile(file) {
   await initialiseAudio();
   await state.context.resume();
-  state.decoder ??= new RecordDecoderClient();
+  state.decoder ??= new RecordDecoderClient("./record-decoder-worker.js", { loggingEnabled: isPlayerLoggingEnabled() });
   await state.decoder.initialise();
-  elements.play.disabled = true;
-  elements.needle.disabled = true;
+  state.streamInitialised = false;
+  state.streamReady = false;
+  state.streamDecodedFrames = 0;
+  state.streamAppendChain = Promise.resolve();
+  state.decodeProgressText = "";
+  elements.play.disabled = false;
+  elements.needle.disabled = false;
   elements.seek.disabled = true;
   if (state.recordObjectUrl) URL.revokeObjectURL(state.recordObjectUrl);
   state.recordObjectUrl = URL.createObjectURL(file);
@@ -346,31 +457,30 @@ async function loadFile(file) {
   state.baseRpm = profileRpm(inspected.recordProfile);
   state.rpm = state.baseRpm;
   updateRpmButtons();
-  const cached = await readPcmCache(cacheKey);
-  if (cached) {
-    setStatus(`Loading cached PCM for ${file.name}…`);
-    await loadCachedPcm(cached);
-    await markLoadedReady();
-    setStatus(`${file.name} · ${state.duration.toFixed(1)}s · PCM cache hit`);
-    return;
-  }
   setStatus(`Decoding ${file.name}…`);
   const decoded = await state.decoder.decode(sourceBytes, inspected.recordProfile || "", progress => {
-    const message = progress.msg || progress.message || progress.status;
-    if (message) setStatus(String(message));
+    log.action("decoder-progress", {
+      keys: Object.keys(progress || {}),
+      status: progress?.status,
+      message: progress?.msg || progress?.message || "",
+      decodedSegmentCount: Array.isArray(progress?.decodedPcmSegments) ? progress.decodedPcmSegments.length : 0,
+      decodedBytes: Array.isArray(progress?.decodedPcmSegments)
+        ? progress.decodedPcmSegments.reduce((total, segment) => total + (segment.channelBuffers || []).reduce((sum, buffer) => sum + (buffer?.byteLength || 0), 0), 0)
+        : 0,
+    });
+    state.decodeProgressText = formatDecodeProgress(progress);
+    renderDecodeStatus();
+    if (Array.isArray(progress.decodedPcmSegments) && progress.decodedPcmSegments.length) {
+      const segments = progress.decodedPcmSegments;
+      state.streamAppendChain = state.streamAppendChain
+        .then(() => appendProgressiveSegments(segments))
+        .catch(error => {
+          setStatus(`Progressive playback failed: ${error.message || error}`);
+        });
+    }
   });
 
-  const cacheBuffers = Array.isArray(decoded.s16ChannelBuffers)
-    ? decoded.s16ChannelBuffers.map(buffer => buffer.slice(0))
-    : [];
-  if (cacheBuffers.length) {
-    await writePcmCache(cacheKey, {
-      sampleRate: Number(decoded.sampleRate) || state.sampleRate,
-      audioLength: Number(decoded.audioLength) || Math.round(state.duration * state.sampleRate),
-      s16ChannelBuffers: cacheBuffers,
-      recordProfile: inspected.recordProfile || ""
-    });
-  }
+  await state.streamAppendChain;
 
   const sampleRate = Math.max(1, Number(decoded.sampleRate) || 48000);
   const audioLength = Math.max(1, Number(decoded.audioLength) || 0);
@@ -379,16 +489,21 @@ async function loadFile(file) {
   state.baseRpm = profileRpm(inspected.recordProfile);
   state.rpm = state.baseRpm;
   updateRpmButtons();
-  await loadWindowedPcm({ sampleRate, audioLength, s16ChannelBuffers: s16Buffers });
-
-  await markLoadedReady();
+  if (!state.streamInitialised) {
+    await loadDecodedPcm({ sampleRate, audioLength, s16ChannelBuffers: s16Buffers });
+  }
+  state.node.port.postMessage({ type: "stream-complete" });
+  if (!state.streamReady) {
+    await markLoadedReady();
+    state.streamReady = true;
+  }
   setStatus(`${file.name} · ${state.duration.toFixed(1)}s · ${sampleRate} Hz · ${inspected.payloadContainer || "record"}`);
 }
 
 function render() {
   const view = deckView();
   if (!view) return;
-  elements.play.textContent = view.playing ? "STOP" : "START";
+  elements.play.textContent = view.transport_on ? "STOP" : "START";
   elements.needle.textContent = view.needle_lifted ? "NEEDLE DOWN" : "NEEDLE UP";
   publishState();
 }
@@ -484,7 +599,6 @@ async function replayScratch(performance, { effects = "original" } = {}) {
   await initialiseAudio();
   await state.context.resume();
   const initialPosition = Math.max(0, Number(performance.initialState?.positionFrames) || 0);
-  await requestPcmWindow(initialPosition, true);
   const id = ++state.scratchReplayId;
   const completion = new Promise((resolve, reject) => state.scratchReplayRequests.set(id, { resolve, reject }));
   state.node.port.postMessage({ type: "replay-scratch", id, performance, effectsMode: effects });
@@ -575,6 +689,7 @@ function publicState() {
   return Object.freeze({
     ready: Boolean(view?.loaded),
     playing: Boolean(view?.playing),
+    motorRunning: Boolean(view?.transport_on),
     needleLifted: Boolean(view?.needle_lifted),
     scratching: state.scratching,
     positionSeconds: framesToSeconds(state.positionFrames),
@@ -631,7 +746,42 @@ async function stopScratchRecording({ save = true } = {}) {
 }
 
 const api = Object.freeze({
+  setLogging(enabled) {
+    const next = setPlayerLoggingEnabled(enabled);
+    log.action("logging-changed", { enabled: next });
+    state.decoder?.setLogging?.(next);
+    state.worker?.postMessage({ id: 0, type: "set-logging", payload: { enabled: next } });
+    state.node?.port.postMessage({ type: "set-logging", enabled: next });
+    return next;
+  },
+  setLogLevel(level) {
+    const next = setPlayerLogLevel(level);
+    log.action("log-level-changed", { level: next });
+    return next;
+  },
+  setTelemetryLogInterval(milliseconds) {
+    const next = setPlayerTelemetryInterval(milliseconds);
+    log.action("telemetry-log-interval-changed", { milliseconds: next });
+    return next;
+  },
+  get loggingEnabled() { return isPlayerLoggingEnabled(); },
+  get logLevel() { return getPlayerLogLevel(); },
   loadRecord: loadFile,
+  startTransport: async () => {
+    await initialiseAudio();
+    await state.context.resume();
+    const view = deckView();
+    if (!view?.transport_on) await dispatch({ type: "set_transport", deck: "a", running: true });
+  },
+  stopTransport: async () => {
+    const view = deckView();
+    if (view?.transport_on) await dispatch({ type: "set_transport", deck: "a", running: false });
+  },
+  toggleTransport: async () => {
+    await initialiseAudio();
+    await state.context.resume();
+    await dispatch({ type: "toggle_transport", deck: "a" });
+  },
   play: async () => {
     await initialiseAudio();
     await state.context.resume();
@@ -653,12 +803,24 @@ const api = Object.freeze({
   setVolume,
   setCrossfader,
   setNeedleLifted: async lifted => {
+    state.needleAutoBehaviorEnabled = false;
     const next = Boolean(lifted);
+    const view = deckView();
+    const lowering = !next && Boolean(view?.needle_lifted);
     await dispatch({ type: "set_needle", deck: "a", lifted: next, observed_playback_seconds: framesToSeconds(state.positionFrames) });
     state.node?.port.postMessage({ type: "needle", lifted: next });
+    // Original resumeDeckFromNeedleDrop: lowering onto a live transport is a
+    // stylus re-placement with needle-drop foley, never a brake/restart.
+    if (lowering && view?.transport_on) state.node?.port.postMessage({ type: "needle-drop" });
   },
   beginScratch: ({ pointerId = 0, rotationDegrees = state.rotation, positionFrames = state.positionFrames, rate = 0, impulse = 0.22 } = {}) => {
     const position = Number(positionFrames) || 0;
+    // The hand owns the record from the first touch: publish the scratching
+    // state immediately so the canvas stops advancing the motor's visual
+    // rotation — otherwise the drawn record fights the hand.
+    state.scratching = true;
+    state.rotation = Number(rotationDegrees) || state.rotation;
+    publishState();
     recordScratchEvent({ type: "scratch-start", positionFrames: position, rate: Number(rate) || 0, impulse: Number(impulse) || 0 });
     state.node?.port.postMessage({ type: "scratch", active: true, position, rate: Number(rate) || 0, impulse: Number(impulse) || 0 });
     return dispatch({ type: "begin_scratch", deck: "a", pointer_id: pointerId, playback_seconds: framesToSeconds(position), rotation_degrees: rotationDegrees });
@@ -667,11 +829,17 @@ const api = Object.freeze({
     const position = Number(positionFrames) || 0;
     const nextRate = Number(rate) || 0;
     const nextImpulse = Number(impulse) || 0;
+    state.scratching = true;
+    state.rotation = Number(rotationDegrees) || state.rotation;
+    state.positionFrames = position;
     recordScratchEvent({ type: "scratch-motion", positionFrames: position, rate: nextRate, impulse: nextImpulse });
     state.node?.port.postMessage({ type: "motion", position, rate: nextRate, impulse: nextImpulse });
     return dispatch({ type: "move_scratch", deck: "a", position_frames: position, rendered_position_frames: position, rate: nextRate, rotation_degrees: Number(rotationDegrees) || 0, impulse: nextImpulse });
   },
   endScratch: ({ rotationDegrees = state.rotation, resumePlayback = true } = {}) => {
+    state.scratching = false;
+    state.rotation = Number(rotationDegrees) || state.rotation;
+    publishState();
     recordScratchEvent({ type: "scratch-end", positionFrames: state.positionFrames, rate: 0, impulse: 0, resumePlayback: Boolean(resumePlayback) });
     state.node?.port.postMessage({ type: "scratch", active: false, position: state.positionFrames, rate: 0, impulse: 0 });
     return dispatch({ type: "end_scratch", deck: "a", rendered_position_frames: state.positionFrames, rotation_degrees: rotationDegrees, resume_playback: Boolean(resumePlayback), save_sample: false, can_platter_handoff: true });
@@ -730,16 +898,20 @@ globalThis.vin.yl.player = api;
 
 async function initialise() {
   state.worker = new Worker("./player-core-worker.js", { type: "module" });
+  log.action("core-worker-created", {});
   state.worker.onmessage = event => {
+    log.receive(`core:${event.data?.type || (event.data?.ok ? "response" : "error")}`, event.data);
     const { id, ok, result, error } = event.data;
     const request = state.pending.get(id);
-    if (!request) return;
+    if (!request) { if (id !== 0) log.warn("core-unmatched-response", event.data); return; }
     state.pending.delete(id);
     if (ok) request.resolve(result);
     else request.reject(new Error(error));
   };
   const result = await coreRequest("init", { moduleUrl: "./wasm/record-player/record_player.js" });
   state.view = result.view;
+  elements.play.disabled = false;
+  elements.needle.disabled = false;
   render();
   const canvas = document.querySelector("#player-canvas");
   if (canvas) state.canvasController = createVinylPlayerCanvas(api, canvas);
@@ -754,13 +926,16 @@ elements.file.addEventListener("change", () => {
 elements.play.addEventListener("click", async () => {
   await initialiseAudio();
   await state.context.resume();
-  await dispatch({ type: "toggle_playback", deck: "a" });
+  await dispatch({ type: "toggle_transport", deck: "a" });
 });
 elements.needle.addEventListener("click", () => {
+  state.needleAutoBehaviorEnabled = false;
   const view = deckView();
   if (!view) return;
-  void dispatch({ type: "set_needle", deck: "a", lifted: !view.needle_lifted, observed_playback_seconds: framesToSeconds(state.positionFrames) });
-  state.node.port.postMessage({ type: "needle", lifted: !view.needle_lifted });
+  const lifted = !view.needle_lifted;
+  void dispatch({ type: "set_needle", deck: "a", lifted, observed_playback_seconds: framesToSeconds(state.positionFrames) });
+  state.node?.port.postMessage({ type: "needle", lifted });
+  if (!lifted && view.transport_on) state.node?.port.postMessage({ type: "needle-drop" });
 });
 elements.seek.addEventListener("pointerdown", () => { state.draggingSeek = true; });
 elements.seek.addEventListener("input", () => {

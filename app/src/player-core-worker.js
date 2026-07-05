@@ -1,3 +1,6 @@
+import { createLogger, setPlayerLoggingEnabled } from "./player-message-logger.js";
+
+const log = createLogger("core-worker");
 let engine = null;
 
 async function initialise(moduleUrl) {
@@ -17,6 +20,8 @@ function snapshot() {
 
 self.onmessage = async event => {
   const { id, type, payload } = event.data;
+  if (type === "set-logging") { setPlayerLoggingEnabled(payload?.enabled); log.action("logging-changed", payload); return; }
+  log.receive(type, event.data);
   try {
     let result;
     if (type === "init") {
@@ -31,8 +36,12 @@ self.onmessage = async event => {
     } else {
       throw new Error(`Unknown player core request: ${type}`);
     }
-    self.postMessage({ id, ok: true, result });
+    const response = { id, ok: true, result };
+    log.send(`${type}:response`, response);
+    self.postMessage(response);
   } catch (error) {
-    self.postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
+    const response = { id, ok: false, error: error instanceof Error ? error.message : String(error) };
+    log.error(`${type}:error`, response);
+    self.postMessage(response);
   }
 };

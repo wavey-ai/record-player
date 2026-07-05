@@ -67,10 +67,12 @@ struct Bcs2OpusChunkCacheKeys {
     keys: Vec<String>,
 }
 
+#[wasm_bindgen(js_name = stableHashHex)]
 pub fn wasm_stable_hash_hex(bytes: &[u8]) -> String {
     stable_hash_hex(bytes)
 }
 
+#[wasm_bindgen(js_name = bcs2OpusChunkCacheKeysJson)]
 pub fn wasm_bcs2_opus_chunk_cache_keys_json(bcs2: &[u8]) -> Result<String, JsValue> {
     let stream = record_core::parse_chunk_stream(bcs2).map_err(to_js_error)?;
     let keys = stream.chunks.iter().map(|chunk| opus_chunk_cache_key_u64_hex(&chunk.payload)).collect();
@@ -90,6 +92,7 @@ pub fn wasm_ecdc_metadata(payload: &[u8]) -> Result<JsValue, JsValue> {
     to_js_value(&metadata)
 }
 
+#[wasm_bindgen(js_name = ecdcFrameRanges)]
 pub fn wasm_ecdc_frame_ranges(payload: &[u8]) -> Result<JsValue, JsValue> {
     let mut reader = Cursor::new(payload);
     let _: EcdcMetadata = read_ecdc_header(&mut reader).map_err(to_js_error)?;
@@ -206,7 +209,9 @@ impl QuantizedLmChunkDecoder {
         })
     }
     pub fn bitstream_version(&self) -> u8 { QUANTIZED_LM_BITSTREAM_VERSION }
-        pub fn lm_window_frame_length(&self) -> usize { self.lm_window_frame_length }
+
+    #[wasm_bindgen(js_name = lmWindowFrameLength)]
+    pub fn lm_window_frame_length(&self) -> usize { self.lm_window_frame_length }
     pub fn scale(&self) -> f32 { self.scale }
     pub fn pull(&mut self) -> Result<Vec<u16>, JsValue> {
         if self.pulled_steps > 0 && self.pulled_steps % self.lm_window_frame_length == 0 {

@@ -784,6 +784,7 @@ name = "record-player"
 version = "0.1.0"
 dependencies = [
  "approx",
+ "js-sys",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",

@@ -116,7 +116,7 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
     const { width, height } = resize();
     const dt = Math.min(0.1, Math.max(0, (timestamp - lastTimestamp) / 1000));
     lastTimestamp = timestamp;
-    if (snapshot.playing && !snapshot.scratching) {
+    if (snapshot.motorRunning && !snapshot.scratching) {
       visualRotation = (visualRotation + (Number(snapshot.rpm) || 0) * 6 * dt) % 360;
     }
     loadImage(snapshot.recordImageUrl);
@@ -149,6 +149,18 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
         radius: Math.max(12, 18 * geometry.scale)
       });
     }
+    if (latestStylus && components.seek) {
+      hitRegions.push({
+        key: "needleArc",
+        kind: "needle-arc",
+        x: latestStylus.anchorX,
+        y: latestStylus.anchorY,
+        radius: latestStylus.armLength,
+        angle0: latestStylus.guideAngle0,
+        angle1: latestStylus.guideAngle1,
+        tolerance: Math.max(16, 26 * geometry.scale)
+      });
+    }
     drawRadialControls(ctx, geometry, player, snapshot, components, theme, hitRegions);
     frame = requestAnimationFrame(render);
   }
@@ -157,6 +169,20 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
     const direct = [...hitRegions].reverse().find(region => {
       if (region.kind === "record" || region.kind === "lamp" || region.kind === "needle-point") {
         return Math.hypot(point.x - region.x, point.y - region.y) <= region.radius;
+      }
+      if (region.kind === "needle-arc") {
+        const distance = Math.hypot(point.x - region.x, point.y - region.y);
+        if (Math.abs(distance - region.radius) > region.tolerance) return false;
+        const angle = Math.atan2(point.y - region.y, point.x - region.x);
+        let end = region.angle1;
+        while (end - region.angle0 > Math.PI) end -= Math.PI * 2;
+        while (end - region.angle0 < -Math.PI) end += Math.PI * 2;
+        let current = angle;
+        while (current - region.angle0 > Math.PI) current -= Math.PI * 2;
+        while (current - region.angle0 < -Math.PI) current += Math.PI * 2;
+        const low = Math.min(region.angle0, end) - 0.12;
+        const high = Math.max(region.angle0, end) + 0.12;
+        return current >= low && current <= high;
       }
       return false;
     });
@@ -168,9 +194,16 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
     const resolved = resolveStylusGeometry(latestGeometry, snapshot, {
       calibrateProgress: options.calibrateStylusProgress
     });
-    const distance = Math.hypot(point.x - latestGeometry.cx, point.y - latestGeometry.cy);
-    const ratio = clamp((resolved.outerGroove - distance) / (resolved.outerGroove - resolved.innerGroove), 0, 1);
-    player.seekRatio(typeof options.inverseStylusProgress === "function" ? options.inverseStylusProgress(ratio) : ratio);
+    const angle0 = Math.atan2(resolved.outerTip.y - resolved.anchorY, resolved.outerTip.x - resolved.anchorX);
+    let angle1 = Math.atan2(resolved.innerTip.y - resolved.anchorY, resolved.innerTip.x - resolved.anchorX);
+    while (angle1 - angle0 > Math.PI) angle1 -= Math.PI * 2;
+    while (angle1 - angle0 < -Math.PI) angle1 += Math.PI * 2;
+    let angle = Math.atan2(point.y - resolved.anchorY, point.x - resolved.anchorX);
+    while (angle - angle0 > Math.PI) angle -= Math.PI * 2;
+    while (angle - angle0 < -Math.PI) angle += Math.PI * 2;
+    const denominator = angle1 - angle0;
+    const visualRatio = Math.abs(denominator) > 0.0001 ? clamp((angle - angle0) / denominator, 0, 1) : 0;
+    player.seekRatio(typeof options.inverseStylusProgress === "function" ? options.inverseStylusProgress(visualRatio) : visualRatio);
   }
 
   function pointerDown(event) {
@@ -183,7 +216,7 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
       strobeLightOn = !strobeLightOn;
       return;
     }
-    if (region.kind === "sector-button") {
+    if (region.kind === "sector-button" || region.kind === "round-button") {
       activeGesture = { kind: "button", region, pointerId: event.pointerId };
       return;
     }
@@ -192,9 +225,13 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
       updateArcControl(region, latestGeometry, point);
       return;
     }
-    if (region.kind === "needle-point") {
+    if (region.kind === "needle-point" || region.kind === "needle-arc") {
       activeGesture = { kind: "needle", pointerId: event.pointerId };
       seekFromStylusPoint(point);
+      return;
+    }
+    if (!snapshot.ready) {
+      document.querySelector("#file")?.click();
       return;
     }
     const angle = Math.atan2(point.y - latestGeometry.cy, point.x - latestGeometry.cx);

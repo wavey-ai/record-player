@@ -1,9 +1,25 @@
 "use strict";
 
 import "./worklet-text-codec-polyfill.js";
+import { createLogger, setPlayerLoggingEnabled } from "./player-message-logger.js";
+
+const log = createLogger("audio-worklet");
 import { initSync, ScratchAcousticDsp } from "./wasm/record-player/record_player.js";
 
 let wasm = null;
+
+const SEAM_REPAIR_TOTAL_SAMPLES = 24;
+const SEAM_REPAIR_HALF_SAMPLES = SEAM_REPAIR_TOTAL_SAMPLES / 2;
+
+function cubicHermite(y0, y1, m0, m1, t, span) {
+  const t2 = t * t;
+  const t3 = t2 * t;
+  const h00 = (2 * t3) - (3 * t2) + 1;
+  const h10 = t3 - (2 * t2) + t;
+  const h01 = (-2 * t3) + (3 * t2);
+  const h11 = t3 - t2;
+  return (h00 * y0) + (h10 * span * m0) + (h01 * y1) + (h11 * span * m1);
+}
 
 function ensureDspWasm(module) {
   if (!wasm) {
@@ -15,6 +31,8 @@ function ensureDspWasm(module) {
 class BitneedlePlayerProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
+    setPlayerLoggingEnabled(options?.processorOptions?.loggingEnabled !== false);
+    log.action("constructor", { sampleRate, loggingEnabled: options?.processorOptions?.loggingEnabled !== false });
     ensureDspWasm(options?.processorOptions?.wasmModule);
     this.dsp = new ScratchAcousticDsp(sampleRate, options?.processorOptions?.acousticConfig ?? undefined);
     this.active = false;
@@ -27,56 +45,115 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
     this.sourceSampleRate = 48000;
     this.reportCounter = 0;
     this.lastPosition = 0;
-    this.sharedBanks = [];
-    this.sharedWindowFrames = 0;
-    this.activeBankGeneration = 0;
-    this.windowRequestPending = false;
+    this.streamChannels = [];
+    this.streamLength = 0;
+    this.decodedLength = 0;
+    this.streamComplete = false;
+    this.waitingForData = false;
     this.replay = null;
     this.effects = { acoustic: true, surface: true };
-    this.port.onmessage = event => this.handleMessage(event.data || {});
+    this.port.onmessage = event => { const message = event.data || {}; log.receive(message.type, message); this.handleMessage(message); };
   }
 
+  send(message) { log.send(message?.type || "message", message); this.port.postMessage(message); }
+
   handleMessage(message) {
+    if (message.type === "set-logging") { setPlayerLoggingEnabled(message.enabled); log.action("logging-changed", { enabled: message.enabled }); return; }
     switch (message.type) {
-      case "shared-window-init": {
-        this.sourceSampleRate = Math.max(1, Number(message.sampleRate) || 48000);
-        this.length = Math.max(1, Math.floor(Number(message.totalFrames) || 1));
-        this.sharedWindowFrames = Math.max(1, Math.floor(Number(message.windowFrames) || 1));
-        this.sharedBanks = (message.bankBuffers || []).map(bankBuffers =>
-          bankBuffers.map(buffer => new Float32Array(buffer))
-        );
-        this.port.postMessage({ type: "shared-window-initialised" });
-        break;
-      }
-      case "shared-window-ready": {
-        const generation = Math.max(0, Math.floor(Number(message.generation) || 0));
-        if (generation < this.activeBankGeneration) break;
-        const bank = this.sharedBanks[Math.max(0, Math.floor(Number(message.bankIndex) || 0))];
-        const length = Math.max(1, Math.min(this.sharedWindowFrames, Math.floor(Number(message.length) || 1)));
-        if (!bank?.length) break;
-        const channels = bank.map(channel => channel.subarray(0, length));
-        this.dsp.setWindow(
-          channels,
-          this.sourceSampleRate,
-          Math.max(0, Math.floor(Number(message.start) || 0)),
-          this.length,
-          message.resetPosition ? Number(message.position) || 0 : undefined
-        );
+      case "load": {
+        const channels = Array.isArray(message.channels)
+          ? message.channels.map(buffer => new Float32Array(buffer))
+          : [];
+        if (!channels.length || !channels[0]?.length) break;
+        this.length = channels[0].length;
+        this.sourceSampleRate = Number.isFinite(message.sampleRate) && message.sampleRate > 0
+          ? message.sampleRate
+          : 48000;
+        this.dsp.setWindow(channels, this.sourceSampleRate, 0, this.length, 0);
         this.dsp.setNeedleLifted(this.needleLifted);
-        this.activeBankGeneration = generation;
-        this.windowRequestPending = false;
-        this.port.postMessage({ type: "window-activated", generation });
+        this.lastPosition = 0;
+        this.send({ type: "loaded", length: this.length });
         break;
       }
+      case "stream-init": {
+        const channelCount = Math.max(1, Math.floor(Number(message.channels) || 2));
+        this.streamLength = Math.max(1, Math.floor(Number(message.audioLength) || 1));
+        this.sourceSampleRate = Number.isFinite(message.sampleRate) && message.sampleRate > 0
+          ? message.sampleRate
+          : 48000;
+        this.streamChannels = Array.from({ length: channelCount }, () => new Float32Array(this.streamLength));
+        this.length = 0;
+        this.decodedLength = 0;
+        this.streamComplete = false;
+        this.waitingForData = false;
+        this.lastPosition = 0;
+        this.send({ type: "stream-initialised", length: this.streamLength });
+        break;
+      }
+      case "append-pcm": {
+        if (!this.streamChannels.length) break;
+        const startFrame = Math.max(0, Math.floor(Number(message.startFrame) || 0));
+        const endFrame = Math.min(this.streamLength, Math.max(startFrame, Math.floor(Number(message.endFrame) || startFrame)));
+        const frameCount = endFrame - startFrame;
+        const buffers = Array.isArray(message.channelBuffers) ? message.channelBuffers : [];
+        for (let channelIndex = 0; channelIndex < this.streamChannels.length; channelIndex += 1) {
+          const sourceBuffer = buffers[Math.min(channelIndex, buffers.length - 1)];
+          if (!sourceBuffer) continue;
+          const source = new Int16Array(sourceBuffer);
+          const target = this.streamChannels[channelIndex];
+          const limit = Math.min(frameCount, source.length);
+          for (let frame = 0; frame < limit; frame += 1) {
+            target[startFrame + frame] = source[frame] / 32768;
+          }
+        }
+        const repairedChannels = this.repairChunkSeam(startFrame, endFrame);
+        if (startFrame <= this.decodedLength) {
+          this.decodedLength = Math.max(this.decodedLength, endFrame);
+        }
+        this.length = Math.max(1, this.decodedLength);
+        try {
+          this.dsp.setWindow(this.streamChannels, this.sourceSampleRate, 0, this.length, undefined);
+          this.dsp.setNeedleLifted(this.needleLifted);
+        } catch (error) {
+          this.send({
+            type: "worklet-error",
+            stage: "append-pcm",
+            message: error instanceof Error ? error.message : String(error)
+          });
+          break;
+        }
+        if (this.waitingForData && this.decodedLength > this.lastPosition + 1024) {
+          this.waitingForData = false;
+          this.active = this.playing;
+          if (this.active) {
+            this.dsp.start();
+            this.dsp.setPosition(this.lastPosition, 0);
+            this.applyTransport();
+          }
+        }
+        this.send({
+          type: "buffered",
+          decodedLength: this.decodedLength,
+          totalLength: this.streamLength,
+          seamRepair: repairedChannels > 0
+            ? { boundaryFrame: startFrame, channels: repairedChannels, samples: SEAM_REPAIR_TOTAL_SAMPLES }
+            : null
+        });
+        break;
+      }
+      case "stream-complete":
+        this.streamComplete = true;
+        break;
       case "transport":
         this.motorRunning = Boolean(message.running);
         this.applyTransport();
         break;
       case "scratch-transport": {
         const handContact = Boolean(message.handContact);
-        const motorRate = Number.isFinite(message.motorRate) ? message.motorRate : 0;
+        const motorRate = this.motorRunning
+          ? (Number.isFinite(message.motorRate) ? message.motorRate : this.playbackRate)
+          : 0;
         this.scratching = handContact;
-        this.motorRunning = motorRate !== 0;
         this.dsp.setTransport(handContact, motorRate, 0);
         break;
       }
@@ -86,8 +163,10 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
         this.playbackRate = Number.isFinite(message.rate) ? message.rate : 1;
         this.playing = true;
         this.active = true;
-        if (!handoff || !wasActive) this.dsp.start();
-        this.dsp.setPosition(this.clampPosition(message.position), 0);
+        if (!handoff || !wasActive) {
+          this.dsp.start();
+          this.dsp.setPosition(this.clampPosition(message.position), 0);
+        }
         this.dsp.setNeedleLifted(this.needleLifted);
         this.applyTransport();
         break;
@@ -105,7 +184,7 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
         const position = this.clampPosition(message.position);
         this.dsp.setPosition(position, Number(message.impulse) || 0);
         this.lastPosition = position;
-        this.port.postMessage({ type: "seeked", position, generation: message.generation });
+        this.send({ type: "seeked", position, generation: message.generation });
         break;
       }
       case "needle":
@@ -147,6 +226,37 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
         this.dsp.setMotion(position, rate, impulse);
         break;
       }
+      case "surface-asset": {
+        const channels = Array.isArray(message.channels)
+          ? message.channels.map(buffer => new Float32Array(buffer))
+          : [];
+        if (!channels.length || !channels[0]?.length) break;
+        try {
+          this.dsp.setSurfaceAsset(channels, Number(message.sampleRate) || sampleRate);
+          log.action("surface-asset-loaded", { channels: channels.length, frames: channels[0].length });
+        } catch (error) {
+          this.send({ type: "worklet-error", stage: "surface-asset", message: error instanceof Error ? error.message : String(error) });
+        }
+        break;
+      }
+      case "surface-gain":
+        this.dsp.setSurfaceGainMultiplier(Number(message.multiplier) || 1);
+        break;
+      case "surface-region": {
+        const region = message.region === "deadwax" ? 1 : 0;
+        if (message.action === "start") {
+          this.dsp.startSurfaceRegion(region, Number(message.durationSeconds) || 0);
+          log.state(message.region === "deadwax" ? "deadwax" : "lead-in", { durationSeconds: message.durationSeconds });
+        } else {
+          this.dsp.stopSurfaceRegion();
+          log.state("surface-region-stopped", { region: message.region });
+        }
+        break;
+      }
+      case "needle-drop":
+        this.dsp.triggerNeedleDrop();
+        log.state("needle-drop", {});
+        break;
       case "set-effects": {
         this.effects = {
           acoustic: message.acoustic !== false,
@@ -196,6 +306,46 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
       default:
         break;
     }
+  }
+
+  repairChunkSeam(boundaryFrame, endFrame) {
+    if (!(boundaryFrame > 0) || boundaryFrame !== this.decodedLength) return 0;
+    const leftAnchor = boundaryFrame - SEAM_REPAIR_HALF_SAMPLES - 1;
+    const rightAnchor = boundaryFrame + SEAM_REPAIR_HALF_SAMPLES;
+    if (leftAnchor < 1 || rightAnchor + 1 >= endFrame) return 0;
+    const span = rightAnchor - leftAnchor;
+    let repairedChannels = 0;
+    let maxBeforeJump = 0;
+    let maxAfterJump = 0;
+    for (const channel of this.streamChannels) {
+      if (!channel || rightAnchor + 1 >= channel.length) continue;
+      const beforeJump = Math.abs(channel[boundaryFrame] - channel[boundaryFrame - 1]);
+      const y0 = channel[leftAnchor];
+      const y1 = channel[rightAnchor];
+      const m0 = y0 - channel[leftAnchor - 1];
+      const m1 = channel[rightAnchor + 1] - y1;
+      for (let index = leftAnchor + 1; index < rightAnchor; index += 1) {
+        const t = (index - leftAnchor) / span;
+        const value = cubicHermite(y0, y1, m0, m1, t, span);
+        channel[index] = Math.max(-1, Math.min(1, value));
+      }
+      maxBeforeJump = Math.max(maxBeforeJump, beforeJump);
+      maxAfterJump = Math.max(
+        maxAfterJump,
+        Math.abs(channel[boundaryFrame] - channel[boundaryFrame - 1])
+      );
+      repairedChannels += 1;
+    }
+    if (repairedChannels) {
+      log.action("pcm-seam-repaired", {
+        boundaryFrame,
+        channels: repairedChannels,
+        samples: SEAM_REPAIR_TOTAL_SAMPLES,
+        maxBeforeJump,
+        maxAfterJump
+      });
+    }
+    return repairedChannels;
   }
 
   motorRate() {
@@ -255,7 +405,7 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
     this.replay = null;
     this.effects = restoreEffects;
     this.dsp.setEffects(restoreEffects.acoustic, restoreEffects.surface);
-    this.port.postMessage({ type: "scratch-replay-ended", id, cancelled, position: this.dsp.position });
+    this.send({ type: "scratch-replay-ended", id, cancelled, position: this.dsp.position });
   }
 
   renderRange(outputs, outputOffset, frameCount) {
@@ -269,23 +419,25 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
     if (this.reportCounter >= 1024) {
       this.reportCounter = 0;
       this.lastPosition = this.dsp.position;
-      this.port.postMessage({
+      this.send({
         type: "position",
         position: this.lastPosition,
         effectiveRate: this.dsp.effectiveRate,
         scratching: this.scratching
       });
     }
-    const requestedWindowPosition = this.dsp.takeWindowRequest();
-    if (requestedWindowPosition >= 0 && !this.windowRequestPending) {
-      this.windowRequestPending = true;
-      this.port.postMessage({ type: "window-request", position: requestedWindowPosition });
-    }
     if (this.dsp.takeEnded()) {
       this.lastPosition = this.dsp.position;
-      this.playing = false;
-      this.active = false;
-      this.port.postMessage({ type: "ended", position: this.dsp.position });
+      if (!this.streamComplete && this.decodedLength < this.streamLength) {
+        this.waitingForData = true;
+        this.active = false;
+        this.dsp.stop();
+        this.send({ type: "buffering", position: this.lastPosition });
+      } else {
+        this.playing = false;
+        this.active = false;
+        this.send({ type: "ended", position: this.dsp.position });
+      }
     }
   }
 

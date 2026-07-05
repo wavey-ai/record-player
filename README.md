@@ -581,3 +581,37 @@ cargo publish -p record-player
 
 Publishing `record-player` does not package or publish `player-wasm`; it is not a dependency of the root crate.
 
+
+
+### Motor and needle behaviour
+
+The platter motor is independent from programme playback. `START - STOP` can always start or stop the turntable, including before a record finishes decoding and while the needle is raised. The canvas record and strobe rings follow motor state rather than the audio readhead. Once the first decoded PCM chunk is available, lowering the needle onto a running platter begins playback; lifting it silences/freezes the groove position without stopping the visible platter.
+
+## Message tracing
+
+Structured message tracing is enabled by default in this diagnostic build. Every host action and every message sent to or received from the core worker, decoder worker, and AudioWorklet is logged with a sequence number, subsystem, direction, type, elapsed time, and a compact payload summary.
+
+Disable it before loading the player with:
+
+```html
+<script>globalThis.__VIN_YL_PLAYER_LOGGING__ = false;</script>
+```
+
+Or append `?player_log=0` to the player URL. It can also be changed at runtime:
+
+```js
+vin.yl.player.setLogging(false);
+vin.yl.player.setLogging(true);
+console.log(vin.yl.player.loggingEnabled);
+```
+
+The shared implementation is `app/src/player-message-logger.js`. Payload summaries report buffer types and byte lengths rather than printing PCM or PNG contents.
+
+
+## Shared message logger loading
+
+`player-message-logger-global.js` contains the export-free logger implementation used by classic workers. `player-message-logger.js` is the ES-module adapter used by the host, module workers, and AudioWorklet. Both share `globalThis.VinylPlayerMessageLogger`; do not load the ES-module adapter with `importScripts()`.
+
+### EnCodec chunk seam repair
+
+`player-wasm` delivers decoded revolution chunks after the encoder-side ±10 ms context has already been cropped away. The AudioWorklet therefore places every owned chunk at its exact source timeline offset and applies a deterministic 24-sample (0.5 ms at 48 kHz) cubic Hermite repair centred on each contiguous chunk boundary. The repair replaces 12 samples on either side of the join, preserves total length and later-chunk offsets, estimates endpoint slopes from samples outside the repair span, and clamps interpolation overshoot to the PCM range.
