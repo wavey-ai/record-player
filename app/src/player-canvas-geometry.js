@@ -1,13 +1,13 @@
 export const CANVAS_COMPONENTS = Object.freeze({
   record: true,
   syncRings: true,
+  syncDots: true,
+  strobe: true,
   strobeLamp: true,
   spindle: true,
   stylus: true,
   needlePoint: true,
-  // Dotted travel arc hidden by default; the needle stays draggable via the
-  // invisible needle-arc hit region (components.seek).
-  tonearmGuide: false,
+  tonearmGuide: true,
   startStop: true,
   needle: true,
   loadRecord: true,
@@ -37,7 +37,7 @@ export const CANVAS_THEME = Object.freeze({
   syncLit: "#00bfd3",
   lamp: "#00bfd3",
   tonearm: "#050505",
-  tonearmGuide: "rgba(5,5,5,0.35)",
+  tonearmGuide: "#050505",
   stylus: "#00bfd3",
   stylusGlow: "rgba(0,191,211,0.65)"
 });

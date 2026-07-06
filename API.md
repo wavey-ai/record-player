@@ -13,9 +13,12 @@ window.addEventListener("vin.yl.player.ready", event => {
 
 ```js
 await player.loadRecord(file);
+await player.loadRecordFromUrl("./test.png");
 await player.play();
 await player.pause();
 await player.togglePlayback();
+player.stepTrack(1);
+player.stepTrack(-1);
 player.seekSeconds(42.5);
 player.seekRatio(0.5);
 await player.setNeedleLifted(false);
@@ -60,7 +63,237 @@ const unsubscribe = player.subscribe(state => {
   state.recordProfile;
   state.payloadContainer;
   state.releaseId;
+  state.currentTrackIndex;
+  state.currentTrackTitle;
+  state.trackCount;
 });
+```
+
+## Cache handler
+
+Decoded-chunk caching is injectable and optional.
+
+```js
+const cache = player.createPcmChunkCacheHandler();
+player.configureCache(cache);
+await player.loadRecord(file, { cache });
+```
+
+Custom handlers implement:
+
+```js
+const cacheHandler = {
+  async get(key, meta) {
+    return {
+      chunkIndex: meta.chunkIndex,
+      startFrame: 0,
+      endFrame: 65536,
+      sampleRate: 48000,
+      channels: 2,
+      channelBuffers: [leftBuffer, rightBuffer],
+    };
+  },
+  async put(key, pcm) {
+    // pcm.channelBuffers are transferable ArrayBuffers, one per channel.
+  },
+};
+```
+
+Remote yl.vin-compatible Opus caching is available as a built-in handler:
+
+```js
+const cache = player.createRemoteOpusChunkCacheHandler({
+  apiBaseUrl: "https://yl.vin/api/play/tape",
+});
+
+player.configureCache(cache);
+await player.loadRecord(file);
+```
+
+That handler uses `soundkit` packet framing plus `libopus-rs` for encode/decode. No C/`libopusjs` path is used.
+
+Remote cache encryption needs record context. `loadRecord(...)` wires this up automatically. For manual use you can set it explicitly:
+
+```js
+await cache.setRecordContext({
+  descriptorJson,
+  recordHeaderProof,
+  recordProfile: "single45",
+});
+```
+
+There is also a standalone precache helper which drives the existing decode worker and fills the cache through the same `{ get, put }` surface:
+
+```js
+const precache = player.createRemoteOpusPrecache({
+  apiBaseUrl: "https://yl.vin/api/play/tape",
+});
+
+await precache.precacheRecord(pngBytes);
+```
+
+## Cross-frame postMessage bridge
+
+The player can expose a generic iframe bridge for embedders.
+
+```js
+player.configurePostMessageBridge({
+  enabled: true,
+  targetOrigin: "*",
+  targetWindow: () => window.parent,
+});
+```
+
+Send an arbitrary bridge message:
+
+```js
+player.postMessageBridgeSend("bitneedle-custom", { value: 1 });
+```
+
+### Default outbound messages
+
+Playback state:
+
+```js
+{
+  type: "bitneedle-embed-playback",
+  isPlaying: true,
+  currentTime: 12.34,
+  duration: 185.2,
+  volume: 0.8
+}
+```
+
+Loaded-record summary:
+
+```js
+{
+  type: "bitneedle-embed-record",
+  record: {
+    title: "01H...",
+    releaseId: "01H...",
+    recordProfile: "single45",
+    payloadContainer: "ECDC",
+    recordHash: "…sha256…",
+    trackIndex: 0,
+    trackCount: 3,
+    trackTitle: "Side A"
+  }
+}
+```
+
+### Default inbound messages
+
+Set playback state:
+
+```js
+iframe.contentWindow.postMessage({ type: "bitneedle-set-playing", playing: true }, "*");
+```
+
+Set volume:
+
+```js
+iframe.contentWindow.postMessage({ type: "bitneedle-set-volume", volume: 0.8 }, "*");
+```
+
+Seek by ratio:
+
+```js
+iframe.contentWindow.postMessage({ type: "bitneedle-seek", ratio: 0.5 }, "*");
+```
+
+Step between programme tracks:
+
+```js
+iframe.contentWindow.postMessage({ type: "bitneedle-track-step", direction: 1 }, "*");
+iframe.contentWindow.postMessage({ type: "bitneedle-track-step", direction: -1 }, "*");
+```
+
+Set RPM, crossfader and needle-lift:
+
+```js
+iframe.contentWindow.postMessage({ type: "bitneedle-set-rpm", rpm: 45 }, "*");
+iframe.contentWindow.postMessage({ type: "bitneedle-set-crossfader", crossfader: 1 }, "*");
+iframe.contentWindow.postMessage({ type: "bitneedle-set-needle-lifted", lifted: true }, "*");
+```
+
+Change embed options live — any of the `bg`/`tone`/`turntable`/`controls`/`status`/`light`/`strobe`/`dots`/`arm`/`arc`/`load` query params supported by `/embed.html` (see "Embed URL parameters" below) can also be changed after the iframe has already loaded, without reloading it:
+
+```js
+iframe.contentWindow.postMessage({
+  type: "bitneedle-set-embed-options",
+  options: { controls: "0", tone: "ff00aa", turntable: "ff00aa" },
+}, "*");
+```
+
+This is the preferred way for an embedder to change controls visibility or colour theme after the initial load — reloading the iframe (changing its `src`) drops any record that was only handed over via `bitneedle-load-record-bytes` (e.g. an unpublished local file), so live options should always be used instead of rebuilding the `src` URL when the player is already showing a record.
+
+All message type names and payload formatters are overridable through `configurePostMessageBridge(...)`.
+
+## Embed URL parameters
+
+The dedicated embed entrypoint is:
+
+```txt
+/embed.html
+```
+
+Supported query parameters:
+
+```txt
+bg=HEX
+```
+
+Sets the page/background color.
+
+```txt
+tone=HEX
+```
+
+Sets the control and chrome color used across the embedded turntable UI.
+
+```txt
+turntable=HEX
+```
+
+Sets the turntable ring color separately from the general tone.
+
+```txt
+controls=0
+controls=1
+```
+
+`controls=0` hides the canvas radial controls and the fallback HTML controls. Any other value leaves controls visible.
+
+```txt
+status=0
+status=1
+```
+
+A single status line (decode progress, remote cache fetch/write progress, errors) is shown bottom-left in the embedded tone color by default. `status=0` hides it. Any other value leaves it visible.
+
+```txt
+load=1
+```
+
+Opt in to opening the file picker when the empty turntable is clicked or tapped. This is off by default.
+
+```txt
+src=URL
+```
+
+Automatically loads a record on startup from a relative or absolute URL.
+
+```txt
+tape_url=URL
+```
+
+Enables the remote Opus tape store and points it at a relative or absolute tape API base.
+
+Example:
+
+```txt
+/embed.html?src=./test.png&tape_url=/api/play/tape&bg=0a0a0a&tone=ff00aa&turntable=ff00aa&controls=0&load=1
 ```
 
 ## Scratch performance recording and replay
@@ -128,6 +361,14 @@ const controller = player.canvas.mount(canvas);
 ```
 
 The bundled test page mounts its canvas automatically.
+
+By default, tapping an empty turntable does not open the file picker. Enable it explicitly when that behavior is wanted:
+
+```js
+player.canvas.configure({
+  loadOnEmptyRecordTap: true
+});
+```
 
 ### Component visibility
 

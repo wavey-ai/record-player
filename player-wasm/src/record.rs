@@ -111,6 +111,7 @@ pub fn wasm_validate_record_header_json(
     decode_record_header_json(png_bytes, record_profile.as_deref()).map_err(to_js_error)
 }
 
+#[wasm_bindgen(js_name = decodeRecordDescriptorHeaderJson)]
 pub fn wasm_decode_record_descriptor_header_json(
     png_bytes: &[u8],
     record_profile: Option<String>,
@@ -118,6 +119,7 @@ pub fn wasm_decode_record_descriptor_header_json(
     decode_record_descriptor_header_json(png_bytes, record_profile.as_deref()).map_err(to_js_error)
 }
 
+#[wasm_bindgen(js_name = encryptCacheEntry)]
 pub fn wasm_encrypt_cache_entry(
     descriptor_json: &str,
     context_json: &str,
@@ -126,6 +128,7 @@ pub fn wasm_encrypt_cache_entry(
     encrypt_cache_entry(descriptor_json, context_json, plaintext).map_err(to_js_error)
 }
 
+#[wasm_bindgen(js_name = decryptCacheEntry)]
 pub fn wasm_decrypt_cache_entry(
     descriptor_json: &str,
     context_json: &str,
@@ -134,6 +137,7 @@ pub fn wasm_decrypt_cache_entry(
     decrypt_cache_entry(descriptor_json, context_json, envelope).map_err(to_js_error)
 }
 
+#[wasm_bindgen(js_name = cacheEncryptionRecordBindingHashHex)]
 pub fn wasm_cache_encryption_record_binding_hash_hex(
     descriptor_json: &str,
 ) -> Result<String, JsValue> {
@@ -1725,3 +1729,10 @@ mod tests {
         );
     }
 }
+
+
+
+
+
+
+

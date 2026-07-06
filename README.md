@@ -74,34 +74,17 @@ With this repository at `/path/to/vin.yl.player`, the expected sibling layout is
 └── bitneedle/
 ```
 
-The browser build also needs five shared decoder helper scripts, ONNX Runtime Web assets, and the EnCodec ONNX bundles. Their locations can be supplied with environment variables.
+The decoder helper scripts (`browser-formatting.js`, `encodec-bundle-names.js`, `onnx-runtime-session.js`, `onnx-worker-tensors.js`, `ecdc-pcm-layout.js`, `player-cache-config.js`, `player-cache.js`, `player-pcm-helpers.js`) live directly in `app/src` — this repo owns them, they are not vendored from elsewhere.
+
+The browser build additionally needs ONNX Runtime Web assets and the EnCodec ONNX bundles. Their locations can be supplied with environment variables; by default they're read from `vendor/wasm/` in this repo.
 
 ## Environment variables
 
 | Variable | Required | Default | Purpose |
 | --- | --- | --- | --- |
-| `BITNEEDLE_SHARED_DIR` | When the default layout is absent | `../bitneedle-platform/apps/shared` | Directory containing the shared decoder helper scripts. |
-| `BITNEEDLE_ONNX_RUNTIME_DIR` | When the default layout is absent | `../bitneedle-platform/vendor/wasm/onnxruntime-web` | ONNX Runtime Web distribution copied into `app/dist/wasm/onnxruntime-web`. |
-| `BITNEEDLE_ENCODEC_BUNDLES_DIR` | When the default layout is absent | `../bitneedle-platform/vendor/wasm/encodec-rs/bundles` | EnCodec ONNX bundles copied into `app/dist/wasm/encodec-rs/onnx-bundles`. |
+| `BITNEEDLE_ONNX_RUNTIME_DIR` | No | `vendor/wasm/onnxruntime-web` | ONNX Runtime Web distribution copied into `app/dist/wasm/onnxruntime-web`. |
+| `BITNEEDLE_ENCODEC_BUNDLES_DIR` | No | `vendor/wasm/encodec-rs/bundles` | EnCodec ONNX bundles; small `bundle.json` manifests are copied into `app/dist/wasm/encodec-rs/onnx-bundles`, the large model weights are uploaded to R2 separately (see `make sync-onnx-assets`). |
 | `PORT` | No | `5193` | Port used by the development server. A positional argument to `npm run dev -- 8000` also works. |
-
-`BITNEEDLE_SHARED_DIR` must contain:
-
-```text
-browser-formatting.js
-encodec-bundle-names.js
-onnx-runtime-session.js
-onnx-worker-tensors.js
-ecdc-pcm-layout.js
-```
-
-Example using the paths from the YL.VIN repository:
-
-```bash
-export BITNEEDLE_SHARED_DIR=/Users/jamie/wavey.ai/yl.vin/apps/shared
-export BITNEEDLE_ONNX_RUNTIME_DIR=/Users/jamie/wavey.ai/yl.vin/vendor/wasm/onnxruntime-web
-export BITNEEDLE_ENCODEC_BUNDLES_DIR=/Users/jamie/wavey.ai/yl.vin/vendor/wasm/encodec-rs/bundles
-```
 
 ## Build and run
 
@@ -134,6 +117,58 @@ app/dist/wasm/record-player/record_player_bg.wasm
 app/dist/wasm/player-wasm/player_wasm.js
 app/dist/wasm/player-wasm/player_wasm_bg.wasm
 ```
+
+## Runtime WASM Bundles
+
+The player uses separate browser contexts, so the runtime is split across a few focused WASM bundles:
+
+- **`record-player`**
+  - files:
+    - `app/dist/wasm/record-player/record_player.js`
+    - `app/dist/wasm/record-player/record_player_bg.wasm`
+  - loaded by:
+    - `app/src/player-host.js`
+    - `app/src/player-worklet.js`
+  - responsibility:
+    - transport state
+    - playback engine init
+    - `ScratchAcousticDsp` in the AudioWorklet
+
+- **`player-wasm`**
+  - files:
+    - `app/dist/wasm/player-wasm/player_wasm.js`
+    - `app/dist/wasm/player-wasm/player_wasm_bg.wasm`
+  - loaded by:
+    - `app/src/record-decoder-worker.js`
+    - `app/src/opus-cache.js`
+  - responsibility:
+    - record header and descriptor decode
+    - playback metadata helpers
+    - cache/tape encryption helpers
+    - per-packet SoundKit v2 header build and parse
+
+- **`onnxruntime-web`**
+  - files under:
+    - `app/dist/wasm/onnxruntime-web/`
+  - loaded by:
+    - `app/src/record-decoder-worker.js`
+  - responsibility:
+    - ONNX execution for the decoder worker
+
+- **EnCodec ONNX bundles**
+  - files under:
+    - `app/dist/wasm/encodec-rs/onnx-bundles/`
+  - loaded by:
+    - `app/src/record-decoder-worker.js`
+  - responsibility:
+    - model/data bundles used by the ECDC decode path
+
+In practice:
+
+- the **main thread** coordinates UI, state, and startup;
+- the **decoder worker** loads `player-wasm`, `onnxruntime-web`, and the EnCodec bundles;
+- the **AudioWorklet** loads `record-player`;
+- the **tape/cache helper path** loads `player-wasm`.
 
 ## Architecture
 

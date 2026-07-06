@@ -1,8 +1,11 @@
 :root {
   color-scheme: light;
   font-family: Arial, Helvetica, sans-serif;
-  background: #f00020;
-  color: #050505;
+  --embed-bg: #f00020;
+  --embed-tone: #050505;
+  --embed-turntable: #050505;
+  background: var(--embed-bg);
+  color: var(--embed-tone);
 }
 
 * {
@@ -12,6 +15,8 @@
 body {
   margin: 0;
   min-height: 100vh;
+  background: var(--embed-bg);
+  color: var(--embed-tone);
 }
 
 button,
@@ -86,9 +91,10 @@ header {
 
 button {
   min-height: 48px;
-  border: 1px solid #050505;
+  border: 1px solid var(--embed-tone);
   background: transparent;
   font-weight: 900;
+  color: var(--embed-tone);
 }
 
 button:disabled {
@@ -164,8 +170,8 @@ output {
 }
 
 .rpm-controls button.selected {
-  background: #050505;
-  color: #f00020;
+  background: var(--embed-tone);
+  color: var(--embed-bg);
 }
 
 #player-canvas {
@@ -174,6 +180,10 @@ output {
   display: block;
   touch-action: none;
   cursor: crosshair;
+  /* Subtle "lift" so the record disc stands off the background. The canvas
+     is transparent outside the disc, so drop-shadow follows the disc's
+     circular alpha rather than painting a square box-shadow. */
+  filter: drop-shadow(0 14px 28px rgba(0, 0, 0, 0.38)) drop-shadow(0 4px 10px rgba(0, 0, 0, 0.24));
 }
 
 .legacy-platter[hidden] {
@@ -182,4 +192,67 @@ output {
 
 .fallback-controls {
   max-width: 720px;
+}
+
+html.embed-mode,
+html.embed-mode body {
+  background: var(--embed-bg) !important;
+}
+
+/* ?bg=transparent (see embed.html) — lets the host page's own background
+   show through the iframe instead of the turntable painting its own. */
+html.embed-mode.embed-transparent-bg,
+html.embed-mode.embed-transparent-bg body {
+  background: transparent !important;
+}
+
+body.embed-page {
+  overflow-x: hidden;
+}
+
+.embed-shell {
+  grid-template-rows: 1fr;
+  padding: 0;
+  min-height: auto;
+}
+
+.embed-deck {
+  position: relative;
+  width: 100%;
+  min-height: 100vh;
+  gap: 0;
+}
+
+.embed-deck #player-canvas {
+  width: min(100vw, 860px);
+  height: min(100vh, 920px);
+}
+
+.embed-status {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  max-width: calc(100% - 24px);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--embed-tone);
+  opacity: 0.72;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.embed-controls,
+html.embed-mode .metadata,
+html.embed-mode .player-shell > header {
+  display: none !important;
+}
+
+html.embed-mode.embed-hide-controls .embed-controls {
+  display: none !important;
+}
+
+html.embed-mode.embed-hide-status .embed-status {
+  display: none !important;
 }

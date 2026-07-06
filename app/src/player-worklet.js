@@ -92,17 +92,31 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
       }
       case "append-pcm": {
         if (!this.streamChannels.length) break;
-        const startFrame = Math.max(0, Math.floor(Number(message.startFrame) || 0));
-        const endFrame = Math.min(this.streamLength, Math.max(startFrame, Math.floor(Number(message.endFrame) || startFrame)));
-        const frameCount = endFrame - startFrame;
+        const startFrame = Math.floor(Number(message.startFrame));
+        const endFrame = Math.floor(Number(message.endFrame));
         const buffers = Array.isArray(message.channelBuffers) ? message.channelBuffers : [];
+        const frameCount = endFrame - startFrame;
+        const segmentValid = (
+          Number.isInteger(startFrame) &&
+          Number.isInteger(endFrame) &&
+          startFrame >= 0 &&
+          endFrame > startFrame &&
+          endFrame <= this.streamLength &&
+          buffers.length === this.streamChannels.length &&
+          buffers.every((buffer) => buffer && new Int16Array(buffer).length === frameCount)
+        );
+        if (!segmentValid) {
+          this.send({
+            type: "worklet-error",
+            stage: "append-pcm",
+            message: `Rejected malformed PCM segment startFrame=${message?.startFrame} endFrame=${message?.endFrame} buffers=${buffers.length} expectedChannels=${this.streamChannels.length}`,
+          });
+          break;
+        }
         for (let channelIndex = 0; channelIndex < this.streamChannels.length; channelIndex += 1) {
-          const sourceBuffer = buffers[Math.min(channelIndex, buffers.length - 1)];
-          if (!sourceBuffer) continue;
-          const source = new Int16Array(sourceBuffer);
+          const source = new Int16Array(buffers[channelIndex]);
           const target = this.streamChannels[channelIndex];
-          const limit = Math.min(frameCount, source.length);
-          for (let frame = 0; frame < limit; frame += 1) {
+          for (let frame = 0; frame < frameCount; frame += 1) {
             target[startFrame + frame] = source[frame] / 32768;
           }
         }

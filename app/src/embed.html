@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>vin.yl.player embed</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script>
+    (function () {
+      var params = new URLSearchParams(location.search);
+      var root = document.documentElement;
+
+      function normalizeHex(value) {
+        if (!value) return null;
+        if (value === "black") return "#000000";
+        if (!/^#?[0-9a-fA-F]{3,8}$/.test(value)) return null;
+        return value.charAt(0) === "#" ? value : "#" + value;
+      }
+
+      function applyColor(param, variable) {
+        var color = normalizeHex(params.get(param));
+        if (color) root.style.setProperty(variable, color);
+      }
+
+      // ?bg=transparent skips the hex-colour path entirely (it fails
+      // normalizeHex's hex check) and instead flips a class so the host
+      // page showing through behind the iframe is possible — see the
+      // html.embed-mode.embed-transparent-bg override in styles.css,
+      // which needs its own !important to beat the existing
+      // html.embed-mode background rule.
+      if (params.get("bg") === "transparent") {
+        root.classList.add("embed-transparent-bg");
+      } else {
+        applyColor("bg", "--embed-bg");
+      }
+      applyColor("tone", "--embed-tone");
+      applyColor("turntable", "--embed-turntable");
+
+      root.classList.add("embed-mode");
+      if (params.get("controls") === "0") {
+        root.classList.add("embed-hide-controls");
+      }
+      if (params.get("status") === "0") {
+        root.classList.add("embed-hide-status");
+      }
+
+      var lastHeight = 0;
+      function reportHeight() {
+        if (window.parent === window) return;
+        var height = Math.ceil(document.documentElement.scrollHeight);
+        if (height === lastHeight) return;
+        lastHeight = height;
+        window.parent.postMessage({ type: "bitneedle-embed-height", height: height }, "*");
+      }
+
+      document.addEventListener("DOMContentLoaded", reportHeight);
+      window.addEventListener("load", reportHeight);
+      window.addEventListener("resize", reportHeight);
+      if (window.ResizeObserver) {
+        document.addEventListener("DOMContentLoaded", function () {
+          new ResizeObserver(reportHeight).observe(document.documentElement);
+        });
+      } else {
+        window.setInterval(reportHeight, 500);
+      }
+    }());
+  </script>
+</head>
+<body class="embed-page">
+  <main class="player-shell embed-shell">
+    <section class="deck embed-deck" aria-label="Record player embed">
+      <canvas id="player-canvas" aria-label="Interactive Bitneedle record player"></canvas>
+
+      <dl id="record-metadata" class="metadata" hidden>
+        <div><dt>PROFILE</dt><dd id="meta-profile"></dd></div>
+        <div><dt>CONTAINER</dt><dd id="meta-container"></dd></div>
+        <div><dt>RELEASE</dt><dd id="meta-release"></dd></div>
+      </dl>
+      <output id="status" class="embed-status">Choose a Bitneedle PNG record.</output>
+
+      <div class="transport fallback-controls embed-controls">
+        <button id="load" type="button">LOAD RECORD</button>
+        <button id="play" type="button">START</button>
+        <button id="needle" type="button">NEEDLE UP</button>
+      </div>
+      <button id="platter" class="legacy-platter" type="button" aria-label="Scratch record" hidden>
+        <img id="record-image" alt="Loaded Bitneedle record">
+        <span class="label">BITNEEDLE</span>
+      </button>
+      <div class="fallback-controls rpm-controls embed-controls" aria-label="Record speed">
+        <span>RPM</span>
+        <button id="rpm-33" type="button">33⅓</button>
+        <button id="rpm-45" type="button">45</button>
+      </div>
+      <label class="fallback-controls timeline embed-controls"><span>VARIABLE RPM</span><input id="rpm" type="range" min="16" max="90" step="0.01" value="33.333333"></label>
+      <label class="fallback-controls timeline embed-controls"><span>VOLUME</span><input id="volume" type="range" min="0" max="1" step="0.001" value="1"></label>
+      <label class="fallback-controls timeline embed-controls"><span>XFADE</span><input id="xfade" type="range" min="0" max="1" step="0.001" value="0.5"></label>
+      <label class="fallback-controls timeline embed-controls"><span>POSITION</span><input id="seek" type="range" min="0" max="1" step="0.0001" value="0" disabled></label>
+      <input id="file" type="file" accept="image/png,.png" hidden>
+    </section>
+  </main>
+  <script type="module" src="./player-host.js"></script>
+</body>
+</html>

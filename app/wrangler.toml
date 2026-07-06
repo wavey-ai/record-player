@@ -1,0 +1,19 @@
+name = "vin-yl-play"
+main = "worker.js"
+compatibility_date = "2026-05-15"
+account_id = "c57bb20727aa3564966d2bb693abddce"
+
+[limits]
+cpu_ms = 10
+
+routes = [
+  { pattern = "yl.vin/apps/play*", zone_name = "yl.vin" },
+]
+
+[assets]
+directory = "dist"
+binding = "ASSETS"
+
+[[r2_buckets]]
+binding = "ONNX_BUNDLES"
+bucket_name = "vin-yl-player-assets"

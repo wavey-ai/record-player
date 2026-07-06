@@ -48,6 +48,8 @@ let playerWasmModulePromise = null;
 let playerAppWasmModule = null;
 let mossNanoWasmModulePromise = null;
 let mossNanoDecodeSessionPromise = null;
+let cacheRequestId = 0;
+const pendingCacheRequests = new Map();
 
 function versionedWorkerAssetUrl(path) {
   const url = new URL(path, self.location.href);
@@ -119,6 +121,174 @@ function createWorkerEcdcCacheProofContext(ecdc) {
     ),
   );
   return context && typeof context === "object" ? context : null;
+}
+
+// Bound how long a host-side cache read/write can take. A network-backed
+// encrypted cache read that never resolves must not hang record decoding
+// forever; a timed-out read degrades to the ordinary cache-miss path.
+const CACHE_REQUEST_TIMEOUT_MS = 8000;
+
+function requestCache(type, parentRequestId, payload = {}, transfer = []) {
+  return new Promise((resolve, reject) => {
+    const requestId = ++cacheRequestId;
+    let settled = false;
+    const timeoutId = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      pendingCacheRequests.delete(requestId);
+      reject(new Error(`Cache request "${type}" timed out after ${CACHE_REQUEST_TIMEOUT_MS}ms`));
+    }, CACHE_REQUEST_TIMEOUT_MS);
+    pendingCacheRequests.set(requestId, {
+      type,
+      resolve: (value) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeoutId);
+        resolve(value);
+      },
+      reject: (error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeoutId);
+        reject(error);
+      },
+    });
+    self.postMessage({
+      id: parentRequestId,
+      type,
+      cacheRequestId: requestId,
+      ...payload,
+    }, transfer);
+  });
+}
+
+async function requestCacheGet(parentRequestId, key, meta) {
+  return requestCache("cache-get", parentRequestId, { key, meta });
+}
+
+async function requestCacheGetMany(parentRequestId, entries) {
+  return requestCache("cache-get-many", parentRequestId, { entries });
+}
+
+async function requestCachePut(parentRequestId, key, pcm) {
+  const channelBuffers = Array.isArray(pcm?.channelData)
+    ? pcm.channelData.map(channel => {
+      const buffer = channel.buffer.slice(channel.byteOffset, channel.byteOffset + channel.byteLength);
+      return buffer;
+    })
+    : [];
+  return requestCache("cache-put", parentRequestId, {
+    key,
+    pcm: {
+      chunkIndex: pcm?.chunkIndex,
+      startFrame: pcm?.startFrame,
+      endFrame: pcm?.endFrame,
+      channels: channelBuffers.length,
+      sampleRate: pcm?.sampleRate,
+      channelBuffers,
+    },
+  }, channelBuffers);
+}
+
+function handleCacheResponseMessage(message) {
+  const request = pendingCacheRequests.get(message.cacheRequestId);
+  if (!request) {
+    return false;
+  }
+  pendingCacheRequests.delete(message.cacheRequestId);
+  if (message.ok) {
+    request.resolve(message.result ?? null);
+  } else {
+    request.reject(new Error(message.error || `${request.type} failed`));
+  }
+  return true;
+}
+
+function cachedChannelBuffersToRawSegment(segment, chunkIndex, expectedChannels = 0) {
+  const channelBuffers = Array.isArray(segment?.channelBuffers) ? segment.channelBuffers : [];
+  if (!channelBuffers.length) {
+    return null;
+  }
+  if (expectedChannels > 0 && channelBuffers.length !== expectedChannels) {
+    return null;
+  }
+  if (!channelBuffers.every((buffer) => (buffer?.byteLength || 0) % Int16Array.BYTES_PER_ELEMENT === 0)) {
+    return null;
+  }
+  const frameCount = new Int16Array(channelBuffers[0]).length;
+  if (!channelBuffers.every((buffer) => new Int16Array(buffer).length === frameCount)) {
+    return null;
+  }
+  const startFrame = Math.max(0, Math.floor(Number(segment.startFrame) || 0));
+  const endFrame = Math.floor(Number(segment.endFrame));
+  if (!Number.isFinite(endFrame) || endFrame - startFrame !== frameCount) {
+    return null;
+  }
+  return {
+    chunkIndex,
+    startFrame,
+    endFrame,
+    channelData: channelBuffers.map(buffer => new Int16Array(buffer)),
+  };
+}
+
+async function tryRequestCacheGet(parentRequestId, key, meta) {
+  try {
+    return await requestCacheGet(parentRequestId, key, meta);
+  } catch (error) {
+    workerDecodeWarn("[play:client-playback-worker.js] cache get failed", {
+      key,
+      chunkIndex: meta?.chunkIndex,
+      error: workerErrorMessage(error),
+    });
+    return null;
+  }
+}
+
+async function tryRequestCacheGetMany(parentRequestId, entries) {
+  try {
+    const result = await requestCacheGetMany(parentRequestId, entries);
+    return Array.isArray(result) ? result : [];
+  } catch (error) {
+    workerDecodeWarn("[play:client-playback-worker.js] cache get many failed", {
+      entryCount: Array.isArray(entries) ? entries.length : 0,
+      error: workerErrorMessage(error),
+    });
+    return [];
+  }
+}
+
+async function tryRequestCachePut(parentRequestId, key, pcm) {
+  if (!key) {
+    return;
+  }
+  try {
+    await requestCachePut(parentRequestId, key, pcm);
+  } catch (error) {
+    workerDecodeWarn("[play:client-playback-worker.js] cache put failed", {
+      key,
+      chunkIndex: pcm?.chunkIndex,
+      error: workerErrorMessage(error),
+    });
+  }
+}
+
+function tryEcdcChunkCacheKey(chunkPayload, chunkIndex, recordBindingHex) {
+  try {
+    return requirePlayerAppWasmFunction("ecdcChunkCacheKey")(chunkPayload, recordBindingHex || "");
+  } catch (error) {
+    workerDecodeWarn("[play:client-playback-worker.js] cache key skipped", {
+      chunkIndex,
+      error: workerErrorMessage(error),
+    });
+    return "";
+  }
 }
 
 function reportSkippedDecodePacket(id, label, error) {
@@ -1147,6 +1317,19 @@ function deinterleaveS16Segment(interleavedInt16, channels, frameCount) {
   return channelData;
 }
 
+function interleaveS16Channels(channelData) {
+  const channels = Array.isArray(channelData) ? channelData : [];
+  const channelCount = channels.length;
+  const frameCount = channelCount ? channels[0].length : 0;
+  const interleaved = new Int16Array(frameCount * Math.max(1, channelCount));
+  for (let frame = 0; frame < frameCount; frame += 1) {
+    for (let channel = 0; channel < channelCount; channel += 1) {
+      interleaved[(frame * channelCount) + channel] = channels[channel]?.[frame] || 0;
+    }
+  }
+  return interleaved;
+}
+
 function cropDecodedOwnedSegmentToS16(encodecModule, bundleJson, decodedFloat32, meta, chunkIndex, audioLength) {
   const cropped = encodecModule.ecdcCropDecodedOwnedAudio(bundleJson, decodedFloat32);
   const planar = cropped instanceof Float32Array ? cropped : new Float32Array(cropped);
@@ -1495,7 +1678,7 @@ function spliceSilenceIntoChannelData(channelData, audioLength, samplesPerChunk,
   return { channelData: splicedChannelData, audioLength: splicedAudioLength };
 }
 
-async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, bundleName = "", meta, runtime, audioLength, record = null, cacheDecodedSegments = false, cachedPcmSegments = [], silenceMap = [] }) {
+async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, bundleName = "", meta, runtime, audioLength, record = null, cacheDecodedSegments = false, cachedPcmSegments = [], silenceMap = [], cache = null, recordBindingHex = "" }) {
   workerDecodeDebug("[play:client-playback-worker.js] decodePlayback", { id, ecdcBytes: ecdcBuffer?.byteLength || 0, bundleName, cacheDecodedSegments, silenceSpans: Array.isArray(silenceMap) ? silenceMap.length : 0 });
   if (!ecdcBuffer) {
     throw new Error("Client playback worker requires the ECDC round-trip payload.");
@@ -1510,6 +1693,7 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
   let selectedBundleJson = bundleJson;
   let selectedMeta = meta;
   let session = null;
+  let ort = null;
 
   try {
     if (!selectedBundleJson || !selectedBundleRoot || !selectedMeta) {
@@ -1548,21 +1732,79 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
     const seamRepairProfile = seamRepairProfileFromMeta(selectedMeta);
     const durationSeconds = safeAudioLength / sampleRate;
     const decodeModelPath = `${selectedBundleRoot}/${selectedMeta.decode_model}`;
-    const ort = await ensureOnnxRuntimeModule();
-    const sessionMark = workerPerfStart("create ONNX decode session", {
-      bundleName: selectedBundleName,
-    });
-    ({ session } = await createDecodeSession(
-      decodeModelPath,
-      runtime,
-      bundleAssetMetadata(selectedMeta, selectedMeta.decode_model),
-    ));
-    workerPerfEnd(id, sessionMark);
+    // The ONNX runtime + decode_frame.onnx weights (tens of MB) are only
+    // fetched lazily, the first time a chunk actually misses the cache. A
+    // fully cached record should never pay for that download at all — the
+    // cache lookup below has to happen before this, not after it.
+    let onnxRuntimeReady = false;
+    const ensureDecodeSessionReady = async () => {
+      if (onnxRuntimeReady) {
+        return;
+      }
+      ort = await ensureOnnxRuntimeModule();
+      const sessionMark = workerPerfStart("create ONNX decode session", {
+        bundleName: selectedBundleName,
+      });
+      ({ session } = await createDecodeSession(
+        decodeModelPath,
+        runtime,
+        bundleAssetMetadata(selectedMeta, selectedMeta.decode_model),
+      ));
+      workerPerfEnd(id, sessionMark);
+      onnxRuntimeReady = true;
+    };
     const layout = ecdcDecode.encodecModule.ecdcChunkLayoutFromMetadata(
       selectedBundleJson,
       ecdcBytes,
       encodedFrames.length,
     );
+    const cacheEnabled = Boolean(cache?.enabled);
+    const chunkCacheKeys = cacheEnabled
+      ? chunks.map((chunk, index) => tryEcdcChunkCacheKey(chunk?.payload, index, recordBindingHex))
+      : [];
+    const cacheLookupStride = layout.stride;
+    const cacheLookupFrameSamples = layout.samples;
+    const cacheLookupEntries = chunkCacheKeys
+      .map((key, index) => {
+        if (!key) {
+          return null;
+        }
+        const frameStart = index * cacheLookupStride;
+        const frameSamples = Math.max(
+          0,
+          Math.min(
+            cacheLookupFrameSamples,
+            safeAudioLength - frameStart,
+          ),
+        );
+        return {
+          key,
+          chunkIndex: index,
+          meta: {
+            chunkIndex: index,
+            sampleRate,
+            channels: Number(selectedMeta.channels) || 2,
+            startFrame: frameStart,
+            endFrame: frameStart + frameSamples,
+          },
+        };
+      })
+      .filter(Boolean);
+    const prefetchedRemoteCacheResults = cacheEnabled && cacheLookupEntries.length
+      ? await tryRequestCacheGetMany(id, cacheLookupEntries.map(({ key, meta }) => ({ key, meta })))
+      : [];
+    const prefetchedRemoteSegmentsByIndex = new Map();
+    for (let index = 0; index < prefetchedRemoteCacheResults.length; index += 1) {
+      const chunkIndex = Math.max(0, Math.floor(Number(cacheLookupEntries[index]?.chunkIndex) || 0));
+      const rawSegment = cachedChannelBuffersToRawSegment(
+        prefetchedRemoteCacheResults[index],
+        chunkIndex,
+        Number(selectedMeta.channels) || 2,
+      );
+      if (rawSegment) {
+        prefetchedRemoteSegmentsByIndex.set(chunkIndex, rawSegment);
+      }
+    }
     if (seamRepairProfile) {
       const channels = Number(selectedMeta.channels) || 2;
       const ownedSamples = Math.max(1, seamRepairProfile.ownedSamples);
@@ -1608,7 +1850,10 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
             endFrame,
             channelData: deinterleaveS16Segment(new Int16Array(cachedSegment.pcmBuffer), channels, frameCount),
           };
-        } else {
+        } else if (cacheEnabled) {
+          rawSegment = prefetchedRemoteSegmentsByIndex.get(index) || null;
+        }
+        if (!rawSegment) {
           let frame = null;
           try {
             frame = await decodeLmChunk(
@@ -1644,6 +1889,7 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
                 channelData: Array.from({ length: channels }, () => new Int16Array(endFrame - startFrame)),
               };
             } else {
+              await ensureDecodeSessionReady();
               const decoderInputs = buildDecodeInputs(encodedFrames, selectedMeta, index, end);
               feeds = {
                 [session.inputNames[0]]: new ort.Tensor("int64", decoderInputs.codes, [
@@ -1698,6 +1944,12 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
             if (encodedFrames[index]) {
               encodedFrames[index].codes = null;
             }
+          }
+          if (cacheEnabled && rawSegment) {
+            await tryRequestCachePut(id, chunkCacheKeys[index], {
+              ...rawSegment,
+              sampleRate,
+            });
           }
         }
         const emittedSegments = assembler.addRawSegment(rawSegment);
@@ -1766,11 +2018,22 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
     for (let index = 0; index < chunks.length; index += 1) {
       const end = index + 1;
       const cachedSegment = cachedSegmentsByIndex.get(index);
-      if (cachedSegment) {
+      const remoteCachedSegment = !cachedSegment && cacheEnabled
+        ? (prefetchedRemoteSegmentsByIndex.get(index) || null)
+        : null;
+      const activeCachedSegment = cachedSegment || (remoteCachedSegment
+        ? {
+          chunkIndex: remoteCachedSegment.chunkIndex,
+          startFrame: remoteCachedSegment.startFrame,
+          endFrame: remoteCachedSegment.endFrame,
+          pcmBuffer: interleaveS16Channels(remoteCachedSegment.channelData).buffer,
+        }
+        : null);
+      if (activeCachedSegment) {
         const spliced = s16Writer.addCachedRange(
-          cachedSegment.startFrame,
-          cachedSegment.endFrame,
-          new Int16Array(cachedSegment.pcmBuffer),
+          activeCachedSegment.startFrame,
+          activeCachedSegment.endFrame,
+          new Int16Array(activeCachedSegment.pcmBuffer),
         );
         if (spliced) {
           if (chunks[index] && typeof chunks[index] === "object") {
@@ -1841,6 +2104,7 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
         if (encodedFrames[index]?.silentPcm) {
           s16Writer.addSilentFrame(index);
         } else {
+          await ensureDecodeSessionReady();
           const decoderInputs = buildDecodeInputs(encodedFrames, selectedMeta, index, end);
           feeds = {
             [session.inputNames[0]]: new ort.Tensor("int64", decoderInputs.codes, [
@@ -1862,6 +2126,14 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
             audioLength: safeAudioLength,
           });
         }
+        if (cacheEnabled) {
+          for (const segment of emittedSegments) {
+            await tryRequestCachePut(id, chunkCacheKeys[segment.chunkIndex], {
+              ...segment,
+              sampleRate,
+            });
+          }
+        }
         postDecodedPcmSegments(id, emittedSegments, {
           sampleRate,
           channels: Number(selectedMeta.channels) || 2,
@@ -1881,6 +2153,14 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
             channels: Number(selectedMeta.channels) || 2,
             audioLength: safeAudioLength,
           });
+        }
+        if (cacheEnabled) {
+          for (const segment of emittedSegments) {
+            await tryRequestCachePut(id, chunkCacheKeys[segment.chunkIndex], {
+              ...segment,
+              sampleRate,
+            });
+          }
         }
         postDecodedPcmSegments(id, emittedSegments, {
           sampleRate,
@@ -1912,6 +2192,14 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
         channels: Number(selectedMeta.channels) || 2,
         audioLength: safeAudioLength,
       });
+    }
+    if (cacheEnabled) {
+      for (const segment of flushedSegments) {
+        await tryRequestCachePut(id, chunkCacheKeys[segment.chunkIndex], {
+          ...segment,
+          sampleRate,
+        });
+      }
     }
     postDecodedPcmSegments(id, flushedSegments, {
       sampleRate,
@@ -1948,8 +2236,26 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
   }
 }
 
-async function decodeRecordPngPlayback({ id, pngBytes, record = {}, recordProfile, runtime }) {
-  workerDecodeDebug("[play:client-playback-worker.js] decodeRecordPngPlayback", { id, pngBytes: pngBytes?.byteLength || 0, recordProfile });
+async function decodeRecordPngPlayback({
+  id,
+  pngBytes,
+  record = {},
+  recordProfile,
+  runtime,
+  cacheDecodedSegments = false,
+  cachedPcmSegments = [],
+  silenceMap = [],
+  cache = null,
+  recordBindingHex = "",
+}) {
+  workerDecodeDebug("[play:client-playback-worker.js] decodeRecordPngPlayback", {
+    id,
+    pngBytes: pngBytes?.byteLength || 0,
+    recordProfile,
+    cacheDecodedSegments,
+    cacheEnabled: Boolean(cache?.enabled),
+    cachedPcmSegments: Array.isArray(cachedPcmSegments) ? cachedPcmSegments.length : 0,
+  });
   const perfMark = workerPerfStart("decode record PNG end-to-end", {
     pngBytes: pngBytes?.byteLength || 0,
   });
@@ -1965,7 +2271,11 @@ async function decodeRecordPngPlayback({ id, pngBytes, record = {}, recordProfil
       record,
       recordProfile: extracted.recordProfile,
       runtime,
-      silenceMap: extracted.silenceMap,
+      silenceMap: Array.isArray(silenceMap) && silenceMap.length ? silenceMap : extracted.silenceMap,
+      cacheDecodedSegments,
+      cachedPcmSegments,
+      cache,
+      recordBindingHex,
     });
     workerPerfEnd(id, perfMark, {
       bundleName: decoded.bundleName,
@@ -2074,6 +2384,14 @@ function postWorkerDecodeResult(id, result) {
 
 self.onmessage = async (event) => {
   if (event.data?.type === "set-logging") { globalThis.VinylPlayerMessageLogger.setEnabled(event.data.enabled); playerMessageLog.action("logging-changed", { enabled: event.data.enabled }); return; }
+  if (
+    event.data?.type === "cache-get-result" ||
+    event.data?.type === "cache-get-many-result" ||
+    event.data?.type === "cache-put-result"
+  ) {
+    handleCacheResponseMessage(event.data);
+    return;
+  }
   playerMessageLog.receive(event.data?.type || "message", event.data);
   const { id, type } = event.data || {};
   if (type === "init") {

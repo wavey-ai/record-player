@@ -44,3 +44,41 @@ export async function writePcmCache(key, value) {
     db.close();
   }
 }
+
+export function createPcmChunkCacheHandler() {
+  return Object.freeze({
+    async get(key) {
+      const value = await readPcmCache(key);
+      const channelBuffers = Array.isArray(value?.channelBuffers)
+        ? value.channelBuffers.map(buffer => buffer instanceof ArrayBuffer
+          ? buffer.slice(0)
+          : buffer?.buffer?.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength))
+        : [];
+      if (!channelBuffers.length) return null;
+      return {
+        chunkIndex: Number(value.chunkIndex) || 0,
+        startFrame: Number(value.startFrame) || 0,
+        endFrame: Number(value.endFrame) || 0,
+        sampleRate: Number(value.sampleRate) || 48000,
+        channels: channelBuffers.length,
+        channelBuffers,
+      };
+    },
+    async put(key, pcm) {
+      const channelBuffers = Array.isArray(pcm?.channelBuffers)
+        ? pcm.channelBuffers.map(buffer => buffer instanceof ArrayBuffer
+          ? buffer.slice(0)
+          : buffer?.buffer?.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength))
+        : [];
+      if (!channelBuffers.length) return;
+      await writePcmCache(key, {
+        chunkIndex: Number(pcm.chunkIndex) || 0,
+        startFrame: Number(pcm.startFrame) || 0,
+        endFrame: Number(pcm.endFrame) || 0,
+        sampleRate: Number(pcm.sampleRate) || 48000,
+        channels: channelBuffers.length,
+        channelBuffers,
+      });
+    },
+  });
+}

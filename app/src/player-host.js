@@ -1,13 +1,180 @@
 import { createLogger, setPlayerLoggingEnabled, isPlayerLoggingEnabled, setPlayerLogLevel, getPlayerLogLevel, setPlayerTelemetryInterval } from "./player-message-logger.js";
 import { createVinylPlayerCanvas } from "./player-canvas.js";
 import { RecordDecoderClient } from "./record-decoder-client.js";
-import { recordCacheKey } from "./pcm-cache.js";
+import { createPcmChunkCacheHandler, recordCacheKey } from "./pcm-cache.js";
+import { createRemoteOpusChunkCacheHandler, createRemoteOpusPrecache, decodeRecordDescriptorJson } from "./opus-cache.js";
 import { clearScratchPerformances, deleteScratchPerformance, getScratchPerformance, listScratchPerformances, saveScratchPerformance } from "./scratch-performance-store.js";
 
 const log = createLogger("host");
 const initialLoggingParam = new URLSearchParams(globalThis.location?.search || "").get("player_log");
 if (initialLoggingParam === "0") setPlayerLoggingEnabled(false);
 if (initialLoggingParam === "1") setPlayerLoggingEnabled(true);
+
+function queryParams() {
+  return new URLSearchParams(globalThis.location?.search || "");
+}
+
+function isEmbedMode() {
+  return document.documentElement.classList.contains("embed-mode");
+}
+
+// Embed query params (bg/tone/turntable/controls/status/light/strobe/dots/
+// arm/arc/load) are read once at startup by embedCanvasOptions() below and
+// by embed.html's own inline script (CSS vars + hide-controls/hide-status
+// classes). liveEmbedOverrides lets a same-page or iframe host update those
+// same params afterwards via postMessage, without a full iframe reload —
+// effectiveParam() prefers a live override over the original URL value.
+const liveEmbedOverrides = {};
+
+function effectiveParam(name) {
+  if (Object.prototype.hasOwnProperty.call(liveEmbedOverrides, name)) return liveEmbedOverrides[name];
+  return queryParams().get(name);
+}
+
+function startupRecordSrc() {
+  const value = String(queryParams().get("src") || "").trim();
+  console.log("[vin.yl.player] startupRecordSrc", {
+    href: globalThis.location?.href || "",
+    src: value,
+  });
+  return value || "";
+}
+
+function startupCacheUrl() {
+  const params = queryParams();
+  const value = String(params.get("tape_url") || "").trim();
+  console.log("[vin.yl.player] startupCacheUrl", {
+    href: globalThis.location?.href || "",
+    tapeUrl: value,
+  });
+  if (!value) {
+    console.warn("[vin.yl.player] tape disabled: missing tape_url query param");
+  }
+  return value || "";
+}
+
+function embedParamColor(name, fallback = "") {
+  const value = String(effectiveParam(name) || "").trim();
+  if (!value) return fallback;
+  if (value === "black") return "#000000";
+  if (!/^#?[0-9a-fA-F]{3,8}$/.test(value)) return fallback;
+  return value.startsWith("#") ? value : `#${value}`;
+}
+
+function embedCanvasOptions() {
+  if (!document.documentElement.classList.contains("embed-mode")) {
+    return null;
+  }
+  const tone = embedParamColor("tone", "#050505");
+  const turntable = embedParamColor("turntable", tone);
+  const controlsHidden = effectiveParam("controls") === "0";
+  return {
+    theme: {
+      line: tone,
+      mutedLine: `${tone}47`,
+      controlFill: `${tone}1a`,
+      controlActive: tone,
+      controlText: tone,
+      controlActiveText: embedParamColor("bg", "#f00020"),
+      turntableRing: `${turntable}33`,
+      turntableRingStrong: `${turntable}66`,
+      tonearm: tone,
+      tonearmGuide: tone,
+      stylus: tone,
+      stylusGlow: `${tone}b3`,
+      syncDot: `${tone}3b`,
+    },
+    loadOnEmptyRecordTap: effectiveParam("load") === "1",
+    // controls=0 strips the turntable down to just the record disc + spindle.
+    // Individual overlay elements can then be opted back in one at a time via
+    // their own params (each defaults off when controls are hidden):
+    //   light=1   the strobe lamp/light fixture + beam
+    //   strobe=1  the lit strobe sampling dots
+    //   dots=1    the base sync dots ring
+    //   arm=1     the tonearm + needle point
+    //   arc=1     the dotted travel-guide arc
+    // Always spelled out explicitly (not `{}` when controls are shown) so a
+    // live bitneedle-set-embed-options update can flip controls back on
+    // after they were hidden, not just off — canvas.configure() merges
+    // partial patches on top of the current components, so an empty object
+    // here would leave a previously-hidden overlay stuck hidden.
+    components: controlsHidden ? {
+      startStop: false,
+      needle: false,
+      loadRecord: false,
+      rpm: false,
+      volume: false,
+      crossfader: false,
+      seek: false,
+      labels: false,
+      strobeLamp: effectiveParam("light") === "1",
+      strobe: effectiveParam("strobe") === "1",
+      syncDots: effectiveParam("dots") === "1",
+      stylus: effectiveParam("arm") === "1",
+      needlePoint: effectiveParam("arm") === "1",
+      tonearmGuide: effectiveParam("arc") === "1",
+    } : {
+      startStop: true,
+      needle: true,
+      loadRecord: true,
+      rpm: true,
+      volume: true,
+      crossfader: true,
+      seek: true,
+      labels: true,
+      strobeLamp: true,
+      strobe: true,
+      syncDots: true,
+      stylus: true,
+      needlePoint: true,
+      tonearmGuide: true,
+    },
+  };
+}
+
+// Mirrors embed.html's own inline <head> script, which sets these CSS vars
+// and classes once at first paint (before this module has loaded) to avoid
+// a flash of the wrong theme. This copy re-applies the same rules whenever
+// a live bitneedle-set-embed-options message changes bg/tone/turntable/
+// controls/status, since that script only ever runs once.
+function normalizeEmbedHex(value) {
+  if (!value) return null;
+  if (value === "black") return "#000000";
+  if (!/^#?[0-9a-fA-F]{3,8}$/.test(value)) return null;
+  return value.charAt(0) === "#" ? value : `#${value}`;
+}
+
+function applyEmbedChrome() {
+  if (!document.documentElement.classList.contains("embed-mode")) return;
+  const root = document.documentElement;
+  const bg = effectiveParam("bg");
+  if (bg === "transparent") {
+    root.classList.add("embed-transparent-bg");
+  } else {
+    root.classList.remove("embed-transparent-bg");
+    const bgColor = normalizeEmbedHex(bg);
+    if (bgColor) root.style.setProperty("--embed-bg", bgColor);
+  }
+  const tone = normalizeEmbedHex(effectiveParam("tone"));
+  if (tone) root.style.setProperty("--embed-tone", tone);
+  const turntable = normalizeEmbedHex(effectiveParam("turntable"));
+  if (turntable) root.style.setProperty("--embed-turntable", turntable);
+  root.classList.toggle("embed-hide-controls", effectiveParam("controls") === "0");
+  root.classList.toggle("embed-hide-status", effectiveParam("status") === "0");
+}
+
+// Live counterpart to the URL-param-driven embed setup: merges a patch of
+// the same param names (bg/tone/turntable/controls/status/light/strobe/
+// dots/arm/arc/load) into liveEmbedOverrides, then re-applies chrome (CSS
+// vars/classes), canvas theme and component visibility, and status text
+// visibility — all without touching the iframe's src, so a hard reload
+// (and the record-loss it causes) is never required for these changes.
+function applyEmbedOptions(patch = {}) {
+  Object.assign(liveEmbedOverrides, patch);
+  applyEmbedChrome();
+  const options = embedCanvasOptions();
+  if (options && state.canvasController) state.canvasController.configure(options);
+}
 
 // Original player-environment-config.js mobile detection, reproduced exactly:
 // UA sniff plus iPadOS-style MacIntel-with-touch WebKit.
@@ -93,8 +260,227 @@ const state = {
   streamAppendChain: Promise.resolve(),
   decodeProgressText: "",
   regionTimer: 0,
-  needleAutoBehaviorEnabled: true
+  needleAutoBehaviorEnabled: true,
+  cacheHandler: null,
+  postMessageBridge: null,
+  programmeMap: null,
+  recordHeaderProof: null,
+  recordDescriptorJson: "",
 };
+
+const DEFAULT_POST_MESSAGE_BRIDGE = Object.freeze({
+  enabled: false,
+  targetOrigin: "*",
+  targetWindow: () => globalThis.parent !== globalThis ? globalThis.parent : null,
+  outbound: Object.freeze({
+    playbackType: "bitneedle-embed-playback",
+    recordType: "bitneedle-embed-record",
+  }),
+  inbound: Object.freeze({
+    setPlayingType: "bitneedle-set-playing",
+    setVolumeType: "bitneedle-set-volume",
+    seekType: "bitneedle-seek",
+    trackStepType: "bitneedle-track-step",
+    setRpmType: "bitneedle-set-rpm",
+    setCrossfaderType: "bitneedle-set-crossfader",
+    setNeedleLiftedType: "bitneedle-set-needle-lifted",
+    // Live counterpart to the ?bg/tone/turntable/controls/status/light/
+    // strobe/dots/arm/arc/load embed query params — lets an embedder change
+    // any of them after the iframe is already loaded, without reloading it
+    // (a reload drops whatever record was loaded via loadRecordBytesType).
+    setEmbedOptionsType: "bitneedle-set-embed-options",
+    // Lets a same-page host (e.g. an editor with an unpublished record
+    // only available as a local blob: URL, which a cross-origin iframe
+    // can't fetch) hand over the record's raw bytes directly instead of
+    // going through loadRecordFromUrl's fetch(). bytes is an ArrayBuffer
+    // (structured-clonable, no base64 needed).
+    loadRecordBytesType: "bitneedle-load-record-bytes",
+  }),
+  formatPlayback: snapshot => ({
+    isPlaying: Boolean(snapshot.playing),
+    currentTime: Number(snapshot.positionSeconds) || 0,
+    duration: Number(snapshot.durationSeconds) || 0,
+    volume: Math.max(0, Math.min(1, Number(snapshot.volume) || 0)),
+  }),
+  formatRecord: snapshot => snapshot.ready ? {
+    title: snapshot.releaseId || "",
+    releaseId: snapshot.releaseId || "",
+    recordProfile: snapshot.recordProfile || "",
+    payloadContainer: snapshot.payloadContainer || "",
+    recordHash: snapshot.recordHash || "",
+    trackIndex: Number.isFinite(snapshot.currentTrackIndex) ? snapshot.currentTrackIndex : -1,
+    trackCount: Number(snapshot.trackCount) || 0,
+    trackTitle: snapshot.currentTrackTitle || "",
+  } : null,
+});
+
+let lastBridgePlaybackKey = "";
+let lastBridgeRecordKey = "";
+let lastBridgePlaybackAt = 0;
+
+function currentPostMessageBridge() {
+  return state.postMessageBridge || DEFAULT_POST_MESSAGE_BRIDGE;
+}
+
+function normalizePostMessageBridge(config = {}) {
+  if (config == null || config === false) return { ...DEFAULT_POST_MESSAGE_BRIDGE, enabled: false };
+  const next = {
+    ...DEFAULT_POST_MESSAGE_BRIDGE,
+    ...config,
+    enabled: config.enabled !== false,
+    outbound: { ...DEFAULT_POST_MESSAGE_BRIDGE.outbound, ...(config.outbound || {}) },
+    inbound: { ...DEFAULT_POST_MESSAGE_BRIDGE.inbound, ...(config.inbound || {}) },
+  };
+  if (typeof next.targetWindow !== "function") {
+    const target = next.targetWindow || null;
+    next.targetWindow = () => target;
+  }
+  if (typeof next.formatPlayback !== "function") next.formatPlayback = DEFAULT_POST_MESSAGE_BRIDGE.formatPlayback;
+  if (typeof next.formatRecord !== "function") next.formatRecord = DEFAULT_POST_MESSAGE_BRIDGE.formatRecord;
+  return next;
+}
+
+function bridgePost(type, payload) {
+  const bridge = currentPostMessageBridge();
+  if (!bridge.enabled) return false;
+  const target = bridge.targetWindow?.();
+  if (!target || typeof target.postMessage !== "function") return false;
+  target.postMessage({ type, ...payload }, bridge.targetOrigin || "*");
+  return true;
+}
+
+function reportBridgePlayback(snapshot = publicState()) {
+  const bridge = currentPostMessageBridge();
+  if (!bridge.enabled) return;
+  const payload = bridge.formatPlayback(snapshot);
+  if (!payload || typeof payload !== "object") return;
+  const now = Date.now();
+  const key = `${Boolean(payload.isPlaying)}|${Number(payload.volume) || 0}|${Number(payload.duration) || 0}|${Math.round((Number(payload.currentTime) || 0) * 2)}`;
+  if (key === lastBridgePlaybackKey && now - lastBridgePlaybackAt < 500) return;
+  lastBridgePlaybackKey = key;
+  lastBridgePlaybackAt = now;
+  bridgePost(bridge.outbound.playbackType, payload);
+}
+
+function reportBridgeRecord(snapshot = publicState()) {
+  const bridge = currentPostMessageBridge();
+  if (!bridge.enabled) return;
+  const payload = bridge.formatRecord(snapshot);
+  const key = payload ? JSON.stringify(payload) : "";
+  if (key === lastBridgeRecordKey) return;
+  lastBridgeRecordKey = key;
+  bridgePost(bridge.outbound.recordType, { record: payload });
+}
+
+async function handleBridgeMessage(event) {
+  const bridge = currentPostMessageBridge();
+  if (!bridge.enabled) return;
+  const message = event.data || {};
+  try {
+    if (message.type === bridge.inbound.setPlayingType) {
+      if (Boolean(message.playing)) await api.play();
+      else await api.pause();
+      return;
+    }
+    if (message.type === bridge.inbound.setVolumeType) {
+      await api.setVolume(message.volume);
+      return;
+    }
+    if (message.type === bridge.inbound.seekType) {
+      api.seekRatio(message.ratio);
+      return;
+    }
+    if (message.type === bridge.inbound.trackStepType) {
+      api.stepTrack(Number(message.direction) >= 0 ? 1 : -1);
+      return;
+    }
+    if (message.type === bridge.inbound.setRpmType) {
+      await api.setRpm(message.rpm);
+      return;
+    }
+    if (message.type === bridge.inbound.setCrossfaderType) {
+      await api.setCrossfader(message.crossfader);
+      return;
+    }
+    if (message.type === bridge.inbound.setNeedleLiftedType) {
+      await api.setNeedleLifted(Boolean(message.lifted));
+      return;
+    }
+    if (message.type === bridge.inbound.setEmbedOptionsType) {
+      applyEmbedOptions(message.options || {});
+      return;
+    }
+    if (message.type === bridge.inbound.loadRecordBytesType) {
+      const bytes = message.bytes;
+      if (!(bytes instanceof ArrayBuffer)) throw new Error("loadRecordBytesType message.bytes must be an ArrayBuffer");
+      const file = new File([bytes], String(message.name || "record.png"), { type: String(message.mime || "image/png") });
+      await loadFile(file, { resumeAudio: false });
+    }
+  } catch (error) {
+    log.warn("post-message-bridge-error", { type: message.type, message: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+function parseJsonObject(json, fallback = null) {
+  if (!json) return fallback;
+  try {
+    const parsed = JSON.parse(json);
+    return parsed && typeof parsed === "object" ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function programmeTracks() {
+  const tracks = state.programmeMap?.tracks;
+  return Array.isArray(tracks) ? tracks : [];
+}
+
+function trackSeconds(track) {
+  const startSamples = Number(track?.startSamples ?? track?.start ?? track?.sampleStart);
+  const endSamples = Number(track?.endSamples ?? track?.end ?? track?.sampleEnd);
+  const startSeconds = Number(track?.startSeconds);
+  const endSeconds = Number(track?.endSeconds);
+  const sampleRate = Math.max(1, Number(state.sampleRate) || 48000);
+  return {
+    start: Number.isFinite(startSeconds) ? startSeconds : (Number.isFinite(startSamples) ? Math.max(0, startSamples / sampleRate) : 0),
+    end: Number.isFinite(endSeconds) ? endSeconds : (Number.isFinite(endSamples) ? Math.max(0, endSamples / sampleRate) : 0),
+  };
+}
+
+function currentTrackIndex() {
+  const tracks = programmeTracks();
+  if (!tracks.length) return -1;
+  const current = framesToSeconds(state.positionFrames);
+  for (let index = 0; index < tracks.length; index += 1) {
+    const span = trackSeconds(tracks[index]);
+    if (current >= span.start && current < span.end) return index;
+  }
+  return -1;
+}
+
+function stepTrack(direction = 1) {
+  const tracks = programmeTracks();
+  if (!tracks.length) return false;
+  const delta = direction >= 0 ? 1 : -1;
+  const index = currentTrackIndex();
+  const fallback = delta > 0 ? -1 : tracks.length;
+  const targetIndex = (index === -1 ? fallback : index) + delta;
+  const target = tracks[targetIndex];
+  if (!target) return false;
+  const span = trackSeconds(target);
+  api.seekSeconds(span.start);
+  return true;
+}
+
+function normalizeCacheHandler(handler) {
+  if (handler == null) return null;
+  if (typeof handler !== "object") throw new Error("Cache handler must be an object.");
+  if (typeof handler.get !== "function" || typeof handler.put !== "function") {
+    throw new Error("Cache handler must provide get(key, meta) and put(key, pcm).");
+  }
+  return handler;
+}
 
 function setStatus(message) {
   log.state("status", { message });
@@ -178,12 +564,23 @@ async function appendProgressiveSegments(segments) {
       endFrame,
       channelBuffers
     }, channelBuffers);
-    state.streamDecodedFrames = Math.max(state.streamDecodedFrames, endFrame);
-    if (!state.streamReady && endFrame > startFrame) {
-      state.streamReady = true;
-      await markLoadedReady();
-      renderDecodeStatus();
-    }
+  }
+}
+
+// Matches the worklet's own resume-from-underrun threshold (player-worklet.js
+// `waitingForData && decodedLength > lastPosition + 1024`) — the smallest
+// buffer depth the engine already treats as safe to start from.
+const PROGRESSIVE_READY_THRESHOLD_FRAMES = 1024;
+
+async function handleWorkletBuffered(message) {
+  state.streamDecodedFrames = Math.max(0, Math.floor(Number(message.decodedLength) || 0));
+  if (state.streamReady) return;
+  const totalFrames = Math.max(1, Math.round(state.duration * state.sampleRate));
+  const contiguousReady = state.streamDecodedFrames >= Math.min(totalFrames, PROGRESSIVE_READY_THRESHOLD_FRAMES);
+  if (contiguousReady) {
+    state.streamReady = true;
+    await markLoadedReady();
+    renderDecodeStatus();
   }
 }
 
@@ -399,6 +796,8 @@ function handleWorkletMessage(event) {
     state.positionFrames = message.position;
   } else if (message.type === "buffering") {
     setStatus("Buffering decoded groove audio…");
+  } else if (message.type === "buffered") {
+    void handleWorkletBuffered(message);
   } else if (message.type === "worklet-error") {
     setStatus(`Audio engine error: ${message.message || message.stage || "unknown error"}`);
     console.error("[vin.yl.player] AudioWorklet error", message);
@@ -429,16 +828,32 @@ function handleWorkletMessage(event) {
   }
 }
 
-async function loadFile(file) {
+async function loadFile(file, { cache, resumeAudio = true } = {}) {
+  console.log("[vin.yl.player] loadFile:start", {
+    name: file?.name || "",
+    size: file?.size || 0,
+    type: file?.type || "",
+    resumeAudio,
+    hasCacheArg: Boolean(cache),
+    hasActiveCache: Boolean(state.cacheHandler),
+  });
   await initialiseAudio();
-  await state.context.resume();
-  state.decoder ??= new RecordDecoderClient("./record-decoder-worker.js", { loggingEnabled: isPlayerLoggingEnabled() });
+  if (resumeAudio) {
+    await state.context.resume();
+  }
+  if (cache !== undefined) state.cacheHandler = normalizeCacheHandler(cache);
+  state.decoder ??= new RecordDecoderClient("./record-decoder-worker.js", {
+    loggingEnabled: isPlayerLoggingEnabled(),
+    cache: state.cacheHandler,
+  });
+  state.decoder.setCache(state.cacheHandler);
   await state.decoder.initialise();
   state.streamInitialised = false;
   state.streamReady = false;
   state.streamDecodedFrames = 0;
   state.streamAppendChain = Promise.resolve();
   state.decodeProgressText = "";
+  state.programmeMap = null;
   elements.play.disabled = false;
   elements.needle.disabled = false;
   elements.seek.disabled = true;
@@ -447,18 +862,47 @@ async function loadFile(file) {
   elements.recordImage.src = state.recordObjectUrl;
   setStatus(`Inspecting ${file.name}…`);
   const sourceBytes = await file.arrayBuffer();
+  console.log("[vin.yl.player] loadFile:bytes", {
+    name: file?.name || "",
+    bytes: sourceBytes.byteLength || 0,
+  });
   const cacheKey = await recordCacheKey(sourceBytes);
   state.recordHash = cacheKey;
   const inspected = await state.decoder.inspect(sourceBytes.slice(0));
-  elements.metadata.hidden = false;
+  state.recordHeaderProof = inspected.recordHeaderProof || null;
+  try {
+    state.recordDescriptorJson = await decodeRecordDescriptorJson(sourceBytes, inspected.recordProfile || "");
+  } catch (error) {
+    state.recordDescriptorJson = "";
+    console.warn("[vin.yl.player] record descriptor decode failed", error);
+  }
+  if (typeof state.cacheHandler?.setRecordContext === "function") {
+    await state.cacheHandler.setRecordContext({
+      descriptorJson: state.recordDescriptorJson,
+      recordHeaderProof: state.recordHeaderProof,
+      recordProfile: inspected.recordProfile || "",
+    });
+  }
+  console.log("[vin.yl.player] loadFile:inspect", {
+    recordProfile: inspected.recordProfile || "",
+    payloadContainer: inspected.payloadContainer || "",
+    releaseId: inspected.releaseId || "",
+    hasProgrammeMap: Boolean(inspected.programmeMapJson),
+    hasRecordDescriptorJson: Boolean(state.recordDescriptorJson),
+  });
+  state.programmeMap = parseJsonObject(inspected.programmeMapJson, null);
+  elements.metadata.hidden = isEmbedMode();
   elements.metaProfile.textContent = inspected.recordProfile || "unknown";
   elements.metaContainer.textContent = inspected.payloadContainer || "unknown";
   elements.metaRelease.textContent = inspected.releaseId || "unsigned / unavailable";
+  publishState();
   state.baseRpm = profileRpm(inspected.recordProfile);
   state.rpm = state.baseRpm;
   updateRpmButtons();
   setStatus(`Decoding ${file.name}…`);
-  const decoded = await state.decoder.decode(sourceBytes, inspected.recordProfile || "", progress => {
+  const decoded = await state.decoder.decode(sourceBytes, inspected.recordProfile || "", {
+    recordBindingHex: state.recordHash,
+  }, progress => {
     log.action("decoder-progress", {
       keys: Object.keys(progress || {}),
       status: progress?.status,
@@ -497,7 +941,61 @@ async function loadFile(file) {
     await markLoadedReady();
     state.streamReady = true;
   }
+  publishState();
+  console.log("[vin.yl.player] loadFile:complete", {
+    name: file?.name || "",
+    durationSeconds: state.duration,
+    sampleRate,
+    payloadContainer: inspected.payloadContainer || "",
+  });
   setStatus(`${file.name} · ${state.duration.toFixed(1)}s · ${sampleRate} Hz · ${inspected.payloadContainer || "record"}`);
+}
+
+async function loadRecordFromUrl(url, options = {}) {
+  const resolved = new URL(String(url || ""), globalThis.location?.href || import.meta.url);
+  console.log("[vin.yl.player] loadRecordFromUrl:start", {
+    input: String(url || ""),
+    resolved: resolved.toString(),
+    options,
+  });
+  const response = await fetch(resolved.toString(), { cache: "force-cache" });
+  if (!response.ok) {
+    console.error("[vin.yl.player] loadRecordFromUrl:fetch-failed", {
+      resolved: resolved.toString(),
+      status: response.status,
+    });
+    throw new Error(`Failed to load record from ${resolved}: ${response.status}`);
+  }
+  const blob = await response.blob();
+  console.log("[vin.yl.player] loadRecordFromUrl:fetched", {
+    resolved: resolved.toString(),
+    size: blob.size || 0,
+    type: blob.type || "",
+  });
+  const pathname = resolved.pathname.split("/").pop() || "record.png";
+  const file = new File([blob], pathname, { type: blob.type || "image/png" });
+  return loadFile(file, { resumeAudio: false, ...(options || {}) });
+}
+
+async function configureStartupCache() {
+  const cacheUrl = startupCacheUrl();
+  if (!cacheUrl) {
+    console.warn("[vin.yl.player] configureStartupCache skipped: no tape_url configured");
+    return null;
+  }
+  console.info("[vin.yl.player] configureStartupCache:start", { cacheUrl });
+  const cache = createRemoteOpusChunkCacheHandler({ apiBaseUrl: cacheUrl });
+  state.cacheHandler = normalizeCacheHandler(cache);
+  if (typeof state.cacheHandler.setRecordContext === "function" && state.recordDescriptorJson) {
+    await state.cacheHandler.setRecordContext({
+      descriptorJson: state.recordDescriptorJson,
+      recordHeaderProof: state.recordHeaderProof,
+      recordProfile: "",
+    });
+  }
+  state.decoder?.setCache(state.cacheHandler);
+  console.info("[vin.yl.player] configureStartupCache:ready", { cacheUrl });
+  return state.cacheHandler;
 }
 
 function render() {
@@ -707,13 +1205,18 @@ function publicState() {
     recordImageUrl: state.recordObjectUrl,
     rotationDegrees: state.rotation,
     sampleRate: state.sampleRate,
-    positionFrames: state.positionFrames
+    positionFrames: state.positionFrames,
+    currentTrackIndex: currentTrackIndex(),
+    currentTrackTitle: programmeTracks()[currentTrackIndex()]?.title || "",
+    trackCount: programmeTracks().length,
   });
 }
 
 function publishState() {
   const snapshot = publicState();
   for (const listener of state.listeners) listener(snapshot);
+  reportBridgePlayback(snapshot);
+  reportBridgeRecord(snapshot);
 }
 
 async function setVolume(value) {
@@ -766,7 +1269,28 @@ const api = Object.freeze({
   },
   get loggingEnabled() { return isPlayerLoggingEnabled(); },
   get logLevel() { return getPlayerLogLevel(); },
+  configurePostMessageBridge(config = {}) {
+    state.postMessageBridge = normalizePostMessageBridge(config);
+    lastBridgePlaybackKey = "";
+    lastBridgeRecordKey = "";
+    lastBridgePlaybackAt = 0;
+    reportBridgeRecord();
+    reportBridgePlayback();
+    return state.postMessageBridge;
+  },
+  postMessageBridgeSend(type, payload = {}) {
+    return bridgePost(type, payload);
+  },
+  configureCache(handler) {
+    state.cacheHandler = normalizeCacheHandler(handler);
+    state.decoder?.setCache(state.cacheHandler);
+    return state.cacheHandler;
+  },
+  createPcmChunkCacheHandler,
+  createRemoteOpusChunkCacheHandler,
+  createRemoteOpusPrecache,
   loadRecord: loadFile,
+  loadRecordFromUrl,
   startTransport: async () => {
     await initialiseAudio();
     await state.context.resume();
@@ -797,6 +1321,7 @@ const api = Object.freeze({
     await state.context.resume();
     await dispatch({ type: "toggle_playback", deck: "a" });
   },
+  stepTrack,
   seekSeconds: seconds => queueSeek(Math.max(0, Math.min(state.duration, Number(seconds) || 0))),
   seekRatio: ratio => queueSeek(Math.max(0, Math.min(1, Number(ratio) || 0)) * state.duration),
   setRpm,
@@ -914,7 +1439,30 @@ async function initialise() {
   elements.needle.disabled = false;
   render();
   const canvas = document.querySelector("#player-canvas");
-  if (canvas) state.canvasController = createVinylPlayerCanvas(api, canvas);
+  if (canvas) {
+    state.canvasController = createVinylPlayerCanvas(api, canvas);
+    const embedOptions = embedCanvasOptions();
+    if (embedOptions) state.canvasController.configure(embedOptions);
+  }
+  globalThis.addEventListener("message", event => { void handleBridgeMessage(event); });
+  if (document.documentElement.classList.contains("embed-mode")) {
+    api.configurePostMessageBridge({ enabled: true });
+    // The iframe's "load" event fires long before this point (WASM init is
+    // async), so a host that only re-sends record bytes on load would race
+    // ahead of the inbound listener above and be dropped. Announce that the
+    // bridge is live now so the host can (re)send whatever record it holds.
+    const parentWindow = globalThis.parent !== globalThis ? globalThis.parent : null;
+    if (parentWindow) parentWindow.postMessage({ type: "bitneedle-embed-ready" }, "*");
+  }
+  await configureStartupCache();
+  const initialSrc = startupRecordSrc();
+  if (initialSrc) {
+    console.log("[vin.yl.player] startup autoload", { src: initialSrc });
+    void loadRecordFromUrl(initialSrc).catch(error => {
+      console.error("[vin.yl.player] startup autoload failed", error);
+      setStatus(error.message || String(error));
+    });
+  }
   globalThis.dispatchEvent(new CustomEvent("vin.yl.player.ready", { detail: api }));
 }
 

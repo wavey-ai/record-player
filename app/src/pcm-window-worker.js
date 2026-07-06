@@ -12,7 +12,40 @@ const state = {
   generation: 0,
   availableStart: 0,
   availableEnd: 0,
+  writtenRanges: [],
 };
+
+// Merges [start, end) into the sorted, non-overlapping writtenRanges list and
+// returns the contiguous-from-zero coverage end (0 if frame zero is not yet
+// covered). Disjoint ranges (e.g. a later chunk arriving before an earlier
+// one) are retained but never reported as available until the gap closes.
+function mergeWrittenRange(start, end) {
+  const ranges = state.writtenRanges;
+  let inserted = false;
+  for (let index = 0; index < ranges.length; index += 1) {
+    if (end < ranges[index][0]) {
+      ranges.splice(index, 0, [start, end]);
+      inserted = true;
+      break;
+    }
+    if (start <= ranges[index][1]) {
+      ranges[index][0] = Math.min(ranges[index][0], start);
+      ranges[index][1] = Math.max(ranges[index][1], end);
+      inserted = true;
+      break;
+    }
+  }
+  if (!inserted) {
+    ranges.push([start, end]);
+  }
+  for (let index = ranges.length - 1; index > 0; index -= 1) {
+    if (ranges[index - 1][1] >= ranges[index][0]) {
+      ranges[index - 1][1] = Math.max(ranges[index - 1][1], ranges[index][1]);
+      ranges.splice(index, 1);
+    }
+  }
+  return ranges.length && ranges[0][0] === 0 ? ranges[0][1] : 0;
+}
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -28,24 +61,31 @@ function initialise(message) {
     bankBuffers.map(buffer => new Float32Array(buffer))
   );
   state.channels = Array.from({ length: state.channelCount }, () => new Int16Array(state.totalFrames));
-  state.availableStart = state.totalFrames;
+  state.availableStart = 0;
   state.availableEnd = 0;
+  state.writtenRanges = [];
 }
 
 function appendSegment(segment) {
-  const start = clamp(Math.floor(Number(segment.startFrame) || 0), 0, state.totalFrames);
-  const end = clamp(Math.floor(Number(segment.endFrame) || start), start, state.totalFrames);
-  const frameCount = end - start;
-  if (!frameCount) return;
+  const start = Math.floor(Number(segment.startFrame));
+  const end = Math.floor(Number(segment.endFrame));
   const buffers = Array.isArray(segment.channelBuffers) ? segment.channelBuffers : [];
+  const frameCount = end - start;
+  const segmentValid = (
+    Number.isInteger(start) &&
+    Number.isInteger(end) &&
+    start >= 0 &&
+    end > start &&
+    end <= state.totalFrames &&
+    buffers.length === state.channelCount &&
+    buffers.every((buffer) => buffer && new Int16Array(buffer).length === frameCount)
+  );
+  if (!segmentValid) return;
   for (let channel = 0; channel < state.channelCount; channel += 1) {
-    const sourceBuffer = buffers[Math.min(channel, Math.max(0, buffers.length - 1))];
-    if (!sourceBuffer) continue;
-    const source = new Int16Array(sourceBuffer, 0, Math.min(frameCount, sourceBuffer.byteLength / Int16Array.BYTES_PER_ELEMENT));
-    state.channels[channel].set(source, start);
+    state.channels[channel].set(new Int16Array(buffers[channel]), start);
   }
-  state.availableStart = Math.min(state.availableStart, start);
-  state.availableEnd = Math.max(state.availableEnd, end);
+  state.availableEnd = mergeWrittenRange(start, end);
+  state.availableStart = state.availableEnd > 0 ? 0 : state.totalFrames;
 }
 
 function fillWindow(position, resetPosition, requestId) {

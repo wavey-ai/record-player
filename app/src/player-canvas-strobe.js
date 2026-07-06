@@ -51,7 +51,14 @@ export function strobeLampGeometry(geometry) {
   return { x: point.x, y: point.y, radius, angle: STROBE_LAMP_DEG };
 }
 
-export function drawStrobe(ctx, geometry, state, theme, lightOn, timestamp) {
+export function drawStrobe(ctx, geometry, state, theme, lightOn, timestamp, parts = {}) {
+  const showDots = parts.showDots !== false;
+  const showStrobe = parts.showStrobe !== false;
+  const showLamp = parts.showLamp !== false;
+  // The lamp fixture (and its beam-sampled lit dots) only make sense when
+  // the lamp is actually shown; otherwise treat the strobe as unlit so the
+  // base dots render evenly all the way round.
+  const beamLit = lightOn && showLamp;
   const playing = Boolean(state.motorRunning || state.scratching);
   const rate = Number(state.playbackRate) || 0;
   const timeSec = timestamp / 1000;
@@ -72,7 +79,9 @@ export function drawStrobe(ctx, geometry, state, theme, lightOn, timestamp) {
     for (let index = 0; index < row.count; index += 1) {
       const movingAngleDeg = index * stepDeg + physicalRotation;
       const movingDistance = angularDeltaDegrees(movingAngleDeg, lamp.angle);
-      if (!lightOn || movingDistance > STROBE_BEAM_HALF_DEG) {
+      // A base dot renders wherever the beam isn't currently "eating" it —
+      // i.e. everywhere when the beam is off, or outside the beam cone.
+      if (showDots && (!beamLit || movingDistance > STROBE_BEAM_HALF_DEG)) {
         const angle = degToRad(movingAngleDeg);
         ctx.beginPath();
         ctx.arc(
@@ -86,7 +95,7 @@ export function drawStrobe(ctx, geometry, state, theme, lightOn, timestamp) {
         ctx.fill();
       }
 
-      if (!lightOn) continue;
+      if (!beamLit || !showStrobe) continue;
       const sampledAngleDeg = index * stepDeg + strobeOffset;
       const distance = angularDeltaDegrees(sampledAngleDeg, lamp.angle);
       if (distance > STROBE_BEAM_HALF_DEG) continue;
@@ -110,7 +119,7 @@ export function drawStrobe(ctx, geometry, state, theme, lightOn, timestamp) {
     }
   });
 
-  if (lightOn) {
+  if (beamLit) {
     const beamRadius = geometry.outerRadius + geometry.buttonHeight * 0.2;
     const beam = ctx.createRadialGradient(lamp.x, lamp.y, 0, lamp.x, lamp.y, geometry.buttonHeight * 2.2);
     beam.addColorStop(0, theme.lamp);
@@ -137,20 +146,22 @@ export function drawStrobe(ctx, geometry, state, theme, lightOn, timestamp) {
     ctx.globalAlpha = 1;
   }
 
-  ctx.beginPath();
-  ctx.arc(lamp.x, lamp.y, lamp.radius, 0, Math.PI * 2);
-  ctx.fillStyle = theme.controlFill;
-  ctx.fill();
-  ctx.strokeStyle = theme.line;
-  ctx.lineWidth = 1;
-  ctx.stroke();
+  if (showLamp) {
+    ctx.beginPath();
+    ctx.arc(lamp.x, lamp.y, lamp.radius, 0, Math.PI * 2);
+    ctx.fillStyle = theme.controlFill;
+    ctx.fill();
+    ctx.strokeStyle = theme.line;
+    ctx.lineWidth = 1;
+    ctx.stroke();
 
-  drawLampFaceLabel(ctx, lamp, lightOn, theme, geometry.scale);
+    drawLampFaceLabel(ctx, lamp, lightOn, theme, geometry.scale);
 
-  ctx.beginPath();
-  ctx.arc(lamp.x, lamp.y, Math.max(1.2, lamp.radius * 0.08), 0, Math.PI * 2);
-  ctx.fillStyle = lightOn ? theme.lamp : theme.mutedLine;
-  ctx.fill();
+    ctx.beginPath();
+    ctx.arc(lamp.x, lamp.y, Math.max(1.2, lamp.radius * 0.08), 0, Math.PI * 2);
+    ctx.fillStyle = lightOn ? theme.lamp : theme.mutedLine;
+    ctx.fill();
+  }
 
   ctx.restore();
   return lamp;

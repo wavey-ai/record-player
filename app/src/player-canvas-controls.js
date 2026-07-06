@@ -296,7 +296,7 @@ function drawPitchResetButton(ctx, geometry, player, state, theme, hitRegions) {
   ctx.stroke();
   ctx.translate(x, y);
   ctx.rotate(degToRad(angle));
-  ctx.fillStyle = "#000";
+  ctx.fillStyle = theme.controlText;
   ctx.font = `700 ${Math.max(5, 5.5 * geometry.scale)}px ${FONT_FAMILY}`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";

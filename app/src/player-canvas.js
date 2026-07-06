@@ -20,6 +20,9 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
   if (!(canvas instanceof HTMLCanvasElement)) throw new TypeError("A canvas element is required");
   let components = { ...CANVAS_COMPONENTS, ...(options.components || {}) };
   let theme = { ...CANVAS_THEME, ...(options.theme || {}) };
+  let interaction = {
+    loadOnEmptyRecordTap: Boolean(options.loadOnEmptyRecordTap)
+  };
   let snapshot = player.getState();
   let image = null;
   let imageUrl = "";
@@ -62,23 +65,46 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
 
   function drawMinimalTurntable(geometry) {
     ctx.save();
+    ctx.translate(geometry.cx, geometry.cy);
+    ctx.rotate(visualRotation * Math.PI / 180);
     ctx.fillStyle = theme.recordFallback;
     if (theme.recordFallback !== "transparent") {
       ctx.beginPath();
-      ctx.arc(geometry.cx, geometry.cy, geometry.recordRadius, 0, Math.PI * 2);
+      ctx.arc(0, 0, geometry.recordRadius, 0, Math.PI * 2);
       ctx.fill();
     }
     const spacing = Math.max(7, 10 * geometry.scale);
     const inner = Math.max(spacing, geometry.recordRadius * 0.08);
+    const segmentCount = 96;
+    const segmentSpan = (Math.PI * 2) / segmentCount;
     let index = 0;
     for (let radius = inner; radius <= geometry.recordRadius; radius += spacing) {
-      ctx.beginPath();
-      ctx.arc(geometry.cx, geometry.cy, radius, 0, Math.PI * 2);
-      ctx.strokeStyle = index % 4 === 0 ? theme.turntableRingStrong : theme.turntableRing;
-      ctx.lineWidth = index % 4 === 0 ? Math.max(0.8, geometry.scale) : Math.max(0.5, geometry.scale * 0.7);
-      ctx.stroke();
+      const majorRing = index % 4 === 0;
+      const lineWidth = majorRing ? Math.max(0.8, geometry.scale) : Math.max(0.5, geometry.scale * 0.7);
+      for (let segmentIndex = 0; segmentIndex < segmentCount; segmentIndex += 1) {
+        const t = segmentIndex / segmentCount;
+        const wave = 0.5 + 0.5 * Math.sin((t * Math.PI * 2) + (index * 0.31));
+        ctx.beginPath();
+        ctx.arc(
+          0,
+          0,
+          radius,
+          segmentIndex * segmentSpan,
+          (segmentIndex + 1) * segmentSpan + 0.002
+        );
+        ctx.lineWidth = lineWidth;
+        if (majorRing) {
+          ctx.strokeStyle = theme.turntableRingStrong;
+          ctx.globalAlpha = 0.18 + wave * 0.12;
+        } else {
+          ctx.strokeStyle = theme.turntableRing;
+          ctx.globalAlpha = 0.14 + wave * 0.08;
+        }
+        ctx.stroke();
+      }
       index += 1;
     }
+    ctx.globalAlpha = 1;
     ctx.restore();
   }
 
@@ -128,8 +154,15 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
     hitRegions = [];
     const geometry = buildCanvasGeometry(width, height);
     latestGeometry = geometry;
-    if (components.syncRings) {
-      const lamp = drawStrobe(ctx, geometry, snapshot, theme, strobeLightOn, timestamp);
+    // syncRings kept as a legacy master switch; the strobe subsystem is now
+    // gated per-part: syncDots (base ring dots), strobe (lit sampling +
+    // beam), strobeLamp (the lamp fixture / light).
+    if (components.syncRings && (components.syncDots || components.strobe || components.strobeLamp)) {
+      const lamp = drawStrobe(ctx, geometry, snapshot, theme, strobeLightOn, timestamp, {
+        showDots: components.syncDots,
+        showStrobe: components.strobe,
+        showLamp: components.strobeLamp,
+      });
       if (components.strobeLamp) {
         hitRegions.push({ key: "strobeLamp", kind: "lamp", x: lamp.x, y: lamp.y, radius: lamp.radius * 1.4 });
       }
@@ -231,7 +264,9 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
       return;
     }
     if (!snapshot.ready) {
-      document.querySelector("#file")?.click();
+      if (interaction.loadOnEmptyRecordTap) {
+        document.querySelector("#file")?.click();
+      }
       return;
     }
     const angle = Math.atan2(point.y - latestGeometry.cy, point.x - latestGeometry.cx);
@@ -308,6 +343,12 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
     configure(next = {}) {
       if (next.components) components = { ...components, ...next.components };
       if (next.theme) theme = { ...theme, ...next.theme };
+      if (Object.prototype.hasOwnProperty.call(next, "loadOnEmptyRecordTap")) {
+        interaction = {
+          ...interaction,
+          loadOnEmptyRecordTap: Boolean(next.loadOnEmptyRecordTap)
+        };
+      }
       if (typeof next.strobeLightOn === "boolean") strobeLightOn = next.strobeLightOn;
       return this.getConfig();
     },
@@ -325,7 +366,12 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
       return strobeLightOn;
     },
     getConfig() {
-      return Object.freeze({ components: { ...components }, theme: { ...theme }, strobeLightOn });
+      return Object.freeze({
+        components: { ...components },
+        theme: { ...theme },
+        interaction: { ...interaction },
+        strobeLightOn
+      });
     },
     destroy() {
       destroyed = true;
