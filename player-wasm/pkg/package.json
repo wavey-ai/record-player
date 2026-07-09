@@ -1,0 +1,21 @@
+{
+  "name": "player-wasm",
+  "type": "module",
+  "description": "WebAssembly orchestration helpers for Bitneedle player apps.",
+  "version": "0.1.0",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wavey-ai/bitneedle"
+  },
+  "files": [
+    "bitneedle_player_bg.wasm",
+    "bitneedle_player.js",
+    "bitneedle_player.d.ts"
+  ],
+  "main": "bitneedle_player.js",
+  "types": "bitneedle_player.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
