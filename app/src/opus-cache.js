@@ -51,7 +51,7 @@ async function ensureSharedModules() {
 
 async function ensurePlayerWasmModule() {
   if (!playerWasmModulePromise) {
-    playerWasmModulePromise = import("./wasm/player-wasm/player_wasm.js").then(async (module) => {
+    playerWasmModulePromise = import("./player-wasm/player_wasm.js").then(async (module) => {
       if (typeof module.default === "function") {
         await module.default();
       }
@@ -270,7 +270,7 @@ async function createOpusRuntime(config = {}) {
     encodeUint8ArrayBase64,
     encodeUint8ArrayBase64Url,
     uint8View,
-    setStatus: () => {},
+    setStatus: () => { },
     getPlayerAppWasmModule: () => playerWasm,
   });
 
@@ -281,7 +281,7 @@ async function createOpusRuntime(config = {}) {
     buildSoundkitFrameHeader: soundkitPacketHelpers.buildSoundkitFrameHeader,
     uint8View,
     yieldToMainThread: () => Promise.resolve(),
-    assertPlayerRuntimeActive: () => {},
+    assertPlayerRuntimeActive: () => { },
     concatenateUint8Chunks,
     soundkitOpusPacketItemsFromPackets: soundkitPacketHelpers.soundkitOpusPacketItemsFromPackets,
     decodeBase64ToUint8Array,

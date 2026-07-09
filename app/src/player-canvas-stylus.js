@@ -1,8 +1,11 @@
 import { clamp, degToRad } from "./player-canvas-geometry.js";
 
-const ARM_PIVOT_ANGLE = Math.PI / 2;
+const ARM_PIVOT_ANGLE = -Math.PI / 3;
+const ARM_PIVOT_OFFSET = 70;
 const ARM_TIP_ANGLE = -Math.PI / 4;
-const ARM_LENGTH_FACTOR = 1.26;
+const ARM_LENGTH_FACTOR = 1.08;
+const ARM_BEND_FRACTION = 0.66;
+const ARM_BEND_OFFSET_FACTOR = 0.07;
 
 function tonearmTipForGroove(cx, cy, anchorX, anchorY, pivotDistance, armLength, grooveRadius) {
   const dx = anchorX - cx;
@@ -20,8 +23,9 @@ function tonearmTipForGroove(cx, cy, anchorX, anchorY, pivotDistance, armLength,
 
 export function resolveStylusGeometry(geometry, state, options = {}) {
   const scale = geometry.scale;
-  const anchorX = geometry.cx + (geometry.recordRadius + 24 * scale) * Math.cos(ARM_PIVOT_ANGLE);
-  const anchorY = geometry.cy - (geometry.recordRadius + 24 * scale) * Math.sin(ARM_PIVOT_ANGLE) - 50 * scale;
+  const pivotRadius = geometry.recordRadius + ARM_PIVOT_OFFSET * scale;
+  const anchorX = geometry.cx + pivotRadius * Math.cos(ARM_PIVOT_ANGLE);
+  const anchorY = geometry.cy + pivotRadius * Math.sin(ARM_PIVOT_ANGLE);
   const pivotDistance = Math.hypot(anchorX - geometry.cx, anchorY - geometry.cy) || 1;
   const armLength = pivotDistance * ARM_LENGTH_FACTOR;
   const progress = clamp(Number(state.positionRatio) || 0, 0, 1);
@@ -78,11 +82,29 @@ export function drawStylus(ctx, geometry, state, theme, components, timestamp, o
     ctx.strokeStyle = theme.tonearm;
     ctx.lineWidth = 1;
     ctx.lineCap = "round";
+    const armDx = tipX - resolved.anchorX;
+    const armDy = tipY - resolved.anchorY;
+    const armDistance = Math.hypot(armDx, armDy) || 1;
+    let normalX = -armDy / armDistance;
+    let normalY = armDx / armDistance;
+    const baseBendX = resolved.anchorX + armDx * ARM_BEND_FRACTION;
+    const baseBendY = resolved.anchorY + armDy * ARM_BEND_FRACTION;
+    const centerDx = geometry.cx - baseBendX;
+    const centerDy = geometry.cy - baseBendY;
+    if (normalX * centerDx + normalY * centerDy > 0) {
+      normalX = -normalX;
+      normalY = -normalY;
+    }
+    const bendOffset = resolved.armLength * ARM_BEND_OFFSET_FACTOR;
+    const bendX = baseBendX + normalX * bendOffset;
+    const bendY = baseBendY + normalY * bendOffset;
     ctx.beginPath();
     ctx.moveTo(
       resolved.anchorX - Math.cos(armDirection) * tailLength,
       resolved.anchorY - Math.sin(armDirection) * tailLength
     );
+    ctx.lineTo(resolved.anchorX, resolved.anchorY);
+    ctx.lineTo(bendX, bendY);
     ctx.lineTo(tipX, tipY);
     ctx.stroke();
     const hub = Math.max(2, 2.2 * geometry.scale);

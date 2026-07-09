@@ -27,16 +27,19 @@ createServer((request, response) => {
     response.writeHead(403).end();
     return;
   }
+
   try {
-    const info = statSync(candidate);
+    const path = (relative.startsWith("wasm")) ? join("../../vin.yl.vendor", relative) : candidate;
+    const info = statSync(path);
     if (!info.isFile()) throw new Error("not a file");
     response.writeHead(200, {
-      "Content-Type": types.get(extname(candidate)) || "application/octet-stream",
+      "Content-Type": types.get(extname(path)) || "application/octet-stream",
       "Cross-Origin-Opener-Policy": "same-origin",
       "Cross-Origin-Embedder-Policy": "require-corp"
     });
-    createReadStream(candidate).pipe(response);
-  } catch {
+    createReadStream(path).pipe(response);
+  } catch (e) {
+    console.log(e)
     response.writeHead(404).end("Not found");
   }
 }).listen(port, () => {

@@ -721,7 +721,7 @@ function seekWorklet(position) {
 async function initialiseAudio() {
   if (state.context) return;
   state.context = new AudioContext({ latencyHint: "interactive" });
-  const recordPlayerWasmResponse = await fetch("./wasm/record-player/record_player_bg.wasm");
+  const recordPlayerWasmResponse = await fetch("./record-player/record_player_bg.wasm");
   if (!recordPlayerWasmResponse.ok) throw new Error(`Failed to load record-player WASM: ${recordPlayerWasmResponse.status}`);
   const recordPlayerWasmModule = await WebAssembly.compileStreaming(recordPlayerWasmResponse);
   await state.context.audioWorklet.addModule("./player-worklet.js");
@@ -1433,7 +1433,7 @@ async function initialise() {
     if (ok) request.resolve(result);
     else request.reject(new Error(error));
   };
-  const result = await coreRequest("init", { moduleUrl: "./wasm/record-player/record_player.js" });
+  const result = await coreRequest("init", { moduleUrl: "./record-player/record_player.js" });
   state.view = result.view;
   elements.play.disabled = false;
   elements.needle.disabled = false;

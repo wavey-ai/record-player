@@ -33,9 +33,10 @@ const WORKER_DECODE_DEBUG_ENABLED =
 // weights are ~42MB and current records do not use it.
 const MOSS_NANO_DECODE_ENABLED =
   new URL(self.location.href).searchParams.get("mossnano") === "1";
-const ONNX_RUNTIME_BASE_URL = "./wasm/onnxruntime-web/";
-const ENCODEC_BUNDLE_BASE_URL = "./wasm/encodec-rs/onnx-bundles";
-const MOSSNANO_WASM_BASE_URL = "/wasm/mossnano-rs";
+
+const ONNX_RUNTIME_BASE_URL = "wasm/onnxruntime-web/";
+const ENCODEC_BUNDLE_BASE_URL = "wasm/encodec-rs/bundles";
+const MOSSNANO_WASM_BASE_URL = "wasm/mossnano-rs";
 const MOSS_NANO_CODEC = "moss-audio-tokenizer-nano-rvq16";
 const MOSS_NANO_MODEL_ROOT = `${MOSSNANO_WASM_BASE_URL}/weights/MOSS-Audio-Tokenizer-Nano-ONNX`;
 const MOSS_NANO_RECORD_PROFILE_CHUNK_SECONDS = Object.freeze({
@@ -342,9 +343,9 @@ async function ensureOnnxRuntimeModule() {
 async function ensurePlayerWasmModule() {
   if (!playerWasmModulePromise) {
     playerWasmModulePromise = (async () => {
-      const module = await import(versionedWorkerAssetUrl("./wasm/player-wasm/player_wasm.js"));
+      const module = await import(versionedWorkerAssetUrl("./player-wasm/player_wasm.js"));
       await module.default({
-        module_or_path: versionedWorkerAssetUrl("./wasm/player-wasm/player_wasm_bg.wasm"),
+        module_or_path: versionedWorkerAssetUrl("./player-wasm/player_wasm_bg.wasm"),
       });
       module.initPanicHook?.();
       playerAppWasmModule = module;
@@ -2210,7 +2211,7 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
     const samplesPerChunk = Math.max(
       1,
       Math.floor(Number(selectedMeta?.owned_samples ?? selectedMeta?.ownedSamples) || 0)
-        || Math.round(safeAudioLength / Math.max(1, encodedFrames.length)),
+      || Math.round(safeAudioLength / Math.max(1, encodedFrames.length)),
     );
     const { channelData: splicedChannelData, audioLength: splicedAudioLength } =
       spliceSilenceIntoChannelData(s16Result.channelData, safeAudioLength, samplesPerChunk, silenceMap);

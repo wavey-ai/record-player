@@ -24,7 +24,6 @@ base64 = "0.22.1"
 console_error_panic_hook = "0.1"
 encodec-rs = { version = "0.1.1", features = ["ecdc"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
-libopus-rs = { path = "../../libopus-rs" }
 record-core = "0.1.6"
 record-decode = "0.1.6"
 record-descriptor = "0.1.6"

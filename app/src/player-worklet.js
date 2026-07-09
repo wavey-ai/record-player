@@ -4,7 +4,7 @@ import "./worklet-text-codec-polyfill.js";
 import { createLogger, setPlayerLoggingEnabled } from "./player-message-logger.js";
 
 const log = createLogger("audio-worklet");
-import { initSync, ScratchAcousticDsp } from "./wasm/record-player/record_player.js";
+import { initSync, ScratchAcousticDsp } from "./record-player/record_player.js";
 
 let wasm = null;
 
@@ -283,8 +283,8 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
         const performance = message.performance || {};
         const events = Array.isArray(performance.events)
           ? performance.events
-              .map(event => ({ ...event, frameOffset: Math.max(0, Math.floor(Number(event.frameOffset) || 0)) }))
-              .sort((a, b) => a.frameOffset - b.frameOffset)
+            .map(event => ({ ...event, frameOffset: Math.max(0, Math.floor(Number(event.frameOffset) || 0)) }))
+            .sort((a, b) => a.frameOffset - b.frameOffset)
           : [];
         const mode = message.effectsMode || "original";
         const requested = typeof mode === "object" && mode

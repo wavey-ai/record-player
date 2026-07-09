@@ -1,5 +1,7 @@
+
+const VENDOR_SERVE_URL = "http://localhost:5190/";
 const ROUTE_PREFIX = "/apps/play";
-const ONNX_BUNDLE_PATH = "/wasm/encodec-rs/onnx-bundles/";
+const ONNX_BUNDLE_PATH = VENDOR_SERVE_URL + "/encodec-rs/bundles/";
 
 export default {
   async fetch(request, env) {
