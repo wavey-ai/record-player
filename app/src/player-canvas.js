@@ -37,6 +37,15 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
   let latestStylus = null;
   const ctx = canvas.getContext("2d", { alpha: true });
 
+  function shouldAnimate() {
+    return Boolean(activeGesture || snapshot.playing || snapshot.motorRunning || snapshot.scratching || snapshot.loading || snapshot.decoding);
+  }
+
+  function scheduleRender() {
+    if (destroyed || frame) return;
+    frame = requestAnimationFrame(render);
+  }
+
   function resize() {
     const rect = canvas.getBoundingClientRect();
     const dpr = Math.max(1, window.devicePixelRatio || 1);
@@ -58,7 +67,10 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
     const next = new Image();
     next.decoding = "async";
     next.onload = () => {
-      if (next.src === imageUrl) image = next;
+      if (next.src === imageUrl) {
+        image = next;
+        scheduleRender();
+      }
     };
     next.src = imageUrl;
   }
@@ -138,6 +150,7 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
   }
 
   function render(timestamp) {
+    frame = 0;
     if (destroyed) return;
     const { width, height } = resize();
     const dt = Math.min(0.1, Math.max(0, (timestamp - lastTimestamp) / 1000));
@@ -195,7 +208,7 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
       });
     }
     drawRadialControls(ctx, geometry, player, snapshot, components, theme, hitRegions);
-    frame = requestAnimationFrame(render);
+    if (shouldAnimate()) scheduleRender();
   }
 
   function regionAt(point) {
@@ -313,6 +326,7 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
     });
     activeGesture.lastAngle = angle;
     activeGesture.lastTime = event.timeStamp;
+    scheduleRender();
   }
 
   function pointerUp(event) {
@@ -323,6 +337,7 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
     if (gesture.kind === "record") {
       player.endScratch({ rotationDegrees: visualRotation, resumePlayback: true });
     }
+    scheduleRender();
   }
 
   const unsubscribe = player.subscribe(next => {
@@ -331,13 +346,14 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
     if ((next.scratching || wasScratching) && Number.isFinite(next.rotationDegrees)) {
       visualRotation = next.rotationDegrees;
     }
+    scheduleRender();
   });
 
   canvas.addEventListener("pointerdown", pointerDown);
   canvas.addEventListener("pointermove", pointerMove);
   canvas.addEventListener("pointerup", pointerUp);
   canvas.addEventListener("pointercancel", pointerUp);
-  frame = requestAnimationFrame(render);
+  scheduleRender();
 
   return Object.freeze({
     configure(next = {}) {
@@ -350,19 +366,23 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
         };
       }
       if (typeof next.strobeLightOn === "boolean") strobeLightOn = next.strobeLightOn;
+      scheduleRender();
       return this.getConfig();
     },
     setComponentVisible(name, visible) {
       if (!(name in CANVAS_COMPONENTS)) throw new RangeError(`Unknown canvas component: ${name}`);
       components = { ...components, [name]: Boolean(visible) };
+      scheduleRender();
       return { ...components };
     },
     setTheme(next = {}) {
       theme = { ...theme, ...next };
+      scheduleRender();
       return { ...theme };
     },
     setStrobeLight(enabled) {
       strobeLightOn = Boolean(enabled);
+      scheduleRender();
       return strobeLightOn;
     },
     getConfig() {

@@ -1,4 +1,4 @@
-import { createLogger, isPlayerLoggingEnabled } from "./player-message-logger.js";
+import { createLogger, isPlayerLoggingEnabled, isPlayerVerboseLoggingEnabled } from "./player-message-logger.js";
 
 const log = createLogger("decoder-client");
 
@@ -20,7 +20,7 @@ export class RecordDecoderClient {
           : event.data?.ok === true
             ? "response"
             : "error";
-      log.receive(`worker:${classification}`, event.data);
+      if (isPlayerVerboseLoggingEnabled()) log.receive(`worker:${classification}`, event.data);
       this.handleMessage(event.data);
     };
     this.worker.onerror = event => {
@@ -55,17 +55,22 @@ export class RecordDecoderClient {
     if (!request) { if (message.id !== 0) log.warn("unmatched-response", message); return; }
     if (message.progress) {
       const progress = message.progress;
-      log.action("progress-shape", {
-        requestId: message.id,
-        keys: Object.keys(progress),
-        status: progress.status,
-        message: progress.msg || progress.message || "",
-        decodedSegmentCount: Array.isArray(progress.decodedPcmSegments) ? progress.decodedPcmSegments.length : 0,
-        rawSegmentCount: Array.isArray(progress.rawDecodedPcmSegments) ? progress.rawDecodedPcmSegments.length : 0,
-        decodedBytes: Array.isArray(progress.decodedPcmSegments)
-          ? progress.decodedPcmSegments.reduce((total, segment) => total + (segment.channelBuffers || []).reduce((sum, buffer) => sum + (buffer?.byteLength || 0), 0), 0)
-          : 0,
-      });
+      if (isPlayerVerboseLoggingEnabled()) {
+        log.action("progress-shape", {
+          requestId: message.id,
+          keys: Object.keys(progress),
+          status: progress.status,
+          message: progress.msg || progress.message || "",
+          chunksProcessed: progress.chunksProcessed,
+          totalChunks: progress.totalChunks,
+          chunksPending: progress.chunksPending,
+          decodedSegmentCount: Array.isArray(progress.decodedPcmSegments) ? progress.decodedPcmSegments.length : 0,
+          rawSegmentCount: Array.isArray(progress.rawDecodedPcmSegments) ? progress.rawDecodedPcmSegments.length : 0,
+          decodedBytes: Array.isArray(progress.decodedPcmSegments)
+            ? progress.decodedPcmSegments.reduce((total, segment) => total + (segment.channelBuffers || []).reduce((sum, buffer) => sum + (buffer?.byteLength || 0), 0), 0)
+            : 0,
+        }, { telemetry: true });
+      }
       request.onProgress?.(progress);
       return;
     }
@@ -130,7 +135,7 @@ export class RecordDecoderClient {
       const id = ++this.requestId;
       this.pending.set(id, { resolve, reject, onProgress, type, startedAt: performance.now() });
       const message = { id, type, ...payload };
-      log.send(`worker:${type}`, message, { transferCount: transfer.length });
+      if (isPlayerVerboseLoggingEnabled()) log.send(`worker:${type}`, message, { transferCount: transfer.length });
       this.worker.postMessage(message, transfer);
     });
   }
@@ -153,7 +158,7 @@ export class RecordDecoderClient {
       recordProfile,
       record: { id: "local-record", recordProfile },
       runtime: { id: "wasm", label: "WASM CPU", executionProviders: ["wasm"] },
-      cacheDecodedSegments: cacheEnabled,
+      cacheDecodedSegments: false,
       cache: { enabled: cacheEnabled },
       recordBindingHex,
     }, [buffer], onProgress);

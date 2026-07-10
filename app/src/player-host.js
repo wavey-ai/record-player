@@ -1,4 +1,4 @@
-import { createLogger, setPlayerLoggingEnabled, isPlayerLoggingEnabled, setPlayerLogLevel, getPlayerLogLevel, setPlayerTelemetryInterval } from "./player-message-logger.js";
+import { createLogger, setPlayerLoggingEnabled, isPlayerLoggingEnabled, isPlayerVerboseLoggingEnabled, setPlayerLogLevel, getPlayerLogLevel, setPlayerTelemetryInterval } from "./player-message-logger.js";
 import { createVinylPlayerCanvas } from "./player-canvas.js";
 import { RecordDecoderClient } from "./record-decoder-client.js";
 import { createPcmChunkCacheHandler, recordCacheKey } from "./pcm-cache.js";
@@ -7,8 +7,7 @@ import { clearScratchPerformances, deleteScratchPerformance, getScratchPerforman
 
 const log = createLogger("host");
 const initialLoggingParam = new URLSearchParams(globalThis.location?.search || "").get("player_log");
-if (initialLoggingParam === "0") setPlayerLoggingEnabled(false);
-if (initialLoggingParam === "1") setPlayerLoggingEnabled(true);
+setPlayerLoggingEnabled(initialLoggingParam === "1");
 
 function queryParams() {
   return new URLSearchParams(globalThis.location?.search || "");
@@ -33,21 +32,25 @@ function effectiveParam(name) {
 
 function startupRecordSrc() {
   const value = String(queryParams().get("src") || "").trim();
-  console.log("[vin.yl.player] startupRecordSrc", {
-    href: globalThis.location?.href || "",
-    src: value,
-  });
+  if (isPlayerLoggingEnabled()) {
+    console.log("[vin.yl.player] startupRecordSrc", {
+      href: globalThis.location?.href || "",
+      src: value,
+    });
+  }
   return value || "";
 }
 
 function startupCacheUrl() {
   const params = queryParams();
   const value = String(params.get("tape_url") || "").trim();
-  console.log("[vin.yl.player] startupCacheUrl", {
-    href: globalThis.location?.href || "",
-    tapeUrl: value,
-  });
-  if (!value) {
+  if (isPlayerLoggingEnabled()) {
+    console.log("[vin.yl.player] startupCacheUrl", {
+      href: globalThis.location?.href || "",
+      tapeUrl: value,
+    });
+  }
+  if (!value && isPlayerLoggingEnabled()) {
     console.warn("[vin.yl.player] tape disabled: missing tape_url query param");
   }
   return value || "";
@@ -185,6 +188,7 @@ const IS_MOBILE_DEVICE = /Mobi|Android|iPhone|iPad|iPod|Mobile/i.test(navigator.
 // Original resolveNeedleSurfaceGain: surface foley is 2.25× louder on mobile speakers.
 const MOBILE_SURFACE_GAIN_MULTIPLIER = 2.25;
 // Original profile_turns(): lead-in and deadwax both traverse 2 revolutions.
+const LEAD_IN_TURNS = 2;
 const DEADWAX_TURNS = 2;
 
 const elements = {
@@ -232,6 +236,7 @@ const state = {
   lastCoreObservedPositionFrames: -1,
   lastCoreObservedAtMs: 0,
   decoder: null,
+  loadSequence: 0,
   recordObjectUrl: "",
   streamInitialised: false,
   streamReady: false,
@@ -260,6 +265,7 @@ const state = {
   streamAppendChain: Promise.resolve(),
   decodeProgressText: "",
   regionTimer: 0,
+  surfaceRegion: null,
   needleAutoBehaviorEnabled: true,
   cacheHandler: null,
   postMessageBridge: null,
@@ -378,8 +384,21 @@ async function handleBridgeMessage(event) {
   const message = event.data || {};
   try {
     if (message.type === bridge.inbound.setPlayingType) {
-      if (Boolean(message.playing)) await api.play();
-      else await api.pause();
+      if (Boolean(message.playing)) {
+        try {
+          await api.play();
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          setStatus("Tap the player once to enable audio.");
+          log.warn("iframe-audio-activation-required", {
+            type: message.type,
+            message: errorMessage,
+          });
+          return;
+        }
+      } else {
+        await api.pause();
+      }
       return;
     }
     if (message.type === bridge.inbound.setVolumeType) {
@@ -525,7 +544,7 @@ async function setRpm(rpm) {
   await dispatch({ type: "set_playback_rate", deck: "a", rate });
 }
 
-async function initialiseProgressiveStream({ sampleRate, audioLength, channels }) {
+async function initialiseProgressiveStream({ sampleRate, audioLength, channels, workletSeamRepair = true }) {
   if (state.streamInitialised) return;
   const channelCount = Math.max(1, Math.min(2, Number(channels) || 2));
   state.sampleRate = Math.max(1, Number(sampleRate) || 48000);
@@ -533,12 +552,13 @@ async function initialiseProgressiveStream({ sampleRate, audioLength, channels }
   state.positionFrames = 0;
   state.lastReportedPosition = 0;
   state.streamDecodedFrames = 0;
-  log.send("worklet:stream-init", { sampleRate: state.sampleRate, audioLength: Math.max(1, Number(audioLength) || 1), channels: channelCount });
+  if (isPlayerVerboseLoggingEnabled()) log.send("worklet:stream-init", { sampleRate: state.sampleRate, audioLength: Math.max(1, Number(audioLength) || 1), channels: channelCount, workletSeamRepair });
   state.node.port.postMessage({
     type: "stream-init",
     sampleRate: state.sampleRate,
     audioLength: Math.max(1, Number(audioLength) || 1),
-    channels: channelCount
+    channels: channelCount,
+    workletSeamRepair
   });
   state.streamInitialised = true;
 }
@@ -549,7 +569,8 @@ async function appendProgressiveSegments(segments) {
   await initialiseProgressiveStream({
     sampleRate: first.sampleRate,
     audioLength: first.audioLength,
-    channels: first.channels
+    channels: first.channels,
+    workletSeamRepair: first.workletSeamRepair !== false
   });
   for (const segment of segments) {
     const channelBuffers = Array.isArray(segment.channelBuffers) ? segment.channelBuffers : [];
@@ -557,7 +578,7 @@ async function appendProgressiveSegments(segments) {
     const startFrame = Math.max(0, Math.floor(Number(segment.startFrame ?? segment.offset ?? 0) || 0));
     const inferredFrames = new Int16Array(channelBuffers[0]).length;
     const endFrame = Math.max(startFrame, Math.floor(Number(segment.endFrame) || (startFrame + inferredFrames)));
-    log.send("worklet:append-pcm", { startFrame, endFrame, channels: channelBuffers.length, bytes: channelBuffers.reduce((sum, buffer) => sum + (buffer?.byteLength || 0), 0) });
+    if (isPlayerVerboseLoggingEnabled()) log.send("worklet:append-pcm", { startFrame, endFrame, channels: channelBuffers.length, bytes: channelBuffers.reduce((sum, buffer) => sum + (buffer?.byteLength || 0), 0) });
     state.node.port.postMessage({
       type: "append-pcm",
       startFrame,
@@ -617,8 +638,10 @@ async function flushQueuedSeek() {
   // Original seekPlaybackToRatio: cueing a spinning record by eye lands
   // 50–140 ms early (DJs aim ahead of the beat) and plays the needle-drop
   // foley while the stylus settles.
-  if (deckView()?.playing) {
-    seconds = Math.max(0, seconds - (0.05 + Math.random() * 0.09));
+  const view = deckView();
+  const cueingAudibleGroove = Boolean(view?.transport_on && !view?.needle_lifted && view?.loaded);
+  if (cueingAudibleGroove) {
+    if (view?.playing) seconds = Math.max(0, seconds - (0.05 + Math.random() * 0.09));
     state.node?.port.postMessage({ type: "needle-drop" });
   }
   try {
@@ -640,14 +663,16 @@ function queueSeek(seconds) {
 function coreRequest(type, payload = {}) {
   return new Promise((resolve, reject) => {
     const id = ++state.requestId;
-    state.pending.set(id, { resolve, reject, type, startedAt: performance.now() });
-    log.send(`core:${type}`, { id, payload });
+    const isPositionTelemetry = payload?.event?.type === "playback_position_observed";
+    state.pending.set(id, { resolve, reject, type, startedAt: performance.now(), telemetry: isPositionTelemetry });
+    if (isPlayerVerboseLoggingEnabled()) log.send(`core:${type}`, { id, payload }, isPositionTelemetry ? { telemetry: true } : undefined);
     state.worker.postMessage({ id, type, payload });
   });
 }
 
 async function dispatch(event) {
-  log.action(`dispatch:${event?.type || "unknown"}`, event);
+  const isPositionTelemetry = event?.type === "playback_position_observed";
+  if (isPlayerVerboseLoggingEnabled()) log.action(`dispatch:${event?.type || "unknown"}`, event, isPositionTelemetry ? { telemetry: true } : undefined);
   const result = await coreRequest("dispatch", { event });
   state.view = result.view;
   for (const command of result.commands) executeCommand(command);
@@ -676,8 +701,47 @@ function framesToSeconds(frames) {
   return frames / state.sampleRate;
 }
 
+function timedRegionDurationSeconds(turns) {
+  const rpm = Number(state.rpm) || Number(state.baseRpm) || 45;
+  return rpm > 0 ? Math.max(0, Number(turns) || 0) * (60 / rpm) : 0;
+}
+
+async function startLeadInPlayback() {
+  const view = deckView();
+  if (!view?.loaded) {
+    await dispatch({ type: "toggle_transport", deck: "a" });
+    return;
+  }
+  const durationSeconds = timedRegionDurationSeconds(LEAD_IN_TURNS);
+  if (durationSeconds <= 0) {
+    await dispatch({ type: "toggle_playback", deck: "a" });
+    return;
+  }
+  state.needleAutoBehaviorEnabled = false;
+  state.node?.port.postMessage({ type: "needle", lifted: false });
+  state.node?.port.postMessage({ type: "needle-drop" });
+  await dispatch({ type: "start_timed_region", region: "lead_in", now_ms: performance.now(), duration_seconds: durationSeconds });
+}
+
+async function stopPlaybackTransport() {
+  await dispatch({ type: "stop_timed_region", region: "lead_in", completed: false }).catch(() => {});
+  await dispatch({ type: "stop_timed_region", region: "deadwax", completed: false }).catch(() => {});
+  await dispatch({ type: "set_transport", deck: "a", running: false });
+  state.node?.port.postMessage({ type: "needle", lifted: true });
+}
+
+async function toggleStartStopPlayback() {
+  const view = deckView();
+  if (view?.transport_on || view?.playing || state.view?.lead_in_active || state.view?.deadwax_active) {
+    await stopPlaybackTransport();
+  } else {
+    await startLeadInPlayback();
+  }
+}
+
+
 function executeCommand(command) {
-  log.action(`command:${command?.type || "unknown"}`, command);
+  if (isPlayerVerboseLoggingEnabled()) log.action(`command:${command?.type || "unknown"}`, command);
   if (!state.node) { log.warn("command-without-worklet", command); return; }
   if (command.type === "set_motor") {
     state.node.port.postMessage({ type: "transport", running: command.running });
@@ -701,14 +765,22 @@ function executeCommand(command) {
     updateOutputGain(command.ramp_ms);
   } else if (command.type === "start_surface_region") {
     const durationSeconds = Math.max(0, Number(command.duration_seconds) || 0);
+    state.surfaceRegion = { region: command.region, startedAtMs: performance.now(), durationSeconds };
     state.node.port.postMessage({ type: "surface-region", action: "start", region: command.region, durationSeconds });
+    publishState();
     clearTimeout(state.regionTimer);
-    state.regionTimer = setTimeout(() => {
-      void dispatch({ type: "timed_region_elapsed", region: command.region });
-    }, durationSeconds * 1000);
+    if (command.region === "lead_in") {
+      state.regionTimer = setTimeout(() => {
+        void dispatch({ type: "timed_region_elapsed", region: command.region });
+      }, durationSeconds * 1000);
+    } else {
+      state.regionTimer = 0;
+    }
   } else if (command.type === "stop_surface_region") {
     clearTimeout(state.regionTimer);
+    if (state.surfaceRegion?.region === command.region) state.surfaceRegion = null;
     state.node.port.postMessage({ type: "surface-region", action: "stop", region: command.region });
+    publishState();
   }
 }
 
@@ -736,7 +808,7 @@ async function initialiseAudio() {
   state.node.connect(state.gainNode);
   state.gainNode.connect(state.context.destination);
   state.node.port.onmessage = event => {
-    log.receive(`worklet:${event.data?.type || "message"}`, event.data);
+    if (isPlayerVerboseLoggingEnabled()) log.receive(`worklet:${event.data?.type || "message"}`, event.data);
     handleWorkletMessage(event);
   };
   if (IS_MOBILE_DEVICE) {
@@ -779,17 +851,6 @@ function handleWorkletMessage(event) {
       state.rotation = (state.rotation + ((message.position - previousPosition) / framesPerTurn) * 360) % 360;
       elements.platter.style.setProperty("--rotation", `${state.rotation}deg`);
     }
-    const view = deckView();
-    if (view && !message.scratching) {
-      const now = performance.now();
-      const deltaFrames = Math.abs(message.position - state.lastCoreObservedPositionFrames);
-      const minimumDeltaFrames = Math.max(1, Math.round(state.sampleRate * 0.05));
-      if (now - state.lastCoreObservedAtMs >= 250 && deltaFrames >= minimumDeltaFrames) {
-        state.lastCoreObservedAtMs = now;
-        state.lastCoreObservedPositionFrames = message.position;
-        void dispatch({ type: "playback_position_observed", deck: "a", seconds: framesToSeconds(message.position) });
-      }
-    }
     publishState();
   } else if (message.type === "seeked") {
     state.acknowledgedSeekGeneration = Math.max(state.acknowledgedSeekGeneration, message.generation ?? 0);
@@ -810,7 +871,7 @@ function handleWorkletMessage(event) {
       // (player.js 11267–11273). The engine rejects it when the needle is
       // lifted, a scratch is active, or a clip loop runs — same guards as
       // the original startDeadwaxPlayback.
-      const durationSeconds = state.rpm > 0 ? DEADWAX_TURNS * (60 / state.rpm) : 0;
+      const durationSeconds = timedRegionDurationSeconds(DEADWAX_TURNS);
       if (durationSeconds > 0) {
         try {
           await dispatch({ type: "start_timed_region", region: "deadwax", now_ms: performance.now(), duration_seconds: durationSeconds });
@@ -829,20 +890,27 @@ function handleWorkletMessage(event) {
 }
 
 async function loadFile(file, { cache, resumeAudio = true } = {}) {
-  console.log("[vin.yl.player] loadFile:start", {
-    name: file?.name || "",
-    size: file?.size || 0,
-    type: file?.type || "",
-    resumeAudio,
-    hasCacheArg: Boolean(cache),
-    hasActiveCache: Boolean(state.cacheHandler),
-  });
+  const loadSequence = state.loadSequence + 1;
+  state.loadSequence = loadSequence;
+  if (isPlayerLoggingEnabled()) {
+    console.log("[vin.yl.player] loadFile:start", {
+      name: file?.name || "",
+      size: file?.size || 0,
+      type: file?.type || "",
+      resumeAudio,
+      hasCacheArg: Boolean(cache),
+      hasActiveCache: Boolean(state.cacheHandler),
+    });
+  }
   await initialiseAudio();
   if (resumeAudio) {
     await state.context.resume();
   }
   if (cache !== undefined) state.cacheHandler = normalizeCacheHandler(cache);
-  state.decoder ??= new RecordDecoderClient("./record-decoder-worker.js", {
+  if (state.decoder) {
+    state.decoder.close();
+  }
+  state.decoder = new RecordDecoderClient("./record-decoder-worker.js", {
     loggingEnabled: isPlayerLoggingEnabled(),
     cache: state.cacheHandler,
   });
@@ -862,10 +930,12 @@ async function loadFile(file, { cache, resumeAudio = true } = {}) {
   elements.recordImage.src = state.recordObjectUrl;
   setStatus(`Inspecting ${file.name}…`);
   const sourceBytes = await file.arrayBuffer();
-  console.log("[vin.yl.player] loadFile:bytes", {
-    name: file?.name || "",
-    bytes: sourceBytes.byteLength || 0,
-  });
+  if (isPlayerLoggingEnabled()) {
+    console.log("[vin.yl.player] loadFile:bytes", {
+      name: file?.name || "",
+      bytes: sourceBytes.byteLength || 0,
+    });
+  }
   const cacheKey = await recordCacheKey(sourceBytes);
   state.recordHash = cacheKey;
   const inspected = await state.decoder.inspect(sourceBytes.slice(0));
@@ -883,13 +953,15 @@ async function loadFile(file, { cache, resumeAudio = true } = {}) {
       recordProfile: inspected.recordProfile || "",
     });
   }
-  console.log("[vin.yl.player] loadFile:inspect", {
-    recordProfile: inspected.recordProfile || "",
-    payloadContainer: inspected.payloadContainer || "",
-    releaseId: inspected.releaseId || "",
-    hasProgrammeMap: Boolean(inspected.programmeMapJson),
-    hasRecordDescriptorJson: Boolean(state.recordDescriptorJson),
-  });
+  if (isPlayerLoggingEnabled()) {
+    console.log("[vin.yl.player] loadFile:inspect", {
+      recordProfile: inspected.recordProfile || "",
+      payloadContainer: inspected.payloadContainer || "",
+      releaseId: inspected.releaseId || "",
+      hasProgrammeMap: Boolean(inspected.programmeMapJson),
+      hasRecordDescriptorJson: Boolean(state.recordDescriptorJson),
+    });
+  }
   state.programmeMap = parseJsonObject(inspected.programmeMapJson, null);
   elements.metadata.hidden = isEmbedMode();
   elements.metaProfile.textContent = inspected.recordProfile || "unknown";
@@ -900,31 +972,38 @@ async function loadFile(file, { cache, resumeAudio = true } = {}) {
   state.rpm = state.baseRpm;
   updateRpmButtons();
   setStatus(`Decoding ${file.name}…`);
-  const decoded = await state.decoder.decode(sourceBytes, inspected.recordProfile || "", {
-    recordBindingHex: state.recordHash,
-  }, progress => {
-    log.action("decoder-progress", {
-      keys: Object.keys(progress || {}),
-      status: progress?.status,
-      message: progress?.msg || progress?.message || "",
-      decodedSegmentCount: Array.isArray(progress?.decodedPcmSegments) ? progress.decodedPcmSegments.length : 0,
-      decodedBytes: Array.isArray(progress?.decodedPcmSegments)
-        ? progress.decodedPcmSegments.reduce((total, segment) => total + (segment.channelBuffers || []).reduce((sum, buffer) => sum + (buffer?.byteLength || 0), 0), 0)
-        : 0,
+  let decoded;
+  let lastLoggedDecodeChunk = -1;
+  try {
+    decoded = await state.decoder.decode(sourceBytes, inspected.recordProfile || "", {
+      recordBindingHex: state.recordHash,
+    }, progress => {
+      if (loadSequence !== state.loadSequence) return;
+      const chunksProcessed = Math.max(0, Math.floor(Number(progress?.chunksProcessed) || 0));
+      const totalChunks = Math.max(0, Math.floor(Number(progress?.totalChunks) || 0));
+      if (totalChunks > 0 && chunksProcessed !== lastLoggedDecodeChunk) {
+        lastLoggedDecodeChunk = chunksProcessed;
+        console.log(`decoded ${chunksProcessed}/${totalChunks}`);
+      }
+      state.decodeProgressText = formatDecodeProgress(progress);
+      renderDecodeStatus();
+      if (Array.isArray(progress.decodedPcmSegments) && progress.decodedPcmSegments.length) {
+        const segments = progress.decodedPcmSegments;
+        state.streamAppendChain = state.streamAppendChain
+          .then(() => appendProgressiveSegments(segments))
+          .catch(error => {
+            setStatus(`Progressive playback failed: ${error.message || error}`);
+          });
+      }
     });
-    state.decodeProgressText = formatDecodeProgress(progress);
-    renderDecodeStatus();
-    if (Array.isArray(progress.decodedPcmSegments) && progress.decodedPcmSegments.length) {
-      const segments = progress.decodedPcmSegments;
-      state.streamAppendChain = state.streamAppendChain
-        .then(() => appendProgressiveSegments(segments))
-        .catch(error => {
-          setStatus(`Progressive playback failed: ${error.message || error}`);
-        });
-    }
-  });
+  } catch (error) {
+    if (loadSequence !== state.loadSequence) return null;
+    throw error;
+  }
+  if (loadSequence !== state.loadSequence) return null;
 
   await state.streamAppendChain;
+  if (loadSequence !== state.loadSequence) return null;
 
   const sampleRate = Math.max(1, Number(decoded.sampleRate) || 48000);
   const audioLength = Math.max(1, Number(decoded.audioLength) || 0);
@@ -942,22 +1021,26 @@ async function loadFile(file, { cache, resumeAudio = true } = {}) {
     state.streamReady = true;
   }
   publishState();
-  console.log("[vin.yl.player] loadFile:complete", {
-    name: file?.name || "",
-    durationSeconds: state.duration,
-    sampleRate,
-    payloadContainer: inspected.payloadContainer || "",
-  });
+  if (isPlayerLoggingEnabled()) {
+    console.log("[vin.yl.player] loadFile:complete", {
+      name: file?.name || "",
+      durationSeconds: state.duration,
+      sampleRate,
+      payloadContainer: inspected.payloadContainer || "",
+    });
+  }
   setStatus(`${file.name} · ${state.duration.toFixed(1)}s · ${sampleRate} Hz · ${inspected.payloadContainer || "record"}`);
 }
 
 async function loadRecordFromUrl(url, options = {}) {
   const resolved = new URL(String(url || ""), globalThis.location?.href || import.meta.url);
-  console.log("[vin.yl.player] loadRecordFromUrl:start", {
-    input: String(url || ""),
-    resolved: resolved.toString(),
-    options,
-  });
+  if (isPlayerLoggingEnabled()) {
+    console.log("[vin.yl.player] loadRecordFromUrl:start", {
+      input: String(url || ""),
+      resolved: resolved.toString(),
+      options,
+    });
+  }
   const response = await fetch(resolved.toString(), { cache: "force-cache" });
   if (!response.ok) {
     console.error("[vin.yl.player] loadRecordFromUrl:fetch-failed", {
@@ -967,11 +1050,13 @@ async function loadRecordFromUrl(url, options = {}) {
     throw new Error(`Failed to load record from ${resolved}: ${response.status}`);
   }
   const blob = await response.blob();
-  console.log("[vin.yl.player] loadRecordFromUrl:fetched", {
-    resolved: resolved.toString(),
-    size: blob.size || 0,
-    type: blob.type || "",
-  });
+  if (isPlayerLoggingEnabled()) {
+    console.log("[vin.yl.player] loadRecordFromUrl:fetched", {
+      resolved: resolved.toString(),
+      size: blob.size || 0,
+      type: blob.type || "",
+    });
+  }
   const pathname = resolved.pathname.split("/").pop() || "record.png";
   const file = new File([blob], pathname, { type: blob.type || "image/png" });
   return loadFile(file, { resumeAudio: false, ...(options || {}) });
@@ -980,10 +1065,14 @@ async function loadRecordFromUrl(url, options = {}) {
 async function configureStartupCache() {
   const cacheUrl = startupCacheUrl();
   if (!cacheUrl) {
-    console.warn("[vin.yl.player] configureStartupCache skipped: no tape_url configured");
+    if (isPlayerLoggingEnabled()) {
+      console.warn("[vin.yl.player] configureStartupCache skipped: no tape_url configured");
+    }
     return null;
   }
-  console.info("[vin.yl.player] configureStartupCache:start", { cacheUrl });
+  if (isPlayerLoggingEnabled()) {
+    console.info("[vin.yl.player] configureStartupCache:start", { cacheUrl });
+  }
   const cache = createRemoteOpusChunkCacheHandler({ apiBaseUrl: cacheUrl });
   state.cacheHandler = normalizeCacheHandler(cache);
   if (typeof state.cacheHandler.setRecordContext === "function" && state.recordDescriptorJson) {
@@ -994,14 +1083,16 @@ async function configureStartupCache() {
     });
   }
   state.decoder?.setCache(state.cacheHandler);
-  console.info("[vin.yl.player] configureStartupCache:ready", { cacheUrl });
+  if (isPlayerLoggingEnabled()) {
+    console.info("[vin.yl.player] configureStartupCache:ready", { cacheUrl });
+  }
   return state.cacheHandler;
 }
 
 function render() {
   const view = deckView();
   if (!view) return;
-  elements.play.textContent = view.transport_on ? "STOP" : "START";
+  elements.play.textContent = (view.transport_on || view.playing || state.view?.lead_in_active || state.view?.deadwax_active) ? "STOP" : "START";
   elements.needle.textContent = view.needle_lifted ? "NEEDLE DOWN" : "NEEDLE UP";
   publishState();
 }
@@ -1142,15 +1233,7 @@ function moveScratch(event) {
   const impulse = Math.min(1, Math.abs(rate) / 3);
   recordScratchEvent({ type: "scratch-motion", positionFrames: position, rate, impulse });
   state.node.port.postMessage({ type: "scratch", active: true, position, rate, impulse });
-  void dispatch({
-    type: "move_scratch",
-    deck: "a",
-    position_frames: position,
-    rendered_position_frames: position,
-    rate,
-    rotation_degrees: state.rotation,
-    impulse
-  });
+  publishState();
   state.scratchLastAngle = angle;
   state.scratchLastTime = event.timeStamp;
 }
@@ -1182,11 +1265,21 @@ function updateOutputGain(rampMs = 12) {
   state.gainNode.gain.linearRampToValueAtTime(gain, end);
 }
 
+function currentDeadwaxProgress() {
+  const region = state.surfaceRegion;
+  if (!region || region.region !== "deadwax") return 0;
+  const durationMs = Math.max(1, Number(region.durationSeconds) * 1000 || 1);
+  return Math.max(0, Math.min(1, (performance.now() - Number(region.startedAtMs || 0)) / durationMs));
+}
+
 function publicState() {
   const view = deckView();
   return Object.freeze({
     ready: Boolean(view?.loaded),
     playing: Boolean(view?.playing),
+    leadInActive: Boolean(state.view?.lead_in_active),
+    deadwaxActive: Boolean(state.view?.deadwax_active),
+    deadwaxProgress: currentDeadwaxProgress(),
     motorRunning: Boolean(view?.transport_on),
     needleLifted: Boolean(view?.needle_lifted),
     scratching: state.scratching,
@@ -1310,16 +1403,16 @@ const api = Object.freeze({
     await initialiseAudio();
     await state.context.resume();
     const view = deckView();
-    if (!view?.playing) await dispatch({ type: "toggle_playback", deck: "a" });
+    if (!(view?.transport_on || view?.playing || state.view?.lead_in_active || state.view?.deadwax_active)) await startLeadInPlayback();
   },
   pause: async () => {
     const view = deckView();
-    if (view?.playing) await dispatch({ type: "toggle_playback", deck: "a" });
+    if (view?.transport_on || view?.playing || state.view?.lead_in_active || state.view?.deadwax_active) await stopPlaybackTransport();
   },
   togglePlayback: async () => {
     await initialiseAudio();
     await state.context.resume();
-    await dispatch({ type: "toggle_playback", deck: "a" });
+    await toggleStartStopPlayback();
   },
   stepTrack,
   seekSeconds: seconds => queueSeek(Math.max(0, Math.min(state.duration, Number(seconds) || 0))),
@@ -1359,7 +1452,8 @@ const api = Object.freeze({
     state.positionFrames = position;
     recordScratchEvent({ type: "scratch-motion", positionFrames: position, rate: nextRate, impulse: nextImpulse });
     state.node?.port.postMessage({ type: "motion", position, rate: nextRate, impulse: nextImpulse });
-    return dispatch({ type: "move_scratch", deck: "a", position_frames: position, rendered_position_frames: position, rate: nextRate, rotation_degrees: Number(rotationDegrees) || 0, impulse: nextImpulse });
+    publishState();
+    return Promise.resolve();
   },
   endScratch: ({ rotationDegrees = state.rotation, resumePlayback = true } = {}) => {
     state.scratching = false;
@@ -1425,9 +1519,13 @@ async function initialise() {
   state.worker = new Worker("./player-core-worker.js", { type: "module" });
   log.action("core-worker-created", {});
   state.worker.onmessage = event => {
-    log.receive(`core:${event.data?.type || (event.data?.ok ? "response" : "error")}`, event.data);
+    const request = state.pending.get(event.data?.id);
+    log.receive(
+      `core:${event.data?.type || (event.data?.ok ? "response" : "error")}`,
+      event.data,
+      request?.telemetry ? { telemetry: true } : undefined,
+    );
     const { id, ok, result, error } = event.data;
-    const request = state.pending.get(id);
     if (!request) { if (id !== 0) log.warn("core-unmatched-response", event.data); return; }
     state.pending.delete(id);
     if (ok) request.resolve(result);
@@ -1474,7 +1572,7 @@ elements.file.addEventListener("change", () => {
 elements.play.addEventListener("click", async () => {
   await initialiseAudio();
   await state.context.resume();
-  await dispatch({ type: "toggle_transport", deck: "a" });
+  await toggleStartStopPlayback();
 });
 elements.needle.addEventListener("click", () => {
   state.needleAutoBehaviorEnabled = false;

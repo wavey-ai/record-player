@@ -28,16 +28,32 @@ export function resolveStylusGeometry(geometry, state, options = {}) {
   const anchorY = geometry.cy + pivotRadius * Math.sin(ARM_PIVOT_ANGLE);
   const pivotDistance = Math.hypot(anchorX - geometry.cx, anchorY - geometry.cy) || 1;
   const armLength = pivotDistance * ARM_LENGTH_FACTOR;
-  const progress = clamp(Number(state.positionRatio) || 0, 0, 1);
-  const grooveProgress = typeof options.calibrateProgress === "function" ? clamp(options.calibrateProgress(progress), 0, 1) : progress;
+  const rawProgress = Math.max(0, Number(state.positionRatio) || 0);
+  const programmeProgress = clamp(rawProgress, 0, 1);
+  const grooveProgress = typeof options.calibrateProgress === "function" ? clamp(options.calibrateProgress(programmeProgress), 0, 1) : programmeProgress;
   const profile = String(state.recordProfile || "").trim().toLowerCase();
   const canonicalOuterRadius = 287;
   const payloadOuterRadius = 280;
   const payloadInnerRadius = profile === "single45" ? 169 : 109;
+  const labelRadius = profile === "single45" ? 151 : 95;
   const outerGroove = geometry.recordRadius * (payloadOuterRadius / canonicalOuterRadius);
   const innerGroove = geometry.recordRadius * (payloadInnerRadius / canonicalOuterRadius);
-  const grooveRadius = outerGroove + (innerGroove - outerGroove) * grooveProgress;
+  const deadwaxGroove = geometry.recordRadius * (labelRadius / canonicalOuterRadius);
+  const programmeRadius = outerGroove + (innerGroove - outerGroove) * grooveProgress;
+  const deadwaxProgress = clamp(Math.max(Number(state.deadwaxProgress) || 0, (rawProgress - 1) / 0.08), 0, 1);
+  const grooveRadius = rawProgress > 1 || state.deadwaxActive
+    ? innerGroove + (deadwaxGroove - innerGroove) * deadwaxProgress
+    : programmeRadius;
   const tip = tonearmTipForGroove(geometry.cx, geometry.cy, anchorX, anchorY, pivotDistance, armLength, grooveRadius);
+  if (state.deadwaxActive && deadwaxProgress >= 0.995 && !state.needleLifted) {
+    const t = Number(options.timestamp ?? state.renderTimestamp ?? 0) || 0;
+    const wobbleA = Math.sin(t * 0.018) * 0.85 * scale;
+    const wobbleB = Math.sin(t * 0.047 + 1.7) * 0.35 * scale;
+    const angle = Math.atan2(tip.y - anchorY, tip.x - anchorX) + Math.PI / 2;
+    const wobble = wobbleA + wobbleB;
+    tip.x += Math.cos(angle) * wobble;
+    tip.y += Math.sin(angle) * wobble;
+  }
   const outerTip = tonearmTipForGroove(geometry.cx, geometry.cy, anchorX, anchorY, pivotDistance, armLength, outerGroove);
   const innerTip = tonearmTipForGroove(geometry.cx, geometry.cy, anchorX, anchorY, pivotDistance, armLength, innerGroove);
   return { anchorX, anchorY, armLength, tip, outerTip, innerTip, grooveRadius, outerGroove, innerGroove };
@@ -45,7 +61,7 @@ export function resolveStylusGeometry(geometry, state, options = {}) {
 
 export function drawStylus(ctx, geometry, state, theme, components, timestamp, options = {}) {
   if (!components.stylus && !components.needlePoint && !components.tonearmGuide) return null;
-  const resolved = resolveStylusGeometry(geometry, state, options);
+  const resolved = resolveStylusGeometry(geometry, state, { ...options, timestamp });
   const armDirection = Math.atan2(resolved.tip.y - resolved.anchorY, resolved.tip.x - resolved.anchorX);
   const tailLength = Math.max(16, 22 * geometry.scale);
   const liftedOffset = state.needleLifted ? Math.max(5, 8 * geometry.scale) : 0;

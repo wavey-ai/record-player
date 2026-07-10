@@ -20,8 +20,6 @@ if (typeof importScripts === "function") {
 
 const playerMessageLog = globalThis.VinylPlayerMessageLogger.createLogger("decoder-worker");
 globalThis.VinylPlayerMessageLogger.setEnabled(new URL(self.location.href).searchParams.get("player_log") !== "0");
-const rawPostMessage = self.postMessage.bind(self);
-self.postMessage = (message, transfer) => { playerMessageLog.send(message?.progress ? "progress" : message?.ok ? "response" : message?.type || "message", message, { transferCount: Array.isArray(transfer) ? transfer.length : 0 }); return transfer === undefined ? rawPostMessage(message) : rawPostMessage(message, transfer); };
 const WORKER_GENERATION_CACHE_VERSION =
   new URL(self.location.href).searchParams.get("v") || "dev";
 const WORKER_PERF_LOG_ENABLED =
@@ -1208,6 +1206,7 @@ function normalizedProgressSegments(segments, { sampleRate, channels, audioLengt
       sampleRate,
       channels,
       audioLength,
+      workletSeamRepair: segment.workletSeamRepair !== false,
       channelBuffers,
     };
   });
@@ -1219,20 +1218,6 @@ function postDecodedPcmSegments(id, segments, { sampleRate, channels, audioLengt
   }
   const transfer = [];
   const decodedPcmSegments = normalizedProgressSegments(segments, { sampleRate, channels, audioLength }, transfer);
-  playerMessageLog.action("pcm-segments-ready", {
-    requestId: id,
-    segmentCount: decodedPcmSegments.length,
-    sampleRate,
-    channels,
-    audioLength,
-    segments: decodedPcmSegments.map(segment => ({
-      chunkIndex: segment.chunkIndex,
-      startFrame: segment.startFrame,
-      endFrame: segment.endFrame,
-      frameCount: Math.max(0, segment.endFrame - segment.startFrame),
-      byteLength: segment.channelBuffers.reduce((sum, buffer) => sum + (buffer?.byteLength || 0), 0),
-    })),
-  });
   postDecodeProgress(id, { decodedPcmSegments }, transfer);
 }
 
@@ -1243,6 +1228,25 @@ function postRawDecodedPcmSegments(id, segments, { sampleRate, channels, audioLe
   const transfer = [];
   const rawDecodedPcmSegments = normalizedProgressSegments(segments, { sampleRate, channels, audioLength }, transfer);
   postDecodeProgress(id, { rawDecodedPcmSegments }, transfer);
+}
+
+function chunkProgressPayload({ chunksProcessed, totalChunks, durationSeconds, messagePrefix = "Reading groove audio" }) {
+  const processed = Math.max(0, Math.floor(Number(chunksProcessed) || 0));
+  const total = Math.max(1, Math.floor(Number(totalChunks) || 1));
+  const pending = Math.max(0, total - processed);
+  const processedSeconds = Math.min(
+    Number(durationSeconds) || 0,
+    (Number(durationSeconds) || 0) * (processed / total),
+  );
+  return {
+    msg: `${messagePrefix} ${processed}/${total}`,
+    progressPercent: Math.round((processed / total) * 100),
+    processedSeconds: formatDecimal(processedSeconds, 2),
+    duration: formatDecimal(Number(durationSeconds) || 0, 2),
+    chunksProcessed: processed,
+    totalChunks: total,
+    chunksPending: pending,
+  };
 }
 
 function seamRepairProfileFromMeta(meta) {
@@ -1410,13 +1414,20 @@ function createHermiteChunkAssembler({ channels, audioLength, ownedSamples, repa
     }
   }
 
+  function markRepairedForWorklet(segment) {
+    if (segment && typeof segment === "object") {
+      segment.workletSeamRepair = false;
+    }
+    return segment;
+  }
+
   return {
     addRawSegment(segment) {
       const emitted = [];
       if (pendingSegment) {
         applyHermiteBetweenChunkSegments(pendingSegment, segment, repairSamples);
         copyToOutput(pendingSegment);
-        emitted.push(pendingSegment);
+        emitted.push(markRepairedForWorklet(pendingSegment));
       }
       pendingSegment = segment;
       return emitted;
@@ -1426,7 +1437,7 @@ function createHermiteChunkAssembler({ channels, audioLength, ownedSamples, repa
         return [];
       }
       copyToOutput(pendingSegment);
-      const final = pendingSegment;
+      const final = markRepairedForWorklet(pendingSegment);
       pendingSegment = null;
       return [final];
     },
@@ -1829,13 +1840,11 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
       });
       for (let index = 0; index < chunks.length; index += 1) {
         const end = index + 1;
-        const processedSeconds = Math.min(durationSeconds, durationSeconds * (end / Math.max(1, chunks.length)));
-        postDecodeProgress(id, {
-          msg: `Reading groove audio ${end}/${chunks.length}`,
-          progressPercent: Math.round((end / chunks.length) * 100),
-          processedSeconds: formatDecimal(processedSeconds, 2),
-          duration: formatDecimal(durationSeconds, 2),
-        });
+        postDecodeProgress(id, chunkProgressPayload({
+          chunksProcessed: end,
+          totalChunks: chunks.length,
+          durationSeconds,
+        }));
         const cachedSegment = cachedSegmentsByIndex.get(index);
         let rawSegment = null;
         if (cachedSegment) {
@@ -2041,10 +2050,12 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
             chunks[index].payload = null;
           }
           postDecodeProgress(id, {
-            msg: `Using cached groove audio ${end}/${chunks.length}`,
-            progressPercent: Math.round((end / chunks.length) * 100),
-            processedSeconds: formatDecimal(Math.min(durationSeconds, durationSeconds * (end / Math.max(1, chunks.length))), 2),
-            duration: formatDecimal(durationSeconds, 2),
+            ...chunkProgressPayload({
+              chunksProcessed: end,
+              totalChunks: chunks.length,
+              durationSeconds,
+              messagePrefix: "Using cached groove audio",
+            }),
           });
           const emittedSegments = s16Writer.emitAfterBatch(end);
           if (cacheDecodedSegments) {
@@ -2067,13 +2078,11 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
         workerDecodeWarn("[play:client-playback-worker.js] cached segment splice rejected; decoding chunk", { index });
       }
       workerDecodeDebug("[play:client-playback-worker.js] decodePlayback chunk", { index, totalChunks: chunks.length, offset: chunks[index]?.offset, frameLength: chunks[index]?.frameLength, bundleName: selectedBundleName });
-      const processedSeconds = Math.min(durationSeconds, durationSeconds * (end / Math.max(1, chunks.length)));
-      postDecodeProgress(id, {
-        msg: `Reading groove audio ${end}/${chunks.length}`,
-        progressPercent: Math.round((end / chunks.length) * 100),
-        processedSeconds: formatDecimal(processedSeconds, 2),
-        duration: formatDecimal(durationSeconds, 2),
-      });
+      postDecodeProgress(id, chunkProgressPayload({
+        chunksProcessed: end,
+        totalChunks: chunks.length,
+        durationSeconds,
+      }));
 
       let frame = null;
       try {
@@ -2393,7 +2402,7 @@ self.onmessage = async (event) => {
     handleCacheResponseMessage(event.data);
     return;
   }
-  playerMessageLog.receive(event.data?.type || "message", event.data);
+  if (globalThis.VinylPlayerMessageLogger.isVerboseEnabled()) playerMessageLog.receive(event.data?.type || "message", event.data);
   const { id, type } = event.data || {};
   if (type === "init") {
     self.postMessage({ id, ok: true, result: { crossOriginIsolated: self.crossOriginIsolated === true } });

@@ -184,12 +184,12 @@ impl PlayerEngine {
             self.commands.push(HostCommand::SetPacketGain { deck, gain: 0.0, ramp_ms: 0 });
         } else {
             self.commands.push(HostCommand::SetPacketGain { deck, gain: 1.0, ramp_ms: 0 });
-            let resume_at = self.deck_mut(deck).playback.suspended_at_seconds.take();
+            self.deck_mut(deck).playback.suspended_at_seconds = None;
             if self.deck(deck).transport.motor_on
                 && self.deck(deck).playback.load_status == LoadStatus::Ready
                 && self.freezable(deck)
             {
-                let t = resume_at.unwrap_or(self.deck(deck).playback.current_seconds);
+                let t = observed.clamp(0.0, self.deck(deck).playback.duration_seconds.max(0.0));
                 self.deck_mut(deck).playback.current_seconds = t;
                 self.deck_mut(deck).playback.playing = true;
                 self.commands.push(HostCommand::SetScratchPosition { deck, position_frames: t * self.config.sample_rate, impulse: 0.25 });
@@ -201,25 +201,65 @@ impl PlayerEngine {
 
     fn seek(&mut self, deck: DeckId, seconds: f64) -> Result<(), PlayerError> {
         if !seconds.is_finite() { return Err(PlayerError::InvalidNumber); }
-        let t = seconds.clamp(0.0, self.deck(deck).playback.duration_seconds.max(0.0)); self.deck_mut(deck).playback.current_seconds = t;
-        self.commands.push(HostCommand::SeekPacketPlayback { deck, offset_seconds: t });
-        self.commands.push(HostCommand::SetScratchPosition { deck, position_frames: t * self.config.sample_rate, impulse: 0.0 }); Ok(())
+        let t = seconds.clamp(0.0, self.deck(deck).playback.duration_seconds.max(0.0));
+
+        // Moving the tonearm is an intentional programme cue. If the stylus was
+        // sitting in lead-in/deadwax surface playback, leave that region and put
+        // the packet engine back under the needle. This keeps "needle down +
+        // motor running" as the only state needed to hear the groove again.
+        if deck == DeckId::A && (self.state.lead_in.active || self.state.deadwax.active) {
+            self.stop_regions();
+        }
+
+        self.deck_mut(deck).playback.suspended_at_seconds = None;
+        self.deck_mut(deck).playback.current_seconds = t;
+        self.commands.push(HostCommand::SetScratchPosition { deck, position_frames: t * self.config.sample_rate, impulse: 0.0 });
+
+        let should_restart = self.deck(deck).transport.motor_on
+            && !self.deck(deck).needle.lifted
+            && self.deck(deck).playback.load_status == LoadStatus::Ready
+            && !self.deck(deck).scratch.active
+            && !self.state.clip_loop.active;
+
+        if should_restart {
+            self.deck_mut(deck).playback.suspended_at_seconds = None;
+            self.deck_mut(deck).playback.playing = true;
+            self.commands.push(HostCommand::SetPacketGain { deck, gain: 1.0, ramp_ms: 0 });
+            self.commands.push(HostCommand::StartPacketPlayback {
+                deck,
+                offset_seconds: t,
+                rate: self.deck(deck).playback.playback_rate,
+                platter_handoff: true,
+            });
+        } else {
+            self.commands.push(HostCommand::SeekPacketPlayback { deck, offset_seconds: t });
+        }
+
+        self.commands.push(HostCommand::RefreshView);
+        Ok(())
     }
 
     fn start_region(&mut self, region: SurfaceRegion, now_ms: f64, duration: f64) -> Result<(), PlayerError> {
         if !now_ms.is_finite() || !duration.is_finite() || duration <= 0.0 { return Err(PlayerError::InvalidNumber); }
         let deck = DeckId::A;
-        if self.deck(deck).needle.lifted || self.deck(deck).playback.load_status != LoadStatus::Ready || self.deck(deck).scratch.active || self.state.clip_loop.active { return Err(PlayerError::AudioNotReady); }
+        if self.deck(deck).playback.load_status != LoadStatus::Ready || self.deck(deck).scratch.active || self.state.clip_loop.active { return Err(PlayerError::AudioNotReady); }
         self.stop_regions();
+        if !self.deck(deck).transport.motor_on {
+            self.deck_mut(deck).transport.motor_on = true;
+            self.commands.push(HostCommand::SetMotor { deck, running: true });
+            self.commands.push(HostCommand::SetScratchTransport { deck, hand_contact: false, motor_rate: self.deck(deck).playback.playback_rate });
+        }
+        self.deck_mut(deck).needle.lifted = false;
         let target = match region { SurfaceRegion::LeadIn => &mut self.state.lead_in, SurfaceRegion::Deadwax => &mut self.state.deadwax, SurfaceRegion::Programme => return Err(PlayerError::InvalidNumber) };
         target.active = true; target.completed = false; target.started_at_ms = now_ms; target.duration_ms = duration * 1000.0;
         self.deck_mut(deck).playback.playing = true;
+        self.commands.push(HostCommand::SetPacketGain { deck, gain: 1.0, ramp_ms: 0 });
         self.commands.push(HostCommand::StopPacketPlayback { deck, platter_handoff: false });
         self.commands.push(HostCommand::StartSurfaceRegion { region, duration_seconds: duration }); self.commands.push(HostCommand::RefreshView); Ok(())
     }
     fn stop_regions(&mut self) { if self.state.lead_in.active { self.stop_region(SurfaceRegion::LeadIn, false); } if self.state.deadwax.active { self.stop_region(SurfaceRegion::Deadwax, false); } }
     fn stop_region(&mut self, region: SurfaceRegion, completed: bool) { let target = match region { SurfaceRegion::LeadIn => &mut self.state.lead_in, SurfaceRegion::Deadwax => &mut self.state.deadwax, SurfaceRegion::Programme => return }; if target.active { target.active = false; target.completed = completed; self.commands.push(HostCommand::StopSurfaceRegion { region }); self.commands.push(HostCommand::RefreshView); } }
-    fn finish_region(&mut self, region: SurfaceRegion) { self.stop_region(region, true); if region == SurfaceRegion::LeadIn { let t = self.deck(DeckId::A).playback.current_seconds; self.commands.push(HostCommand::StartPacketPlayback { deck: DeckId::A, offset_seconds: t, rate: self.deck(DeckId::A).playback.playback_rate, platter_handoff: true }); } else if region == SurfaceRegion::Deadwax { self.deck_mut(DeckId::A).playback.playing = false; } }
+    fn finish_region(&mut self, region: SurfaceRegion) { if region == SurfaceRegion::Deadwax { self.state.deadwax.completed = true; self.commands.push(HostCommand::RefreshView); return; } self.stop_region(region, true); if region == SurfaceRegion::LeadIn { let t = self.deck(DeckId::A).playback.current_seconds; self.commands.push(HostCommand::StartPacketPlayback { deck: DeckId::A, offset_seconds: t, rate: self.deck(DeckId::A).playback.playback_rate, platter_handoff: true }); } }
     fn stop_clip_loop(&mut self) { if self.state.clip_loop.active { self.state.clip_loop = ClipLoopState::default(); self.commands.push(HostCommand::StopClipLoop); self.commands.push(HostCommand::RefreshView); } }
 
     fn begin_scratch(&mut self, deck: DeckId, pointer_id: i32, seconds: f64, rotation: f64) -> Result<(), PlayerError> {
@@ -263,9 +303,10 @@ impl PlayerEngine {
 
     fn tick_regions(&mut self, now_ms: f64) {
         let lead_elapsed = self.state.lead_in.active && now_ms >= self.state.lead_in.started_at_ms + self.state.lead_in.duration_ms;
-        let dead_elapsed = self.state.deadwax.active && now_ms >= self.state.deadwax.started_at_ms + self.state.deadwax.duration_ms;
         if lead_elapsed { self.finish_region(SurfaceRegion::LeadIn); }
-        if dead_elapsed { self.finish_region(SurfaceRegion::Deadwax); }
+        if self.state.deadwax.active && now_ms >= self.state.deadwax.started_at_ms + self.state.deadwax.duration_ms {
+            self.state.deadwax.completed = true;
+        }
     }
 
     fn emit_mixer(&mut self) {
@@ -291,9 +332,30 @@ mod tests {
         let mut e=PlayerEngine::default(); ready(&mut e); e.dispatch(PlayerEvent::TogglePlayback { deck: DeckId::A }).unwrap(); e.drain_commands();
         e.dispatch(PlayerEvent::SetNeedle { deck: DeckId::A, lifted: true, observed_playback_seconds: 12.25 }).unwrap();
         assert_eq!(e.state().decks[0].playback.suspended_at_seconds, Some(12.25)); e.drain_commands();
-        e.dispatch(PlayerEvent::SetNeedle { deck: DeckId::A, lifted: false, observed_playback_seconds: 99.0 }).unwrap();
+        e.dispatch(PlayerEvent::SetNeedle { deck: DeckId::A, lifted: false, observed_playback_seconds: 12.25 }).unwrap();
         assert!(e.drain_commands().iter().any(|c| matches!(c, HostCommand::StartPacketPlayback { offset_seconds, platter_handoff: true, .. } if (*offset_seconds-12.25).abs()<1e-9)));
     }
+
+    #[test] fn lowered_needle_uses_current_arm_position_not_stale_lift_position() {
+        let mut e=PlayerEngine::default(); ready(&mut e); e.dispatch(PlayerEvent::TogglePlayback { deck: DeckId::A }).unwrap(); e.drain_commands();
+        e.dispatch(PlayerEvent::SetNeedle { deck: DeckId::A, lifted: true, observed_playback_seconds: 12.25 }).unwrap();
+        assert_eq!(e.state().decks[0].playback.suspended_at_seconds, Some(12.25)); e.drain_commands();
+        e.dispatch(PlayerEvent::SetNeedle { deck: DeckId::A, lifted: false, observed_playback_seconds: 99.0 }).unwrap();
+        assert!(e.drain_commands().iter().any(|c| matches!(c, HostCommand::StartPacketPlayback { offset_seconds, platter_handoff: true, .. } if (*offset_seconds-99.0).abs()<1e-9)));
+    }
+    #[test] fn seek_rearms_packet_playback_after_deadwax_with_needle_down() {
+        let mut e=PlayerEngine::default(); ready(&mut e);
+        e.state.decks[0].transport.motor_on=true;
+        e.state.decks[0].needle.lifted=false;
+        e.state.decks[0].playback.playing=false;
+        e.state.decks[0].playback.current_seconds=120.0;
+        e.drain_commands();
+        e.dispatch(PlayerEvent::Seek { deck: DeckId::A, seconds: 12.0 }).unwrap();
+        let commands=e.drain_commands();
+        assert!(commands.iter().any(|c| matches!(c, HostCommand::StartPacketPlayback { deck: DeckId::A, offset_seconds, .. } if (*offset_seconds - 12.0).abs() < 0.001)));
+        assert!(e.state().decks[0].playback.playing);
+    }
+
     #[test] fn needle_reassertion_is_idempotent() {
         let mut e=PlayerEngine::default(); ready(&mut e);
         e.dispatch(PlayerEvent::SetNeedle { deck: DeckId::A, lifted: true, observed_playback_seconds: 10.0 }).unwrap();

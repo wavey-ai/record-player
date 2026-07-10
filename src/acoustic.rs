@@ -1,4 +1,4 @@
-use js_sys::{Array, Float32Array};
+use js_sys::{Array, Float32Array, Int16Array};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
@@ -85,6 +85,7 @@ impl BiquadLowpass {
 // Continuous needle-surface bed for lead-in / deadwax traversal.
 #[derive(Clone, Debug)]
 struct SurfaceBed {
+    region: u8,
     position: f64,
     looping: bool,
     elapsed_frames: f64,
@@ -293,6 +294,70 @@ impl ScratchAcousticDsp {
         if let Some(position) = reset_position {
             self.reset_position(position);
         }
+        Ok(())
+    }
+
+
+    #[wasm_bindgen(js_name = startStreamWindow)]
+    pub fn start_stream_window(
+        &mut self,
+        channel_count: u32,
+        source_sample_rate: f64,
+        total_frames: u32,
+    ) -> Result<(), JsValue> {
+        if !source_sample_rate.is_finite() || source_sample_rate <= 0.0 {
+            return Err(JsValue::from_str("sourceSampleRate must be positive"));
+        }
+        let channel_count = channel_count.max(1) as usize;
+        let total_frames = total_frames.max(1) as usize;
+        self.source_sample_rate = source_sample_rate;
+        self.window_start = 0;
+        self.window_end = 0;
+        self.total_frames = total_frames;
+        self.channels = (0..channel_count).map(|_| vec![0.0_f32; total_frames]).collect();
+        self.reset_position(0.0);
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = appendPcmI16)]
+    pub fn append_pcm_i16(
+        &mut self,
+        channel_buffers: Array,
+        start_frame: u32,
+        end_frame: u32,
+    ) -> Result<(), JsValue> {
+        let start_frame = start_frame as usize;
+        let end_frame = end_frame as usize;
+        if end_frame <= start_frame {
+            return Err(JsValue::from_str("endFrame must be greater than startFrame"));
+        }
+        if self.channels.is_empty() {
+            return Err(JsValue::from_str("stream window has not been initialised"));
+        }
+        if channel_buffers.length() as usize != self.channels.len() {
+            return Err(JsValue::from_str("PCM channel count does not match stream window"));
+        }
+        if end_frame > self.total_frames {
+            return Err(JsValue::from_str("PCM segment exceeds stream window length"));
+        }
+        let frame_count = end_frame - start_frame;
+        for (channel_index, value) in channel_buffers.iter().enumerate() {
+            if !value.is_instance_of::<Int16Array>() {
+                return Err(JsValue::from_str("PCM channel buffers must be Int16Array values"));
+            }
+            let typed = Int16Array::new(&value);
+            if typed.length() as usize != frame_count {
+                return Err(JsValue::from_str("PCM channel buffer length does not match frame range"));
+            }
+            let mut samples = vec![0_i16; frame_count];
+            typed.copy_to(&mut samples);
+            let channel = &mut self.channels[channel_index];
+            for (offset, sample) in samples.into_iter().enumerate() {
+                channel[start_frame + offset] = sample as f32 / 32768.0;
+            }
+        }
+        self.window_start = 0;
+        self.window_end = self.window_end.max(end_frame);
         Ok(())
     }
 
@@ -521,7 +586,12 @@ impl ScratchAcousticDsp {
             self.position = self.clamp_source_position(self.position + effective_rate * rate_scale);
             if self.grip < GRIP_OWNERSHIP {
                 self.target_position = self.position;
-                if !self.ended && self.motor_rate > 0.0 && self.position >= self.total_frames.saturating_sub(3) as f64 {
+                let physical_surface_region_active = self.surface_bed.is_some();
+                if !physical_surface_region_active
+                    && !self.ended
+                    && self.motor_rate > 0.0
+                    && self.position >= self.total_frames.saturating_sub(3) as f64
+                {
                     self.ended = true;
                     self.motor_rate = 0.0;
                 }
@@ -630,9 +700,17 @@ impl ScratchAcousticDsp {
         } else {
             (LEAD_IN_STATIC_GAIN, 5200.0, 0.45)
         };
-        let (offset, looping) = self.select_surface_sample(duration_seconds);
+        let (offset, selected_looping) = self.select_surface_sample(duration_seconds);
+        let looping = if region == SURFACE_REGION_DEADWAX { true } else { selected_looping };
         let filter = BiquadLowpass::new(filter_hz, filter_q, self.output_sample_rate);
+        if region == SURFACE_REGION_DEADWAX {
+            let end = self.total_frames.saturating_sub(2) as f64;
+            self.position = self.position.max(end);
+            self.target_position = self.position;
+        }
+        self.ended = false;
         self.surface_bed = Some(SurfaceBed {
+            region,
             position: offset * self.surface_asset_rate,
             looping,
             elapsed_frames: 0.0,
@@ -779,10 +857,15 @@ impl ScratchAcousticDsp {
             let mut per_channel = [0.0_f64; 2];
             if let Some(bed) = self.surface_bed.clone() {
                 let elapsed_seconds = bed.elapsed_frames * dt;
-                if elapsed_seconds >= bed.duration_seconds + 0.02 {
+                let hold_deadwax_end = bed.region == SURFACE_REGION_DEADWAX && elapsed_seconds >= bed.duration_seconds;
+                if bed.region != SURFACE_REGION_DEADWAX && elapsed_seconds >= bed.duration_seconds + 0.02 {
                     self.surface_bed = None;
                 } else {
-                    let envelope = Self::surface_bed_envelope(elapsed_seconds, bed.duration_seconds, bed.gain);
+                    let envelope = if hold_deadwax_end {
+                        bed.gain * 0.72
+                    } else {
+                        Self::surface_bed_envelope(elapsed_seconds, bed.duration_seconds, bed.gain)
+                    };
                     for channel_index in 0..output_channel_count.min(2) {
                         let raw = self.surface_asset_sample(channel_index, bed.position, bed.looping);
                         let bed = self.surface_bed.as_mut().unwrap();
@@ -848,7 +931,15 @@ impl ScratchAcousticDsp {
     }
 
     fn clamp_source_position(&self, position: f64) -> f64 {
-        position.clamp(0.0, self.total_frames.max(self.window_end).saturating_sub(2) as f64)
+        let programme_end = self.total_frames.max(self.window_end).saturating_sub(2) as f64;
+        let max_position = match &self.surface_bed {
+            Some(bed) if bed.region == SURFACE_REGION_DEADWAX => {
+                let overrun = (bed.duration_seconds.max(0.0) * self.source_sample_rate).ceil();
+                programme_end + overrun.max(0.0)
+            }
+            _ => programme_end,
+        };
+        position.clamp(0.0, max_position)
     }
 
     fn next_noise(&mut self) -> f64 {

@@ -1,6 +1,10 @@
 (function (root, factory) {
   const api = factory(root);
   root.VinylPlayerMessageLogger = api;
+  root.isPlayerVerboseLoggingEnabled = api.isVerboseEnabled;
+  root.IsPlayerVerboseLoggingEnabled = api.isVerboseEnabled;
+  root.isPayerVerboseLoggingEnabled = api.isVerboseEnabled;
+  root.IsPayerVerboseLoggingEnabled = api.isVerboseEnabled;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(globalThis, function (root) {
   "use strict";
@@ -9,15 +13,30 @@
   const TELEMETRY_TYPES = new Set([
     "position",
     "worklet:position",
+    "progress",
+    "worker:progress",
+    "decoder-progress",
+    "progress-shape",
+    "pcm-segments-ready",
+    "worklet:append-pcm",
+    "append-pcm",
+    "buffered",
+    "worklet:buffered",
+    "pcm-seam-repaired",
+    "status",
     "playback_position_observed",
     "dispatch:playback_position_observed",
     "core:dispatch:playback_position_observed",
-    "dispatch:response:playback_position_observed"
+    "dispatch:response:playback_position_observed",
+    "core:dispatch",
+    "dispatch",
+    "dispatch:response",
+    "core:response"
   ]);
 
   const state = root.__VIN_YL_PLAYER_LOGGER_STATE__ || {
     enabled: root.__VIN_YL_PLAYER_LOGGING__ !== false,
-    level: normalizeLevel(root.__VIN_YL_PLAYER_LOG_LEVEL__ || "normal"),
+    level: normalizeLevel(root.__VIN_YL_PLAYER_LOG_LEVEL__ || "quiet"),
     sequence: 0,
     startedAt: typeof performance !== "undefined" ? performance.now() : Date.now(),
     telemetryIntervalMs: DEFAULT_TELEMETRY_INTERVAL_MS,
@@ -48,6 +67,10 @@
 
   function getLevel() {
     return state.level;
+  }
+
+  function isVerboseEnabled() {
+    return Boolean(state.enabled) && state.level === "verbose";
   }
 
   function setTelemetryInterval(ms) {
@@ -90,14 +113,19 @@
     if (meta?.telemetry === false) return false;
     const resolved = String(type || payload?.type || "");
     const eventType = String(nestedEventType(payload));
+    if (
+      (resolved === "core:dispatch" || resolved === "dispatch" || resolved === "dispatch:response" || resolved === "core:response") &&
+      eventType === "playback_position_observed"
+    ) {
+      return true;
+    }
     return TELEMETRY_TYPES.has(resolved) || TELEMETRY_TYPES.has(eventType) || resolved.endsWith(":position");
   }
 
   function shouldEmit(subsystem, direction, type, payload, meta, now) {
-    if (!state.enabled) return false;
     if (direction === "error" || direction === "warn") return true;
-    if (state.level === "quiet") return false;
-    if (state.level === "verbose" || !isTelemetry(type, payload, meta)) return true;
+    if (!state.enabled) return false;
+    if (state.level !== "verbose") return false;
     const key = `${subsystem}:${direction}:${String(type || payload?.type || "message")}:${nestedEventType(payload)}`;
     const last = state.lastTelemetryAt.get(key) ?? -Infinity;
     if (now - last < state.telemetryIntervalMs) {
@@ -109,6 +137,7 @@
   }
 
   function emit(subsystem, direction, type, payload, meta = {}) {
+    if (direction !== "error" && direction !== "warn" && !isVerboseEnabled()) return null;
     const now = typeof performance !== "undefined" ? performance.now() : Date.now();
     if (!shouldEmit(subsystem, direction, type, payload, meta, now)) return null;
     const key = `${subsystem}:${direction}:${String(type || payload?.type || "message")}:${nestedEventType(payload)}`;
@@ -145,5 +174,5 @@
     };
   }
 
-  return { createLogger, emit, summarize, setEnabled, isEnabled, setLevel, getLevel, setTelemetryInterval };
+  return { createLogger, emit, summarize, setEnabled, isEnabled, isVerboseEnabled, setLevel, getLevel, setTelemetryInterval };
 });

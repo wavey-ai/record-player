@@ -1,9 +1,17 @@
 "use strict";
 
 import "./worklet-text-codec-polyfill.js";
-import { createLogger, setPlayerLoggingEnabled } from "./player-message-logger.js";
+import { createLogger, isPlayerVerboseLoggingEnabled, setPlayerLoggingEnabled } from "./player-message-logger.js";
 
-const log = createLogger("audio-worklet");
+const rawLog = createLogger("audio-worklet");
+const log = {
+  send(type, payload, meta) { return isPlayerVerboseLoggingEnabled() ? rawLog.send(type, payload, meta) : null; },
+  receive(type, payload, meta) { return isPlayerVerboseLoggingEnabled() ? rawLog.receive(type, payload, meta) : null; },
+  action(type, payload, meta) { return isPlayerVerboseLoggingEnabled() ? rawLog.action(type, payload, meta) : null; },
+  state(type, payload, meta) { return isPlayerVerboseLoggingEnabled() ? rawLog.state(type, payload, meta) : null; },
+  warn(type, payload, meta) { return rawLog.warn(type, payload, meta); },
+  error(type, payload, meta) { return rawLog.error(type, payload, meta); }
+};
 import { initSync, ScratchAcousticDsp } from "./record-player/record_player.js";
 
 let wasm = null;
@@ -49,9 +57,11 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
     this.streamLength = 0;
     this.decodedLength = 0;
     this.streamComplete = false;
+    this.workletSeamRepairEnabled = true;
     this.waitingForData = false;
     this.replay = null;
     this.effects = { acoustic: true, surface: true };
+    this.surfaceRegionActive = false;
     this.port.onmessage = event => { const message = event.data || {}; log.receive(message.type, message); this.handleMessage(message); };
   }
 
@@ -82,9 +92,24 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
           ? message.sampleRate
           : 48000;
         this.streamChannels = Array.from({ length: channelCount }, () => new Float32Array(this.streamLength));
+        try {
+          if (typeof this.dsp.startStreamWindow === "function") {
+            this.dsp.startStreamWindow(channelCount, this.sourceSampleRate, this.streamLength);
+          } else {
+            this.dsp.clearWindow();
+          }
+        } catch (error) {
+          this.send({
+            type: "worklet-error",
+            stage: "stream-init",
+            message: error instanceof Error ? error.message : String(error)
+          });
+          break;
+        }
         this.length = 0;
         this.decodedLength = 0;
         this.streamComplete = false;
+        this.workletSeamRepairEnabled = message.workletSeamRepair !== false;
         this.waitingForData = false;
         this.lastPosition = 0;
         this.send({ type: "stream-initialised", length: this.streamLength });
@@ -120,13 +145,21 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
             target[startFrame + frame] = source[frame] / 32768;
           }
         }
-        const repairedChannels = this.repairChunkSeam(startFrame, endFrame);
+        const repairedChannels = this.workletSeamRepairEnabled
+          ? this.repairChunkSeam(startFrame, endFrame)
+          : 0;
         if (startFrame <= this.decodedLength) {
           this.decodedLength = Math.max(this.decodedLength, endFrame);
         }
         this.length = Math.max(1, this.decodedLength);
         try {
-          this.dsp.setWindow(this.streamChannels, this.sourceSampleRate, 0, this.length, undefined);
+          if (typeof this.dsp.appendPcmI16 === "function") {
+            const pcmChannels = buffers.map(buffer => new Int16Array(buffer));
+            this.dsp.appendPcmI16(pcmChannels, startFrame, endFrame);
+          } else {
+            const visibleChannels = this.streamChannels.map(channel => channel.subarray(0, this.length));
+            this.dsp.setWindow(visibleChannels, this.sourceSampleRate, 0, this.length, undefined);
+          }
           this.dsp.setNeedleLifted(this.needleLifted);
         } catch (error) {
           this.send({
@@ -259,10 +292,21 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
       case "surface-region": {
         const region = message.region === "deadwax" ? 1 : 0;
         if (message.action === "start") {
+          this.active = true;
+          this.playing = false;
+          this.scratching = false;
+          this.dsp.start();
+          this.dsp.setNeedleLifted(this.needleLifted);
+          this.surfaceRegionActive = true;
           this.dsp.startSurfaceRegion(region, Number(message.durationSeconds) || 0);
           log.state(message.region === "deadwax" ? "deadwax" : "lead-in", { durationSeconds: message.durationSeconds });
         } else {
+          this.surfaceRegionActive = false;
           this.dsp.stopSurfaceRegion();
+          if (!this.playing && !this.scratching) {
+            this.active = false;
+            this.dsp.stop();
+          }
           log.state("surface-region-stopped", { region: message.region });
         }
         break;
@@ -442,6 +486,9 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
     }
     if (this.dsp.takeEnded()) {
       this.lastPosition = this.dsp.position;
+      if (this.surfaceRegionActive) {
+        return;
+      }
       if (!this.streamComplete && this.decodedLength < this.streamLength) {
         this.waitingForData = true;
         this.active = false;
