@@ -10,6 +10,25 @@ import { controlAt, drawRadialControls, updateArcControl } from "./player-canvas
 import { drawStrobe, strobeLampGeometry } from "./player-canvas-strobe.js";
 import { drawStylus, resolveStylusGeometry } from "./player-canvas-stylus.js";
 
+const UI_IDLE_DELAY_MS = 10000;
+const UI_FADE_IN_MS = 140;
+const UI_FADE_OUT_MS = 1100;
+
+function clamp01(value) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(1, value));
+}
+
+function easeOutCubic(value) {
+  const t = clamp01(value);
+  return 1 - Math.pow(1 - t, 3);
+}
+
+function easeIncandescentFade(value) {
+  const t = clamp01(value);
+  return 1 - Math.pow(1 - t, 4);
+}
+
 function unwrapRadians(delta) {
   if (delta > Math.PI) return delta - Math.PI * 2;
   if (delta < -Math.PI) return delta + Math.PI * 2;
@@ -35,15 +54,95 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
   let strobeLightOn = true;
   let latestGeometry = null;
   let latestStylus = null;
+  let lastActivityAt = performance.now();
+  let uiOpacity = 1;
+  let uiFadeFrom = 1;
+  let uiFadeTo = 1;
+  let uiFadeStartedAt = lastActivityAt;
+  let idleTimer = 0;
   const ctx = canvas.getContext("2d", { alpha: true });
+  const activityTarget = canvas.ownerDocument || document;
+  const root = activityTarget.documentElement || document.documentElement;
+
+  function canAutoFadeUi(nextSnapshot = snapshot) {
+    return Boolean(nextSnapshot?.ready && nextSnapshot?.playing);
+  }
 
   function shouldAnimate() {
-    return Boolean(activeGesture || snapshot.playing || snapshot.motorRunning || snapshot.scratching || snapshot.loading || snapshot.decoding);
+    return Boolean(
+      activeGesture ||
+      snapshot.playing ||
+      snapshot.motorRunning ||
+      snapshot.scratching ||
+      snapshot.loading ||
+      snapshot.decoding ||
+      Math.abs(uiOpacity - uiFadeTo) > 0.001
+    );
   }
 
   function scheduleRender() {
     if (destroyed || frame) return;
     frame = requestAnimationFrame(render);
+  }
+
+  function clearIdleTimer() {
+    if (!idleTimer) return;
+    clearTimeout(idleTimer);
+    idleTimer = 0;
+  }
+
+  function scheduleIdleTimer() {
+    clearIdleTimer();
+    if (destroyed) return;
+    if (!canAutoFadeUi()) {
+      setUiFadeTarget(1);
+      return;
+    }
+    const delay = Math.max(0, UI_IDLE_DELAY_MS - (performance.now() - lastActivityAt));
+    idleTimer = setTimeout(() => {
+      idleTimer = 0;
+      if (canAutoFadeUi()) setUiFadeTarget(0);
+    }, delay);
+  }
+
+  function setUiFadeTarget(target, now = performance.now()) {
+    const next = clamp01(target);
+    if (Math.abs(uiFadeTo - next) < 0.001 && Math.abs(uiOpacity - next) < 0.001) return;
+    uiFadeFrom = uiOpacity;
+    uiFadeTo = next;
+    uiFadeStartedAt = now;
+    root.classList.toggle("vinyl-ui-idle", next === 0);
+    scheduleRender();
+  }
+
+  function updateUiFade(timestamp) {
+    if (Math.abs(uiOpacity - uiFadeTo) <= 0.001) {
+      uiOpacity = uiFadeTo;
+      root.classList.toggle("vinyl-ui-idle", uiOpacity < 0.01);
+      return;
+    }
+    const durationMs = uiFadeTo < uiFadeFrom ? UI_FADE_OUT_MS : UI_FADE_IN_MS;
+    const progress = durationMs <= 0 ? 1 : (timestamp - uiFadeStartedAt) / durationMs;
+    const eased = uiFadeTo < uiFadeFrom ? easeIncandescentFade(progress) : easeOutCubic(progress);
+    uiOpacity = uiFadeFrom + (uiFadeTo - uiFadeFrom) * eased;
+    if (progress >= 1) {
+      uiOpacity = uiFadeTo;
+      root.classList.toggle("vinyl-ui-idle", uiOpacity < 0.01);
+    }
+  }
+
+  function noteActivity() {
+    lastActivityAt = performance.now();
+    setUiFadeTarget(1, lastActivityAt);
+    scheduleIdleTimer();
+  }
+
+  function withUiOpacity(draw) {
+    if (uiOpacity <= 0.001) return;
+    ctx.save();
+    ctx.globalAlpha *= uiOpacity;
+    draw();
+    ctx.restore();
   }
 
   function resize() {
@@ -153,6 +252,7 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
     frame = 0;
     if (destroyed) return;
     const { width, height } = resize();
+    updateUiFade(timestamp);
     const dt = Math.min(0.1, Math.max(0, (timestamp - lastTimestamp) / 1000));
     lastTimestamp = timestamp;
     if (snapshot.motorRunning && !snapshot.scratching) {
@@ -171,20 +271,24 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
     // gated per-part: syncDots (base ring dots), strobe (lit sampling +
     // beam), strobeLamp (the lamp fixture / light).
     if (components.syncRings && (components.syncDots || components.strobe || components.strobeLamp)) {
-      const lamp = drawStrobe(ctx, geometry, snapshot, theme, strobeLightOn, timestamp, {
-        showDots: components.syncDots,
-        showStrobe: components.strobe,
-        showLamp: components.strobeLamp,
+      withUiOpacity(() => {
+        const lamp = drawStrobe(ctx, geometry, snapshot, theme, strobeLightOn, timestamp, {
+          showDots: components.syncDots,
+          showStrobe: components.strobe,
+          showLamp: components.strobeLamp,
+        });
+        if (components.strobeLamp) {
+          hitRegions.push({ key: "strobeLamp", kind: "lamp", x: lamp.x, y: lamp.y, radius: lamp.radius * 1.4 });
+        }
       });
-      if (components.strobeLamp) {
-        hitRegions.push({ key: "strobeLamp", kind: "lamp", x: lamp.x, y: lamp.y, radius: lamp.radius * 1.4 });
-      }
     }
     drawRecord(geometry);
-    drawSpindle(geometry);
+    withUiOpacity(() => drawSpindle(geometry));
     hitRegions.push({ key: "record", kind: "record", x: geometry.cx, y: geometry.cy, radius: geometry.recordRadius });
-    latestStylus = drawStylus(ctx, geometry, snapshot, theme, components, timestamp, {
-      calibrateProgress: options.calibrateStylusProgress
+    withUiOpacity(() => {
+      latestStylus = drawStylus(ctx, geometry, snapshot, theme, components, timestamp, {
+        calibrateProgress: options.calibrateStylusProgress
+      });
     });
     if (latestStylus && components.needlePoint) {
       hitRegions.push({
@@ -207,7 +311,7 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
         tolerance: Math.max(16, 26 * geometry.scale)
       });
     }
-    drawRadialControls(ctx, geometry, player, snapshot, components, theme, hitRegions);
+    withUiOpacity(() => drawRadialControls(ctx, geometry, player, snapshot, components, theme, hitRegions));
     if (shouldAnimate()) scheduleRender();
   }
 
@@ -253,6 +357,7 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
   }
 
   function pointerDown(event) {
+    noteActivity();
     if (!latestGeometry) return;
     const point = localPointer(canvas, event);
     const region = regionAt(point);
@@ -298,6 +403,7 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
   }
 
   function pointerMove(event) {
+    noteActivity();
     if (!activeGesture || activeGesture.pointerId !== event.pointerId || !latestGeometry) return;
     const point = localPointer(canvas, event);
     if (activeGesture.kind === "arc-slider") {
@@ -330,6 +436,7 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
   }
 
   function pointerUp(event) {
+    noteActivity();
     if (!activeGesture || activeGesture.pointerId !== event.pointerId) return;
     const gesture = activeGesture;
     activeGesture = null;
@@ -342,17 +449,31 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
 
   const unsubscribe = player.subscribe(next => {
     const wasScratching = snapshot.scratching;
+    const couldAutoFade = canAutoFadeUi(snapshot);
     snapshot = next;
     if ((next.scratching || wasScratching) && Number.isFinite(next.rotationDegrees)) {
       visualRotation = next.rotationDegrees;
     }
+    if (!canAutoFadeUi(next)) {
+      clearIdleTimer();
+      setUiFadeTarget(1);
+    } else if (!couldAutoFade) {
+      lastActivityAt = performance.now();
+      setUiFadeTarget(1, lastActivityAt);
+      scheduleIdleTimer();
+    }
     scheduleRender();
   });
 
+  const activityEvents = ["pointermove", "mousemove", "touchstart", "touchmove", "wheel", "keydown"];
+  for (const type of activityEvents) {
+    activityTarget.addEventListener(type, noteActivity, { passive: true });
+  }
   canvas.addEventListener("pointerdown", pointerDown);
   canvas.addEventListener("pointermove", pointerMove);
   canvas.addEventListener("pointerup", pointerUp);
   canvas.addEventListener("pointercancel", pointerUp);
+  scheduleIdleTimer();
   scheduleRender();
 
   return Object.freeze({
@@ -396,7 +517,12 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
     destroy() {
       destroyed = true;
       cancelAnimationFrame(frame);
+      clearIdleTimer();
+      root.classList.remove("vinyl-ui-idle");
       unsubscribe();
+      for (const type of activityEvents) {
+        activityTarget.removeEventListener(type, noteActivity, { passive: true });
+      }
       canvas.removeEventListener("pointerdown", pointerDown);
       canvas.removeEventListener("pointermove", pointerMove);
       canvas.removeEventListener("pointerup", pointerUp);

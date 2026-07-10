@@ -39,6 +39,27 @@ header {
   letter-spacing: 0.08em;
 }
 
+header,
+.metadata,
+output,
+.fallback-controls {
+  transition: opacity 140ms ease-out;
+}
+
+html.vinyl-ui-idle header,
+html.vinyl-ui-idle .metadata,
+html.vinyl-ui-idle output,
+html.vinyl-ui-idle .fallback-controls {
+  opacity: 0;
+  pointer-events: none;
+  transition-duration: 1100ms;
+  transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+html.vinyl-ui-idle #player-canvas {
+  cursor: none;
+}
+
 .deck {
   width: min(92vw, 720px);
   margin: auto;

@@ -67,6 +67,7 @@ export function drawStrobe(ctx, geometry, state, theme, lightOn, timestamp, part
   const physicalRotation = playing ? (rate * STROBE_CONT_DEG_PER_SEC * timeSec) % 360 : 0;
 
   ctx.save();
+  const baseAlpha = ctx.globalAlpha;
   STROBE_ROWS.forEach((row, rowIndex) => {
     const t = (rowIndex + 0.5) / STROBE_ROWS.length;
     const ringRadius = geometry.outerRadius - (geometry.outerRadius - geometry.innerRadius) * t;
@@ -113,9 +114,9 @@ export function drawStrobe(ctx, geometry, state, theme, lightOn, timestamp, part
         Math.PI * 2
       );
       ctx.fillStyle = theme.syncLit;
-      ctx.globalAlpha = Math.max(0, feather) * pulse;
+      ctx.globalAlpha = baseAlpha * Math.max(0, feather) * pulse;
       ctx.fill();
-      ctx.globalAlpha = 1;
+      ctx.globalAlpha = baseAlpha;
     }
   });
 
@@ -125,12 +126,12 @@ export function drawStrobe(ctx, geometry, state, theme, lightOn, timestamp, part
     beam.addColorStop(0, theme.lamp);
     beam.addColorStop(0.2, theme.lamp);
     beam.addColorStop(1, "rgba(0,191,211,0)");
-    ctx.globalAlpha = 0.16;
+    ctx.globalAlpha = baseAlpha * 0.16;
     ctx.fillStyle = beam;
     ctx.beginPath();
     ctx.arc(lamp.x, lamp.y, geometry.buttonHeight * 2.2, 0, Math.PI * 2);
     ctx.fill();
-    ctx.globalAlpha = 1;
+    ctx.globalAlpha = baseAlpha;
     const a0 = degToRad(STROBE_LAMP_DEG - STROBE_BEAM_HALF_DEG);
     const a1 = degToRad(STROBE_LAMP_DEG + STROBE_BEAM_HALF_DEG);
     ctx.beginPath();
@@ -141,9 +142,9 @@ export function drawStrobe(ctx, geometry, state, theme, lightOn, timestamp, part
     gradient.addColorStop(0, theme.lamp);
     gradient.addColorStop(1, "rgba(0,191,211,0)");
     ctx.fillStyle = gradient;
-    ctx.globalAlpha = 0.08;
+    ctx.globalAlpha = baseAlpha * 0.08;
     ctx.fill();
-    ctx.globalAlpha = 1;
+    ctx.globalAlpha = baseAlpha;
   }
 
   if (showLamp) {
