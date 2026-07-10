@@ -13,11 +13,7 @@
     opusCacheFrameRate = 50,
     clamp,
     getScratchAudioContext,
-    ensureLibopusModule,
-    // Optional: when provided, Opus cache encode uses soundkit's WasmOpusEncoder
-    // (pure-Rust libopus-rs) instead of the standalone libopus bundle. Press
-    // injects this; the player currently omits it and falls back to libopus.
-    ensureSoundkitOpusEncoderModule = null,
+    ensureSoundkitOpusModule,
     buildSoundkitFrameHeader,
     uint8View,
     yieldToMainThread,
@@ -28,7 +24,7 @@
   } = {}) {
     clamp = requirePlayerPcmHelperFunction(clamp, "clamp");
     getScratchAudioContext = requirePlayerPcmHelperFunction(getScratchAudioContext, "getScratchAudioContext");
-    ensureLibopusModule = requirePlayerPcmHelperFunction(ensureLibopusModule, "ensureLibopusModule");
+    ensureSoundkitOpusModule = requirePlayerPcmHelperFunction(ensureSoundkitOpusModule, "ensureSoundkitOpusModule");
     buildSoundkitFrameHeader = requirePlayerPcmHelperFunction(buildSoundkitFrameHeader, "buildSoundkitFrameHeader");
     uint8View = requirePlayerPcmHelperFunction(uint8View, "uint8View");
     yieldToMainThread = requirePlayerPcmHelperFunction(yieldToMainThread, "yieldToMainThread");
@@ -306,15 +302,62 @@
       return sample < 0 ? Math.round(sample * 32768) : Math.round(sample * 32767);
     }
 
+    function assertPcmSegmentFrameGeometry({
+      frameCount,
+      channelData,
+      expectedFrameCount = 0,
+      context = "PCM segment",
+    }) {
+      const declaredFrameCount = Math.max(0, Math.floor(Number(frameCount) || 0));
+      const channels = Array.isArray(channelData) ? channelData : [];
+      if (!channels.length) {
+        throw new Error(`${context} contains no channel data.`);
+      }
+      const actualFrameCount = Math.max(0, Math.floor(Number(channels[0]?.length) || 0));
+      if (declaredFrameCount !== actualFrameCount) {
+        throw new Error(
+          `${context} metadata declares ${declaredFrameCount} frames but contains ${actualFrameCount}.`,
+        );
+      }
+      if (!channels.every((channel) => Math.max(0, Math.floor(Number(channel?.length) || 0)) === actualFrameCount)) {
+        throw new Error(`${context} channel lengths do not match.`);
+      }
+      const exactExpectedFrameCount = Math.max(0, Math.floor(Number(expectedFrameCount) || 0));
+      if (exactExpectedFrameCount > 0 && declaredFrameCount !== exactExpectedFrameCount) {
+        throw new Error(
+          `${context} contains ${declaredFrameCount} frames; expected ${exactExpectedFrameCount} owned frames.`,
+        );
+      }
+      return actualFrameCount;
+    }
+
     async function encodePlanarFloatSegmentToSoundkitOpusPackets(segment, meta, startFrame = 0) {
       const sampleRate = Number(meta.sample_rate) || 48000;
       const channels = Number(meta.channels) || 2;
       const segmentSamples = Number(meta.segment_samples) || Math.floor(segment.length / channels);
+      const expectedFrameCount = Number(meta.expectedFrameCount) || 0;
       const frameSize = playerOpusCacheFrameSize(sampleRate);
       const bitrate = playerOpusCacheBitrate(meta);
-      const opus = await ensureLibopusModule();
-      const encoder = new opus.Encoder(channels, sampleRate, bitrate, frameSize);
+      const soundkitModule = await ensureSoundkitOpusModule();
+      if (typeof soundkitModule?.WasmOpusEncoder !== "function") {
+        throw new Error("SoundKit wasm WasmOpusEncoder export is missing.");
+      }
+      const encoder = new soundkitModule.WasmOpusEncoder(sampleRate, channels, bitrate, frameSize);
       const source = segment instanceof Float32Array ? segment : new Float32Array(segment);
+      const perChannelSamples = Math.floor(source.length / Math.max(1, channels));
+      if (channels <= 0 || source.length !== perChannelSamples * channels) {
+        throw new Error("Planar float PCM segment has invalid channel geometry.");
+      }
+      if (segmentSamples !== perChannelSamples) {
+        throw new Error(
+          `Planar float PCM segment metadata declares ${segmentSamples} frames but contains ${perChannelSamples}.`,
+        );
+      }
+      if (expectedFrameCount > 0 && segmentSamples !== expectedFrameCount) {
+        throw new Error(
+          `Planar float PCM segment contains ${segmentSamples} frames; expected ${expectedFrameCount} owned frames.`,
+        );
+      }
       const frame = new Int16Array(frameSize * channels);
       const packets = [];
       const frameCount = Math.ceil(segmentSamples / frameSize);
@@ -331,8 +374,8 @@
               );
             }
           }
-          const result = encoder.enc_frame(frame);
-          if (!result?.ok || !result.encodedData?.byteLength) {
+          const encoded = uint8View(encoder.encodeInterleavedI16(frame));
+          if (!encoded?.byteLength) {
             throw new Error(`Wavey Rust Opus encode failed at packet ${packetIndex + 1}/${frameCount}.`);
           }
           const pts = Math.max(0, Math.round(Number(startFrame) || 0)) + sourceFrame;
@@ -341,24 +384,18 @@
             sampleRate,
             channels,
             bitsPerSample: 16,
-            sampleSize: frameSize,
-            payloadSize: result.encodedData.byteLength,
+            sampleSize: copyFrames,
+            payloadSize: encoded.byteLength,
             pts,
             packetHeaderVersion: 2,
           });
-          const packet = new Uint8Array(header.length + result.encodedData.byteLength);
+          const packet = new Uint8Array(header.length + encoded.byteLength);
           packet.set(header, 0);
-          packet.set(result.encodedData, header.length);
+          packet.set(encoded, header.length);
           packets.push(packet.buffer);
         }
       } finally {
-        encoder.destroy?.();
-        if (encoder.in) {
-          opus._opus_free?.(encoder.in);
-        }
-        if (encoder.out) {
-          opus._opus_free?.(encoder.out);
-        }
+        encoder.free?.();
       }
 
       return packets;
@@ -370,7 +407,12 @@
       }
       const sampleRate = Math.max(1, Number(provider.sampleRate) || Number(meta.sample_rate) || 48000);
       const channels = Math.max(1, Number(provider.numberOfChannels) || Number(meta.channels) || 2);
-      const frameCount = Math.max(0, Math.floor(Number(provider.length) || 0));
+      const frameCount = assertPcmSegmentFrameGeometry({
+        frameCount: provider.length,
+        channelData: provider.channelData,
+        expectedFrameCount: Number(meta.expectedFrameCount) || 0,
+        context: "Decoded ECDC PCM segment",
+      });
       if (sampleRate !== 48000) {
         throw new Error(`Wavey Rust Opus cache encode requires 48 kHz PCM, got ${sampleRate}.`);
       }
@@ -379,20 +421,11 @@
       }
       const frameSize = playerOpusCacheFrameSize(sampleRate);
       const bitrate = playerOpusCacheBitrate(meta);
-      // Prefer soundkit's WasmOpusEncoder (pure-Rust libopus-rs, the single
-      // encoder shared with decode) when a soundkit module is injected;
-      // otherwise fall back to the standalone libopus-rs bundle. Both emit
-      // identical V1 soundkit Opus packets (same libopus-rs underneath), so the
-      // ECDC-keyed cache stays byte-compatible and player-readable either way.
-      const soundkitModule = ensureSoundkitOpusEncoderModule
-        ? await ensureSoundkitOpusEncoderModule()
-        : null;
-      const opus = soundkitModule ? null : await ensureLibopusModule();
-      const soundkitEncoder = soundkitModule
-        ? new soundkitModule.WasmOpusEncoder(sampleRate, channels, bitrate, frameSize)
-        : null;
-      const encoder = soundkitEncoder || new opus.Encoder(channels, sampleRate, bitrate, frameSize);
-      if (!soundkitEncoder) encoder.set_vbr?.(false);
+      const soundkitModule = await ensureSoundkitOpusModule();
+      if (typeof soundkitModule?.WasmOpusEncoder !== "function") {
+        throw new Error("SoundKit wasm WasmOpusEncoder export is missing.");
+      }
+      const encoder = new soundkitModule.WasmOpusEncoder(sampleRate, channels, bitrate, frameSize);
       const frame = new Int16Array(frameSize * channels);
       const packets = [];
       const packetCount = Math.ceil(frameCount / frameSize);
@@ -408,16 +441,7 @@
               frame[(sampleIndex * channels) + channel] = source?.[sourceFrame + sampleIndex] || 0;
             }
           }
-          let encoded;
-          if (soundkitEncoder) {
-            encoded = uint8View(soundkitEncoder.encodeInterleavedI16(frame));
-          } else {
-            const result = encoder.enc_frame(frame);
-            if (!result?.ok || !result.encodedData?.byteLength) {
-              throw new Error(`Wavey Rust Opus CBR cache encode failed at packet ${packetIndex + 1}/${packetCount}.`);
-            }
-            encoded = uint8View(result.encodedData);
-          }
+          const encoded = uint8View(encoder.encodeInterleavedI16(frame));
           if (!encoded?.byteLength) {
             throw new Error(`Wavey Rust Opus CBR cache encode failed at packet ${packetIndex + 1}/${packetCount}.`);
           }
@@ -427,7 +451,7 @@
             sampleRate,
             channels,
             bitsPerSample: 16,
-            sampleSize: frameSize,
+            sampleSize: copyFrames,
             payloadSize: encoded.byteLength,
             pts,
             packetHeaderVersion: 2,
@@ -442,28 +466,21 @@
           }
         }
       } finally {
-        if (soundkitEncoder) {
-          soundkitEncoder.free?.();
-        } else {
-          encoder.destroy?.();
-          if (encoder.in) {
-            opus._opus_free?.(encoder.in);
-          }
-          if (encoder.out) {
-            opus._opus_free?.(encoder.out);
-          }
-        }
+        encoder.free?.();
       }
 
       return packets;
     }
 
-    async function decodeSoundkitOpusStreamToPcmBytesWithWebStudioOpus(stream, packetItems, {
+    async function decodeSoundkitOpusStreamToPcmBytesWithSoundkit(stream, packetItems, {
       sampleRate,
       channels,
       expectedFrameCount,
     }) {
-      const opus = await ensureLibopusModule();
+      const soundkitModule = await ensureSoundkitOpusModule();
+      if (typeof soundkitModule?.WasmOpusDecoder !== "function") {
+        throw new Error("SoundKit wasm WasmOpusDecoder export is missing.");
+      }
       const maxPacketFrames = packetItems.reduce(
         (maxFrames, item) => Math.max(maxFrames, Number(item?.header?.sampleSize) || 0),
         0,
@@ -473,19 +490,21 @@
         maxPacketFrames,
         playerOpusCacheFrameSize(sampleRate),
       );
-      const decoder = new opus.Decoder(channels, sampleRate, frameSize);
+      const decoder = new soundkitModule.WasmOpusDecoder(channels, sampleRate, frameSize);
+      let decoded = null;
       try {
         const outputChunks = [];
         let outputFrameCount = 0;
         for (const item of packetItems) {
-          const decoded = decoder.dec_frame(item.payload);
-          const decodedFrameCount = Math.max(0, Number(decoded.decodedSize) || 0);
+          decoded?.free?.();
+          decoded = decoder.dec_frame(item.payload);
+          const decodedFrameCount = Math.max(0, Number(decoded?.decodedSize) || 0);
           const remainingFrames = Math.max(0, (expectedFrameCount || decodedFrameCount) - outputFrameCount);
           const framesToCopy = expectedFrameCount ? Math.min(decodedFrameCount, remainingFrames) : decodedFrameCount;
           if (framesToCopy > 0) {
             const pcmChunk = new Uint8Array(framesToCopy * channels * 2);
             const pcmView = new DataView(pcmChunk.buffer);
-            const source = decoded.output || [];
+            const source = decoded?.output || [];
             for (let index = 0; index < framesToCopy * channels; index += 1) {
               const sample = Math.max(-32768, Math.min(32767, Number(source[index]) || 0));
               pcmView.setInt16(index * 2, sample, true);
@@ -499,13 +518,8 @@
         }
         return concatenateUint8Chunks(outputChunks, outputFrameCount * channels * 2);
       } finally {
-        decoder.destroy?.();
-        if (decoder.in) {
-          opus._opus_free?.(decoder.in);
-        }
-        if (decoder.out) {
-          opus._opus_free?.(decoder.out);
-        }
+        decoded?.free?.();
+        decoder.free?.();
       }
     }
 
@@ -524,7 +538,7 @@
       const declaredFrameCount = Math.max(0, (Number(stream.endFrame) || startFrame) - startFrame);
       const expectedFrameCount = declaredFrameCount || packetFrameCount;
 
-      return decodeSoundkitOpusStreamToPcmBytesWithWebStudioOpus(stream, packetItems, {
+      return decodeSoundkitOpusStreamToPcmBytesWithSoundkit(stream, packetItems, {
         sampleRate,
         channels,
         expectedFrameCount,

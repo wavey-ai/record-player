@@ -3,6 +3,15 @@ members = [".", "player-wasm"]
 default-members = ["."]
 resolver = "2"
 
+[patch.crates-io]
+encodec-rs = { path = "../encodec-rs" }
+record-core = { path = "../bitneedle/record-core" }
+record-cut = { path = "../bitneedle/record-cut" }
+record-decode = { path = "../bitneedle/record-decode" }
+record-descriptor = { path = "../bitneedle/record-descriptor" }
+record-render = { path = "../bitneedle/record-render" }
+record-sidecar = { path = "../bitneedle/record-sidecar" }
+
 [package]
 name = "record-player"
 version = "0.1.0"

@@ -19,7 +19,7 @@
   const PLAYER_DECODE_SEGMENT_CACHE_MAX_ENTRIES = 512;
   const PLAYER_WAVEFORM_CACHE_MAX_ENTRIES = 1024;
   const PLAYER_DECODED_SEGMENT_CACHE_KEY_VERSION = "bitneedle-player-decoded-ecdc-opus-v2";
-  const PLAYER_DECODED_ECDC_SEGMENT_CACHE_KEY_VERSION = "bitneedle-opus-chunk-cache-v1";
+  const PLAYER_DECODED_ECDC_SEGMENT_CACHE_KEY_VERSION = "bitneedle-opus-chunk-cache-v3";
   const PLAYER_DECODED_ECDC_SEGMENT_CACHE_WRITE_BATCH_SIZE = 4;
   const MOBILE_LP_PARSE_CACHE_CUTOFF_SECONDS = 60;
   const PLAYER_WAVEFORM_BUCKET_COUNT = 960;
@@ -74,7 +74,7 @@
       bundleName: String(bundleName || ""),
       recordProfile: normalizedRecordProfile,
       audioFormat: String(audioFormat || OPUS_PACKET_AUDIO_FORMAT),
-      codec: "libopus-rs",
+      codec: "soundkit-wasm",
       codecMode: "cbr",
       sampleRate: Math.max(1, Math.floor(Number(sampleRate) || 48000)),
       channels: Math.max(1, Math.floor(Number(channels) || 2)),

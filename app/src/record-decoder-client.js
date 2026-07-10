@@ -76,7 +76,20 @@ export class RecordDecoderClient {
     }
     this.pending.delete(message.id);
     if (message.ok) request.resolve(message.result);
-    else request.reject(new Error(message.error || "Record decoding failed"));
+    else {
+      const errorMessage = message.error || "Record decoding failed";
+      log.error("worker-request-failed", {
+        requestId: message.id,
+        type: request.type,
+        error: errorMessage,
+      });
+      console.error("[vin.yl.player] record decoder worker request failed", {
+        requestId: message.id,
+        type: request.type,
+        error: errorMessage,
+      });
+      request.reject(new Error(errorMessage));
+    }
   }
   async handleCacheMessage(message) {
     const cache = this.cache;
@@ -88,6 +101,13 @@ export class RecordDecoderClient {
       result: null,
     };
     const transfer = [];
+    log.action("cache-bridge:request", {
+      type: message.type,
+      cacheRequestId: message.cacheRequestId,
+      key: message.key || "",
+      entryCount: Array.isArray(message.entries) ? message.entries.length : 0,
+      hasCache: Boolean(cache),
+    });
     try {
       if (!cache) {
         response.result = null;
@@ -124,9 +144,22 @@ export class RecordDecoderClient {
         await cache.put(message.key, message.pcm || {});
         response.result = { stored: true };
       }
+      log.action("cache-bridge:response", {
+        type: message.type,
+        cacheRequestId: message.cacheRequestId,
+        ok: true,
+        hit: Boolean(response.result),
+        entryCount: Array.isArray(response.result) ? response.result.filter(Boolean).length : 0,
+        stored: response.result?.stored === true,
+      });
     } catch (error) {
       response.ok = false;
       response.error = error?.message || String(error);
+      log.warn("cache-bridge:failed", {
+        type: message.type,
+        cacheRequestId: message.cacheRequestId,
+        error: response.error,
+      });
     }
     this.worker.postMessage(response, transfer);
   }

@@ -1,4 +1,8 @@
 import { RecordDecoderClient } from "./record-decoder-client.js";
+import {
+  buildSoundkitFrameHeader as buildSoundkitFrameHeaderJs,
+  soundkitOpusPacketItemsFromPackets as soundkitOpusPacketItemsFromPacketsJs,
+} from "./player-soundkit.js";
 
 const DEFAULT_REMOTE_API_BASE_URL = "https://yl.vin/api/play/tape";
 const DEFAULT_REMOTE_CACHE_FORMATS = Object.freeze([
@@ -11,7 +15,7 @@ const DEFAULT_REMOTE_CACHE_FORMATS = Object.freeze([
 
 let sharedModulesPromise = null;
 let playerWasmModulePromise = null;
-let playerWasmOpusModulePromise = null;
+let soundKitWasmModulePromise = null;
 
 function versionedAssetUrl(path) {
   const url = new URL(path, globalThis.location?.href || import.meta.url);
@@ -61,22 +65,18 @@ async function ensurePlayerWasmModule() {
   return playerWasmModulePromise;
 }
 
-async function ensurePlayerWasmOpusModule() {
-  if (!playerWasmOpusModulePromise) {
-    playerWasmOpusModulePromise = ensurePlayerWasmModule().then((module) => {
-      if (typeof module?.OpusEncoder !== "function") {
-        throw new Error("player-wasm OpusEncoder export is missing.");
+async function ensureSoundKitWasmModule() {
+  if (!soundKitWasmModulePromise) {
+    soundKitWasmModulePromise = import("./soundkit-wasm/soundkit_wasm.js").then(async (module) => {
+      if (typeof module.default === "function") {
+        await module.default({
+          module_or_path: versionedAssetUrl("./soundkit-wasm/soundkit_wasm_bg.wasm"),
+        });
       }
-      if (typeof module?.OpusDecoder !== "function") {
-        throw new Error("player-wasm OpusDecoder export is missing.");
-      }
-      return {
-        Encoder: module.OpusEncoder,
-        Decoder: module.OpusDecoder,
-      };
+      return module;
     });
   }
-  return playerWasmOpusModulePromise;
+  return soundKitWasmModulePromise;
 }
 
 function uint8View(value) {
@@ -157,47 +157,37 @@ function normalizeSegmentMeta(meta = {}) {
   };
 }
 
-function createSoundkitPacketHelpers(playerWasm) {
-  if (typeof playerWasm?.buildSoundkitFrameHeader !== "function") {
-    throw new Error("player-wasm buildSoundkitFrameHeader export is missing.");
-  }
-  if (typeof playerWasm?.decodeSoundkitFrameHeader !== "function") {
-    throw new Error("player-wasm decodeSoundkitFrameHeader export is missing.");
-  }
+function createSoundkitPacketHelpers(soundkitModule = null) {
   return {
     buildSoundkitFrameHeader(options = {}) {
-      return uint8View(playerWasm.buildSoundkitFrameHeader(options));
+      const normalized = {
+        encoding: Math.max(0, Math.floor(Number(options.encoding) || 2)),
+        sampleRate: Math.max(1, Math.floor(Number(options.sampleRate) || 48000)),
+        channels: Math.max(1, Math.floor(Number(options.channels) || 2)),
+        bitsPerSample: Math.max(0, Math.floor(Number(options.bitsPerSample) || 16)),
+        sampleSize: Math.max(0, Math.floor(Number(options.sampleSize) || 0)),
+        payloadSize: Math.max(0, Math.floor(Number(options.payloadSize) || 0)),
+        pts: options.pts == null ? 0 : Math.max(0, Math.round(Number(options.pts) || 0)),
+        packetHeaderVersion: Math.max(1, Math.floor(Number(options.packetHeaderVersion) || 2)),
+      };
+      if (normalized.packetHeaderVersion !== 2) {
+        return uint8View(buildSoundkitFrameHeaderJs(normalized));
+      }
+      if (typeof soundkitModule?.buildSoundKitFrameHeaderV2 !== "function") {
+        throw new Error("SoundKit wasm buildSoundKitFrameHeaderV2 export is missing.");
+      }
+      return uint8View(soundkitModule.buildSoundKitFrameHeaderV2(
+        normalized.encoding,
+        normalized.payloadSize,
+        normalized.sampleSize,
+        normalized.sampleRate,
+        normalized.channels,
+        normalized.bitsPerSample,
+        normalized.pts,
+      ));
     },
     soundkitOpusPacketItemsFromPackets(packets) {
-      const items = [];
-      for (const packetSource of Array.isArray(packets) ? packets : []) {
-        const source = uint8View(packetSource);
-        let offset = 0;
-        while (offset < source.byteLength) {
-          const remaining = source.subarray(offset);
-          const header = playerWasm.decodeSoundkitFrameHeader(remaining);
-          if (Number(header?.encoding) !== 2) {
-            throw new Error("SoundKit packet is not Opus.");
-          }
-          const headerSize = Math.max(0, Math.floor(Number(header?.headerSize) || 0));
-          const payloadSize = Math.max(0, Math.floor(Number(header?.payloadSize) || 0));
-          const packetSize = headerSize + payloadSize;
-          if (!(headerSize > 0) || !(payloadSize > 0)) {
-            throw new Error("SoundKit Opus packet has invalid dimensions.");
-          }
-          if (packetSize > remaining.byteLength) {
-            throw new Error(
-              `Truncated SoundKit Opus packet at byte ${offset}: need ${packetSize}, have ${remaining.byteLength}.`,
-            );
-          }
-          items.push({
-            header,
-            payload: source.slice(offset + headerSize, offset + packetSize),
-          });
-          offset += packetSize;
-        }
-      }
-      return items;
+      return soundkitOpusPacketItemsFromPacketsJs(packets);
     },
   };
 }
@@ -230,7 +220,8 @@ function createRecordContextStore(initial = {}) {
 async function createOpusRuntime(config = {}) {
   const { cache, cacheConfig, pcmHelpers } = await ensureSharedModules();
   const playerWasm = await ensurePlayerWasmModule();
-  const soundkitPacketHelpers = createSoundkitPacketHelpers(playerWasm);
+  const soundkitModule = await ensureSoundKitWasmModule();
+  const soundkitPacketHelpers = createSoundkitPacketHelpers(soundkitModule);
   const runtimeContext = createRecordContextStore(config.recordContext || {});
 
   const cacheClient = cache.createPlayerCache({
@@ -277,7 +268,7 @@ async function createOpusRuntime(config = {}) {
   const helpers = pcmHelpers.createPlayerPcmHelpers({
     clamp: (value, min, max) => Math.max(min, Math.min(max, value)),
     getScratchAudioContext: () => null,
-    ensureLibopusModule: ensurePlayerWasmOpusModule,
+    ensureSoundkitOpusModule: () => ensureSoundKitWasmModule(),
     buildSoundkitFrameHeader: soundkitPacketHelpers.buildSoundkitFrameHeader,
     uint8View,
     yieldToMainThread: () => Promise.resolve(),
@@ -328,6 +319,17 @@ function payloadToPcmResult(runtime, payload, normalized) {
     : [runtime.cacheClient.playerDecodedSegmentPacketBytes(payload)].filter(
       (packetBytes) => packetBytes?.byteLength > 0,
     );
+  const packetItems = soundkitOpusPacketItemsFromPacketsJs(packets);
+  const declaredFrameCount = packetItems.reduce(
+    (sum, item) => sum + Math.max(0, Number(item?.header?.sampleSize) || 0),
+    0,
+  );
+  const expectedFrameCount = Math.max(0, normalized.endFrame - normalized.startFrame);
+  if (declaredFrameCount > 0 && declaredFrameCount !== expectedFrameCount) {
+    throw new Error(
+      `Cached Opus chunk ${normalized.chunkIndex} declares ${declaredFrameCount} frames but expected ${expectedFrameCount}.`,
+    );
+  }
   return runtime.helpers.decodeSoundkitOpusPacketsToPcmBytes({
     sampleRate: normalized.sampleRate,
     channels: normalized.channels,
@@ -336,16 +338,15 @@ function payloadToPcmResult(runtime, payload, normalized) {
     startFrame: normalized.startFrame,
     endFrame: normalized.endFrame,
   }, packets).then(pcmBytes => {
-    const declaredFrameCount = Math.max(0, normalized.endFrame - normalized.startFrame);
     if (pcmBytes.byteLength % normalized.bytesPerFrame !== 0) {
       throw new Error(
         `Cached Opus chunk ${normalized.chunkIndex} produced ${pcmBytes.byteLength} PCM bytes, not divisible by bytesPerFrame ${normalized.bytesPerFrame}.`,
       );
     }
     const decodedFrameCount = pcmBytes.byteLength / normalized.bytesPerFrame;
-    if (decodedFrameCount !== declaredFrameCount) {
+    if (decodedFrameCount !== expectedFrameCount) {
       throw new Error(
-        `Cached Opus chunk ${normalized.chunkIndex} decoded ${decodedFrameCount} frames but declared ${declaredFrameCount}.`,
+        `Cached Opus chunk ${normalized.chunkIndex} decoded ${decodedFrameCount} frames but expected ${expectedFrameCount}.`,
       );
     }
     const provider = runtime.helpers.createS16PcmWindowProviderFromPcmBytes({
@@ -637,6 +638,7 @@ export function createRemoteOpusChunkCacheHandler(config = {}) {
         {
           channels: normalized.channels,
           sample_rate: normalized.sampleRate,
+          expectedFrameCount: Math.max(0, normalized.endFrame - normalized.startFrame),
         },
         normalized.startFrame,
       );

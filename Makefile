@@ -1,15 +1,15 @@
 ROOT := $(CURDIR)
 APP_DIR := $(ROOT)/app
 SECRETS_FILE := $(ROOT)/.secrets
+SECRETS_FILE_FALLBACK := $(ROOT)/../vin.yl.player/.secrets
 WRANGLER_CONFIG := $(APP_DIR)/wrangler.toml
-WRANGLER ?= npx wrangler
+WRANGLER_BOOTSTRAP_DIR := $(ROOT)/tmp-wrangler
+WRANGLER_NODE_BIN ?= $(HOME)/.nvm/versions/node/v22.22.3/bin
+WRANGLER_NPM := PATH="$(WRANGLER_NODE_BIN):$$PATH" npm
+WRANGLER ?= $(WRANGLER_BOOTSTRAP_DIR)/node_modules/.bin/wrangler
 DEPLOY_ENV ?= CI=1
 
-ONNX_BUNDLES_DIR := $(ROOT)/vendor/wasm/encodec-rs/bundles
-ONNX_BUCKET := vin-yl-player-assets
-ONNX_BUNDLE_ASSET_FILES := decode_frame.onnx lm_weights_q8.bin
-
-.PHONY: build test deploy sync-onnx-assets
+.PHONY: build test deploy wrangler-bootstrap
 
 test:
 	cargo test
@@ -17,28 +17,17 @@ test:
 build:
 	cd "$(APP_DIR)" && npm run build
 
-# Uploads the large EnCodec model weights (31-36MB each, over the 25MB
-# Workers Assets limit) straight to R2, where the worker streams them from
-# at request time. Only needs re-running when vendor/wasm/encodec-rs/bundles
-# changes, not on every deploy.
-sync-onnx-assets:
-	@test -f "$(SECRETS_FILE)" || { echo "missing $(SECRETS_FILE)"; exit 1; }
-	@set -a; . "$(SECRETS_FILE)"; set +a; \
-	test -n "$${CLOUDFLARE_EMAIL:-}" || { echo "missing CLOUDFLARE_EMAIL"; exit 1; }; \
-	test -n "$${CLOUDFLARE_API_KEY:-}" || { echo "missing CLOUDFLARE_API_KEY"; exit 1; }; \
-	for bundle_dir in "$(ONNX_BUNDLES_DIR)"/*/; do \
-		bundle_name=$$(basename "$$bundle_dir"); \
-		for file in $(ONNX_BUNDLE_ASSET_FILES); do \
-			echo "uploading $$bundle_name/$$file"; \
-			CLOUDFLARE_EMAIL="$${CLOUDFLARE_EMAIL}" CLOUDFLARE_API_KEY="$${CLOUDFLARE_API_KEY}" \
-				$(WRANGLER) r2 object put "$(ONNX_BUCKET)/$$bundle_name/$$file" \
-				--file "$$bundle_dir$$file" --remote; \
-		done; \
-	done
+wrangler-bootstrap:
+	@mkdir -p "$(WRANGLER_BOOTSTRAP_DIR)"
+	@test -x "$(WRANGLER)" || { \
+		cd "$(WRANGLER_BOOTSTRAP_DIR)" && $(WRANGLER_NPM) init -y >/dev/null 2>&1 && $(WRANGLER_NPM) install --ignore-scripts wrangler@4.110.0; \
+	}
 
-deploy: test build
-	@test -f "$(SECRETS_FILE)" || { echo "missing $(SECRETS_FILE)"; exit 1; }
-	@set -a; . "$(SECRETS_FILE)"; set +a; \
+deploy: wrangler-bootstrap
+	@secret_file="$(SECRETS_FILE)"; \
+	if [ ! -f "$$secret_file" ] && [ -f "$(SECRETS_FILE_FALLBACK)" ]; then secret_file="$(SECRETS_FILE_FALLBACK)"; fi; \
+	test -f "$$secret_file" || { echo "missing $$secret_file"; exit 1; }; \
+	set -a; . "$$secret_file"; set +a; \
 	test -n "$${CLOUDFLARE_EMAIL:-}" || { echo "missing CLOUDFLARE_EMAIL"; exit 1; }; \
 	test -n "$${CLOUDFLARE_API_KEY:-}" || { echo "missing CLOUDFLARE_API_KEY"; exit 1; }; \
-	cd "$(APP_DIR)" && CLOUDFLARE_EMAIL="$${CLOUDFLARE_EMAIL}" CLOUDFLARE_API_KEY="$${CLOUDFLARE_API_KEY}" $(DEPLOY_ENV) $(WRANGLER) deploy --config "$(WRANGLER_CONFIG)"
+	cd "$(APP_DIR)" && CLOUDFLARE_EMAIL="$${CLOUDFLARE_EMAIL}" CLOUDFLARE_API_KEY="$${CLOUDFLARE_API_KEY}" $(DEPLOY_ENV) npm run build && CLOUDFLARE_EMAIL="$${CLOUDFLARE_EMAIL}" CLOUDFLARE_API_KEY="$${CLOUDFLARE_API_KEY}" $(DEPLOY_ENV) $(WRANGLER) deploy --config "$(WRANGLER_CONFIG)"

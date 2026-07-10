@@ -181,9 +181,7 @@ checksum = "8f1fe948ff07f4bd06c30984e69f5b4899c516a3ef74f34df92a2df2ab535495"
 
 [[package]]
 name = "bytes2rgb"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "401079c59127eabc304a48d53ab2d447ad5fb20903e9e5379161491a287aaa33"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "png 0.17.16",
@@ -361,9 +359,7 @@ dependencies = [
 
 [[package]]
 name = "encodec-rs"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3b027e5d7f465868e7b237e55d697c75dddcc2e23d624bac3265ddc2550b9e4"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -710,9 +706,7 @@ checksum = "60a357793950651c4ed0f3f52338f53b2f809f32d83a07f72909fa13e4c6c1e3"
 
 [[package]]
 name = "record-core"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44da1a49d7de3ae8d9732752d385a6138f095e53a437bb7cab3f7e29e0942e08"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "chacha20poly1305",
@@ -724,9 +718,7 @@ dependencies = [
 
 [[package]]
 name = "record-cut"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6d6f1ad0d17ebd22d4c06e59ce4d0c5fce5c2505f9187c139ca7b2069370848"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "chacha20poly1305",
@@ -738,9 +730,7 @@ dependencies = [
 
 [[package]]
 name = "record-decode"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45e30b3ce997d9c7c38a7cb2fbe4e0c3dea4b5b69e895effd3199976b7a9312e"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "base64",
@@ -748,16 +738,13 @@ dependencies = [
  "image",
  "record-core",
  "record-descriptor",
- "record-sidecar",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "record-descriptor"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf9f6765e1c263910857f946fa9a1ec4e42e25106a14acca27f662d1846b7c71"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "base64",
@@ -771,9 +758,7 @@ dependencies = [
 
 [[package]]
 name = "record-groove"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8f32759837e4f96dfb9e1b9a0230c8840aac01ac09e2d98c25be751daddf607"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "png 0.17.16",
@@ -794,9 +779,7 @@ dependencies = [
 
 [[package]]
 name = "record-render"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "255eb4e10de9f24e8b7549003e35f12bdd14517949b249bd541567f67b00c8c8"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "base64",
@@ -812,15 +795,17 @@ dependencies = [
 
 [[package]]
 name = "record-sidecar"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d1f7391e5ee129f1be0bd9373509f0d3fe0a4fdf33da9a8421ba4e0a04e3404"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "base64",
  "brotli",
  "bytes2rgb",
+ "image",
  "record-core",
+ "record-cut",
+ "record-decode",
+ "record-descriptor",
  "serde",
  "serde_json",
  "sha2 0.10.9",

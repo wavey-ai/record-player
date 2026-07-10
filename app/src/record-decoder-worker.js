@@ -26,6 +26,8 @@ const WORKER_PERF_LOG_ENABLED =
   new URL(self.location.href).searchParams.get("perf") === "1";
 const WORKER_DECODE_DEBUG_ENABLED =
   new URL(self.location.href).searchParams.get("decode_debug") === "1";
+const LOCALHOST_PATTERN = /^(?:localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[::1\]|::1)$/i;
+const PUBLIC_WASM_BASE_URL = "https://wasm.yl.vin/";
 // MOSS Nano decode is disabled unless the app config opts in (see
 // PLAYER_MOSSNANO_DECODE_ENABLED in player-playback-config.js); its ONNX
 // weights are ~42MB and current records do not use it.
@@ -51,9 +53,25 @@ let cacheRequestId = 0;
 const pendingCacheRequests = new Map();
 
 function versionedWorkerAssetUrl(path) {
-  const url = new URL(path, self.location.href);
+  const resolvedPath = resolveWorkerAssetPath(path);
+  const url = new URL(resolvedPath, self.location.href);
   url.searchParams.set("v", WORKER_GENERATION_CACHE_VERSION);
   return url.toString();
+}
+
+function isLocalDevelopmentHost(hostname) {
+  return LOCALHOST_PATTERN.test(String(hostname || ""));
+}
+
+function resolveWorkerAssetPath(path) {
+  const value = String(path || "");
+  if (!value.startsWith("wasm/") && !value.startsWith("/wasm/")) {
+    return value;
+  }
+  if (isLocalDevelopmentHost(self.location.hostname)) {
+    return value.startsWith("/") ? value.slice(1) : value;
+  }
+  return new URL(value.replace(/^\/+/, ""), PUBLIC_WASM_BASE_URL).toString();
 }
 
 function versionedWorkerManifestPartUrl(part, manifestUrl) {
@@ -126,10 +144,19 @@ function createWorkerEcdcCacheProofContext(ecdc) {
 // encrypted cache read that never resolves must not hang record decoding
 // forever; a timed-out read degrades to the ordinary cache-miss path.
 const CACHE_REQUEST_TIMEOUT_MS = 8000;
+const DECODE_RETRY_INITIAL_DELAY_MS = 250;
+const DECODE_RETRY_MAX_DELAY_MS = 5000;
 
 function requestCache(type, parentRequestId, payload = {}, transfer = []) {
   return new Promise((resolve, reject) => {
     const requestId = ++cacheRequestId;
+    console.info("[bitneedle-player] cache request", {
+      parentRequestId,
+      type,
+      cacheRequestId: requestId,
+      key: payload?.key || "",
+      entryCount: Array.isArray(payload?.entries) ? payload.entries.length : 0,
+    });
     let settled = false;
     const timeoutId = setTimeout(() => {
       if (settled) {
@@ -200,6 +227,15 @@ function handleCacheResponseMessage(message) {
   if (!request) {
     return false;
   }
+  console.info("[bitneedle-player] cache response", {
+    type: request.type,
+    cacheRequestId: message.cacheRequestId,
+    ok: message.ok === true,
+    hit: Boolean(message.result),
+    entryCount: Array.isArray(message.result) ? message.result.filter(Boolean).length : 0,
+    stored: message.result?.stored === true,
+    error: message.ok === true ? "" : (message.error || ""),
+  });
   pendingCacheRequests.delete(message.cacheRequestId);
   if (message.ok) {
     request.resolve(message.result ?? null);
@@ -301,6 +337,45 @@ function reportSkippedDecodePacket(id, label, error) {
   });
 }
 
+function computeDecodeRetryDelayMs(attempt) {
+  const safeAttempt = Math.max(1, Math.floor(Number(attempt) || 1));
+  return Math.min(
+    DECODE_RETRY_MAX_DELAY_MS,
+    DECODE_RETRY_INITIAL_DELAY_MS * (2 ** Math.max(0, safeAttempt - 1)),
+  );
+}
+
+function sleepMs(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, Math.max(0, Math.floor(Number(ms) || 0)));
+  });
+}
+
+function reportDecodeRetry(id, label, error, attempt, delayMs) {
+  const message = `${label}; retry ${attempt} in ${delayMs}ms: ${workerErrorMessage(error)}`;
+  console.warn(`[bitneedle-player] ${message}`, error);
+  postDecodeProgress(id, {
+    status: "warning",
+    msg: message,
+    warning: message,
+    error: workerErrorMessage(error),
+  });
+}
+
+async function retryWithBackoff(id, label, operation) {
+  let attempt = 0;
+  for (;;) {
+    try {
+      return await operation();
+    } catch (error) {
+      attempt += 1;
+      const delayMs = computeDecodeRetryDelayMs(attempt);
+      reportDecodeRetry(id, label, error, attempt, delayMs);
+      await sleepMs(delayMs);
+    }
+  }
+}
+
 function workerDecodeDebug(...args) {
   if (!WORKER_DECODE_DEBUG_ENABLED) {
     return;
@@ -327,7 +402,10 @@ async function ensureOnnxRuntimeModule() {
     onnxRuntimeModulePromise = (async () => {
       const runtimeBaseUrl = ONNX_RUNTIME_BASE_URL.replace(/\/?$/, "/");
       const ort = await import(versionedWorkerAssetUrl(`${runtimeBaseUrl}ort.wasm.min.mjs`));
-      ort.env.wasm.wasmPaths = new URL(runtimeBaseUrl, self.location.href).href;
+      ort.env.wasm.wasmPaths = {
+        mjs: versionedWorkerAssetUrl(`${runtimeBaseUrl}ort-wasm-simd-threaded.mjs`),
+        wasm: versionedWorkerAssetUrl(`${runtimeBaseUrl}ort-wasm-simd-threaded.wasm`),
+      };
       // Single-threaded everywhere: multi-threaded ORT requires a shared
       // WebAssembly.Memory whose full maximum is reserved up front, which
       // fails with RangeError out-of-memory on memory-constrained devices.
@@ -453,32 +531,7 @@ function bundleAssetMetadata(meta, assetName) {
 }
 
 async function fetchMaybeSplitArrayBuffer(assetPath, assetMetadata = null) {
-  if (assetMetadata?.split === true) {
-    return fetchSplitArrayBuffer(assetPath);
-  }
   return fetchArrayBuffer(versionedWorkerAssetUrl(assetPath));
-}
-
-async function fetchSplitArrayBuffer(assetPath) {
-  const partsManifestUrl = versionedWorkerAssetUrl(`${assetPath}.parts.json`);
-  const manifestResponse = await fetch(partsManifestUrl, { cache: "force-cache" });
-  if (!manifestResponse.ok) {
-    throw new Error(`Failed to fetch ${partsManifestUrl}: ${manifestResponse.status}`);
-  }
-
-  const manifest = await manifestResponse.json();
-  if (!Array.isArray(manifest.parts) || !Number.isInteger(manifest.byteLength)) {
-    throw new Error(`Invalid asset parts manifest: ${partsManifestUrl}`);
-  }
-
-  const chunks = await Promise.all(
-    manifest.parts.map(async (part) => new Uint8Array(await fetchArrayBuffer(versionedWorkerManifestPartUrl(part, partsManifestUrl)))),
-  );
-  const bytes = concatenateUint8Chunks(chunks);
-  if (bytes.byteLength !== manifest.byteLength) {
-    throw new Error(`Asset parts for ${assetPath} produced ${bytes.byteLength} bytes, expected ${manifest.byteLength}`);
-  }
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 }
 
 function concatenateUint8Chunks(chunks) {
@@ -493,33 +546,7 @@ function concatenateUint8Chunks(chunks) {
 }
 
 async function loadModelForOrt(modelPath, assetMetadata = null) {
-  if (assetMetadata?.split !== true) {
-    return versionedWorkerAssetUrl(modelPath);
-  }
-  const partsManifestUrl = versionedWorkerAssetUrl(`${modelPath}.parts.json`);
-  const manifestResponse = await fetch(partsManifestUrl, { cache: "force-cache" });
-  if (!manifestResponse.ok) {
-    throw new Error(`Failed to fetch ${partsManifestUrl}: ${manifestResponse.status}`);
-  }
-
-  const manifest = await manifestResponse.json();
-  if (!Array.isArray(manifest.parts) || !Number.isInteger(manifest.byteLength)) {
-    throw new Error(`Invalid model parts manifest: ${partsManifestUrl}`);
-  }
-
-  const modelFilename = modelPath.split("/").pop();
-  if (manifest.parts.length === 1 && manifest.parts[0] === modelFilename) {
-    return versionedWorkerAssetUrl(modelPath);
-  }
-
-  const chunks = await Promise.all(
-    manifest.parts.map(async (part) => new Uint8Array(await fetchArrayBuffer(versionedWorkerManifestPartUrl(part, partsManifestUrl)))),
-  );
-  const model = concatenateUint8Chunks(chunks);
-  if (model.byteLength !== manifest.byteLength) {
-    throw new Error(`Model parts for ${modelPath} produced ${model.byteLength} bytes, expected ${manifest.byteLength}`);
-  }
-  return model;
+  return versionedWorkerAssetUrl(modelPath);
 }
 
 async function loadQuantizedLmWeights(bundleRoot, meta) {
@@ -1864,96 +1891,81 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
           rawSegment = prefetchedRemoteSegmentsByIndex.get(index) || null;
         }
         if (!rawSegment) {
-          let frame = null;
-          try {
-            frame = await decodeLmChunk(
+          const frame = await retryWithBackoff(
+            id,
+            `Retrying damaged ECDC packet ${end}/${chunks.length}`,
+            () => decodeLmChunk(
               ecdcDecode.encodecModule,
               ecdcDecode.lmWeights,
               selectedBundleJson,
               chunks[index],
               selectedMeta,
-            );
-          } catch (error) {
-            reportSkippedDecodePacket(
-              id,
-              `Skipped damaged ECDC packet ${end}/${chunks.length}; inserted ${expectedFramePcmSamples(chunks[index], selectedMeta)} silent samples`,
-              error,
-            );
-            frame = createSilentEncodedFrame(chunks[index], selectedMeta);
-          }
+            ),
+          );
           encodedFrames[index] = normalizeEncodedFrame(frame);
           if (chunks[index] && typeof chunks[index] === "object") {
             chunks[index].payload = null;
           }
 
-          let feeds = null;
-          let outputs = null;
-          try {
-            if (encodedFrames[index]?.silentPcm) {
-              const startFrame = index * ownedSamples;
-              const endFrame = Math.max(startFrame, Math.min(safeAudioLength, startFrame + ownedSamples));
-              rawSegment = {
-                chunkIndex: index,
-                startFrame,
-                endFrame,
-                channelData: Array.from({ length: channels }, () => new Int16Array(endFrame - startFrame)),
-              };
-            } else {
-              await ensureDecodeSessionReady();
-              const decoderInputs = buildDecodeInputs(encodedFrames, selectedMeta, index, end);
-              feeds = {
-                [session.inputNames[0]]: new ort.Tensor("int64", decoderInputs.codes, [
-                  decoderInputs.batchSize,
-                  selectedMeta.num_codebooks,
-                  decoderInputs.frameLength,
-                ]),
-                [session.inputNames[1]]: new ort.Tensor("float32", decoderInputs.scales, [decoderInputs.batchSize, 1]),
-              };
-              outputs = await session.run(feeds);
-              const decodedTensor = findDecodeOutput(outputs);
-              const decodedFloat = decodedTensor.data instanceof Float32Array
-                ? decodedTensor.data
-                : new Float32Array(decodedTensor.data);
-              const decodedSamples = Math.floor(decodedFloat.length / Math.max(1, channels));
-              if (decodedSamples < Math.max(1, Number(selectedMeta.segment_samples) || 0)) {
-                throw new Error(`Guarded decoder returned ${decodedSamples} samples, expected at least ${selectedMeta.segment_samples}`);
+          rawSegment = await retryWithBackoff(
+            id,
+            `Retrying EnCodec PCM packet ${end}/${encodedFrames.length}`,
+            async () => {
+              let feeds = null;
+              let outputs = null;
+              try {
+                if (encodedFrames[index]?.silentPcm) {
+                  const startFrame = index * ownedSamples;
+                  const endFrame = Math.max(startFrame, Math.min(safeAudioLength, startFrame + ownedSamples));
+                  return {
+                    chunkIndex: index,
+                    startFrame,
+                    endFrame,
+                    channelData: Array.from({ length: channels }, () => new Int16Array(endFrame - startFrame)),
+                  };
+                }
+                await ensureDecodeSessionReady();
+                const decoderInputs = buildDecodeInputs(encodedFrames, selectedMeta, index, end);
+                feeds = {
+                  [session.inputNames[0]]: new ort.Tensor("int64", decoderInputs.codes, [
+                    decoderInputs.batchSize,
+                    selectedMeta.num_codebooks,
+                    decoderInputs.frameLength,
+                  ]),
+                  [session.inputNames[1]]: new ort.Tensor("float32", decoderInputs.scales, [decoderInputs.batchSize, 1]),
+                };
+                outputs = await session.run(feeds);
+                const decodedTensor = findDecodeOutput(outputs);
+                const decodedFloat = decodedTensor.data instanceof Float32Array
+                  ? decodedTensor.data
+                  : new Float32Array(decodedTensor.data);
+                const decodedSamples = Math.floor(decodedFloat.length / Math.max(1, channels));
+                if (decodedSamples < Math.max(1, Number(selectedMeta.segment_samples) || 0)) {
+                  throw new Error(`Guarded decoder returned ${decodedSamples} samples, expected at least ${selectedMeta.segment_samples}`);
+                }
+                return cropDecodedOwnedSegmentToS16(
+                  ecdcDecode.encodecModule,
+                  selectedBundleJson,
+                  decodedFloat,
+                  selectedMeta,
+                  index,
+                  safeAudioLength,
+                );
+              } finally {
+                disposeOrtTensorMap(feeds);
+                disposeOrtTensorMap(outputs);
               }
-              rawSegment = cropDecodedOwnedSegmentToS16(
-                ecdcDecode.encodecModule,
-                selectedBundleJson,
-                decodedFloat,
-                selectedMeta,
-                index,
-                safeAudioLength,
-              );
-            }
-            if (cacheDecodedSegments && rawSegment) {
-              postRawDecodedPcmSegments(id, [rawSegment], {
-                sampleRate,
-                channels,
-                audioLength: safeAudioLength,
-              });
-            }
-          } catch (error) {
-            reportSkippedDecodePacket(
-              id,
-              `Skipped failed EnCodec PCM packet ${end}/${encodedFrames.length}; inserted silence`,
-              error,
-            );
-            const startFrame = index * ownedSamples;
-            const endFrame = Math.max(startFrame, Math.min(safeAudioLength, startFrame + ownedSamples));
-            rawSegment = {
-              chunkIndex: index,
-              startFrame,
-              endFrame,
-              channelData: Array.from({ length: channels }, () => new Int16Array(endFrame - startFrame)),
-            };
-          } finally {
-            disposeOrtTensorMap(feeds);
-            disposeOrtTensorMap(outputs);
-            if (encodedFrames[index]) {
-              encodedFrames[index].codes = null;
-            }
+            },
+          );
+          if (cacheDecodedSegments && rawSegment) {
+            postRawDecodedPcmSegments(id, [rawSegment], {
+              sampleRate,
+              channels,
+              audioLength: safeAudioLength,
+            });
+          }
+          if (encodedFrames[index]) {
+            encodedFrames[index].codes = null;
           }
           if (cacheEnabled && rawSegment) {
             await tryRequestCachePut(id, chunkCacheKeys[index], {
@@ -2084,23 +2096,17 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
         durationSeconds,
       }));
 
-      let frame = null;
-      try {
-        frame = await decodeLmChunk(
+      const frame = await retryWithBackoff(
+        id,
+        `Retrying damaged ECDC packet ${end}/${chunks.length}`,
+        () => decodeLmChunk(
           ecdcDecode.encodecModule,
           ecdcDecode.lmWeights,
           selectedBundleJson,
           chunks[index],
           selectedMeta,
-        );
-      } catch (error) {
-        reportSkippedDecodePacket(
-          id,
-          `Skipped damaged ECDC packet ${end}/${chunks.length}; inserted ${expectedFramePcmSamples(chunks[index], selectedMeta)} silent samples`,
-          error,
-        );
-        frame = createSilentEncodedFrame(chunks[index], selectedMeta);
-      }
+        ),
+      );
       encodedFrames[index] = normalizeEncodedFrame(frame);
       // The entropy-coded payload is consumed once expanded to codes; drop it
       // so the full record's packets are not retained for the whole decode.
@@ -2108,54 +2114,37 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
         chunks[index].payload = null;
       }
 
-      let feeds = null;
-      let outputs = null;
-      try {
-        if (encodedFrames[index]?.silentPcm) {
-          s16Writer.addSilentFrame(index);
-        } else {
-          await ensureDecodeSessionReady();
-          const decoderInputs = buildDecodeInputs(encodedFrames, selectedMeta, index, end);
-          feeds = {
-            [session.inputNames[0]]: new ort.Tensor("int64", decoderInputs.codes, [
-              decoderInputs.batchSize,
-              selectedMeta.num_codebooks,
-              decoderInputs.frameLength,
-            ]),
-            [session.inputNames[1]]: new ort.Tensor("float32", decoderInputs.scales, [decoderInputs.batchSize, 1]),
-          };
-          outputs = await session.run(feeds);
-          const decodedTensor = findDecodeOutput(outputs);
-          s16Writer.addDecodedBatch(index, end, decodedTensor.data);
-        }
-        const emittedSegments = s16Writer.emitAfterBatch(end);
-        if (cacheDecodedSegments) {
-          postRawDecodedPcmSegments(id, emittedSegments, {
-            sampleRate,
-            channels: Number(selectedMeta.channels) || 2,
-            audioLength: safeAudioLength,
-          });
-        }
-        if (cacheEnabled) {
-          for (const segment of emittedSegments) {
-            await tryRequestCachePut(id, chunkCacheKeys[segment.chunkIndex], {
-              ...segment,
-              sampleRate,
-            });
+      await retryWithBackoff(
+        id,
+        `Retrying EnCodec PCM packet ${end}/${encodedFrames.length}`,
+        async () => {
+          let feeds = null;
+          let outputs = null;
+          try {
+            if (encodedFrames[index]?.silentPcm) {
+              s16Writer.addSilentFrame(index);
+            } else {
+              await ensureDecodeSessionReady();
+              const decoderInputs = buildDecodeInputs(encodedFrames, selectedMeta, index, end);
+              feeds = {
+                [session.inputNames[0]]: new ort.Tensor("int64", decoderInputs.codes, [
+                  decoderInputs.batchSize,
+                  selectedMeta.num_codebooks,
+                  decoderInputs.frameLength,
+                ]),
+                [session.inputNames[1]]: new ort.Tensor("float32", decoderInputs.scales, [decoderInputs.batchSize, 1]),
+              };
+              outputs = await session.run(feeds);
+              const decodedTensor = findDecodeOutput(outputs);
+              s16Writer.addDecodedBatch(index, end, decodedTensor.data);
+            }
+          } finally {
+            disposeOrtTensorMap(feeds);
+            disposeOrtTensorMap(outputs);
           }
-        }
-        postDecodedPcmSegments(id, emittedSegments, {
-          sampleRate,
-          channels: Number(selectedMeta.channels) || 2,
-          audioLength: safeAudioLength,
-        });
-      } catch (error) {
-        reportSkippedDecodePacket(
-          id,
-          `Skipped failed EnCodec PCM packet ${end}/${encodedFrames.length}; inserted silence`,
-          error,
-        );
-        s16Writer.addSilentFrame(index);
+        },
+      );
+      try {
         const emittedSegments = s16Writer.emitAfterBatch(end);
         if (cacheDecodedSegments) {
           postRawDecodedPcmSegments(id, emittedSegments, {
@@ -2178,8 +2167,6 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
           audioLength: safeAudioLength,
         });
       } finally {
-        disposeOrtTensorMap(feeds);
-        disposeOrtTensorMap(outputs);
         // Codes were consumed by the decoder above; release them so peak
         // memory stays bounded by the batch instead of the whole record.
         if (encodedFrames[index]) {
@@ -2466,6 +2453,11 @@ self.onmessage = async (event) => {
     }
     throw new Error(`Unknown playback worker action: ${type || "missing"}`);
   } catch (error) {
+    console.error("[play:client-playback-worker.js] request failed", {
+      id,
+      type,
+      error: workerErrorMessage(error),
+    });
     self.postMessage({
       id,
       ok: false,

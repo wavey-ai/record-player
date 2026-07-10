@@ -8,6 +8,7 @@ const appDir = resolve(scriptDir, "..");
 const rootDir = resolve(appDir, "..");
 const distDir = resolve(appDir, "dist");
 const testdataDir = resolve(rootDir, "testdata");
+const vendorSoundkitDir = resolve(rootDir, "..", "vin.yl.vendor", "wasm", "soundkit-wasm", "pkg");
 
 async function requirePath(path, label) {
   try {
@@ -37,6 +38,8 @@ function buildWasm(crateDir, outDir, outName, extraArgs = []) {
 await rm(distDir, { recursive: true, force: true });
 await cp(resolve(appDir, "src"), distDir, { recursive: true });
 await cp(resolve(appDir, "src"), distDir, { recursive: true });
+await requirePath(vendorSoundkitDir, "SoundKit wasm package");
+await cp(vendorSoundkitDir, resolve(distDir, "soundkit-wasm"), { recursive: true });
 
 
 buildWasm(rootDir, resolve(distDir, "record-player"), "record_player", ["--features", "wasm"]);

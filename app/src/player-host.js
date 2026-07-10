@@ -8,6 +8,7 @@ import { clearScratchPerformances, deleteScratchPerformance, getScratchPerforman
 const log = createLogger("host");
 const initialLoggingParam = new URLSearchParams(globalThis.location?.search || "").get("player_log");
 setPlayerLoggingEnabled(initialLoggingParam === "1");
+const DEFAULT_TAPE_API_URL = "https://yl.vin/api/play/tape";
 
 function queryParams() {
   return new URLSearchParams(globalThis.location?.search || "");
@@ -44,16 +45,20 @@ function startupRecordSrc() {
 function startupCacheUrl() {
   const params = queryParams();
   const value = String(params.get("tape_url") || "").trim();
+  const resolved = value || DEFAULT_TAPE_API_URL;
   if (isPlayerLoggingEnabled()) {
     console.log("[vin.yl.player] startupCacheUrl", {
       href: globalThis.location?.href || "",
       tapeUrl: value,
+      resolvedTapeUrl: resolved,
     });
   }
   if (!value && isPlayerLoggingEnabled()) {
-    console.warn("[vin.yl.player] tape disabled: missing tape_url query param");
+    console.info("[vin.yl.player] tape defaulting to built-in endpoint", {
+      tapeUrl: DEFAULT_TAPE_API_URL,
+    });
   }
-  return value || "";
+  return resolved;
 }
 
 function embedParamColor(name, fallback = "") {

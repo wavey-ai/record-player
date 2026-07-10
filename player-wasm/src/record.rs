@@ -203,11 +203,11 @@ pub struct WasmLabelThumbnail {
 }
 
 impl WasmLabelThumbnail {
-        pub fn bytes(&self) -> Vec<u8> {
+    pub fn bytes(&self) -> Vec<u8> {
         self.bytes.clone()
     }
 
-        pub fn mime(&self) -> String {
+    pub fn mime(&self) -> String {
         self.mime.clone()
     }
 }
@@ -229,16 +229,18 @@ pub struct WasmPayloadDecodeResult {
 
 #[wasm_bindgen]
 impl WasmPayloadDecodeResult {
-        #[wasm_bindgen(js_name = payloadBytes)]
+    #[wasm_bindgen(js_name = payloadBytes)]
     pub fn payload_bytes(&self) -> Vec<u8> {
         self.payload_bytes.clone()
     }
 
-        pub fn chunk_stream_bytes(&self) -> Vec<u8> {
+    #[wasm_bindgen(js_name = chunkStreamBytes)]
+    pub fn chunk_stream_bytes(&self) -> Vec<u8> {
         self.chunk_stream_bytes.clone()
     }
 
-        pub fn metadata_json(&self) -> String {
+    #[wasm_bindgen(js_name = metadataJson)]
+    pub fn metadata_json(&self) -> String {
         self.metadata_json.clone()
     }
 
@@ -249,7 +251,8 @@ impl WasmPayloadDecodeResult {
     /// player splices `sampleCount` zero-filled PCM samples after decoding
     /// the byte at `afterByteOffset` instead. Empty array (`"[]"`) when the
     /// record has no GAP entries (the common case).
-        pub fn silence_map_json(&self) -> String {
+    #[wasm_bindgen(js_name = silenceMapJson)]
+    pub fn silence_map_json(&self) -> String {
         self.silence_map_json.clone()
     }
 }
@@ -1307,7 +1310,7 @@ fn decode_record_png_sidecar_with_context(
 
     if let Some(pointer) = pointer.as_ref() {
         let actual: [u8; 32] = Sha256::digest(&bts1).into();
-        if actual != pointer.sha256 {
+        if actual != pointer.sha256_bytes {
             bail!("record sidecar SHA-256 does not match header pointer");
         }
     }
@@ -1729,10 +1732,3 @@ mod tests {
         );
     }
 }
-
-
-
-
-
-
-
