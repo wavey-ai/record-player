@@ -3,12 +3,17 @@ import { createVinylPlayerCanvas } from "./player-canvas.js";
 import { RecordDecoderClient } from "./record-decoder-client.js";
 import { createPcmChunkCacheHandler, recordCacheKey } from "./pcm-cache.js";
 import { createRemoteOpusChunkCacheHandler, createRemoteOpusPrecache, decodeRecordDescriptorJson } from "./opus-cache.js";
+import { buildSoundkitFrameHeader, soundkitOpusPacketItemsFromPackets } from "./player-soundkit.js";
 import { clearScratchPerformances, deleteScratchPerformance, getScratchPerformance, listScratchPerformances, saveScratchPerformance } from "./scratch-performance-store.js";
 
 const log = createLogger("host");
 const initialLoggingParam = new URLSearchParams(globalThis.location?.search || "").get("player_log");
 setPlayerLoggingEnabled(initialLoggingParam === "1");
 const DEFAULT_TAPE_API_URL = "https://yl.vin/api/play/tape";
+const DEFAULT_TAPE_MASTER_API_URL = "https://yl.vin/api/bitneedle-source-audio";
+
+let tapePcmHelpersPromise = null;
+let tapePlayerWasmPromise = null;
 
 function queryParams() {
   return new URLSearchParams(globalThis.location?.search || "");
@@ -59,6 +64,116 @@ function startupCacheUrl() {
     });
   }
   return resolved;
+}
+
+function startupTapeMasterUrl() {
+  const params = queryParams();
+  const value = String(params.get("tape_master_url") || globalThis.BITNEEDLE_SOURCE_AUDIO_STORE_API_BASE_URL || "").trim();
+  return value || DEFAULT_TAPE_MASTER_API_URL;
+}
+
+function versionedAssetUrl(path) {
+  const url = new URL(path, globalThis.location?.href || import.meta.url);
+  const version = queryParams().get("v");
+  if (version) {
+    url.searchParams.set("v", version);
+  }
+  return url.toString();
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function uint8View(value) {
+  if (value instanceof Uint8Array) return value;
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  return new Uint8Array(value || 0);
+}
+
+function cloneArrayBuffer(buffer) {
+  if (buffer instanceof ArrayBuffer) return buffer.slice(0);
+  if (ArrayBuffer.isView(buffer)) {
+    return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+  }
+  return new ArrayBuffer(0);
+}
+
+function cloneChannelBuffers(channelBuffers = []) {
+  return (Array.isArray(channelBuffers) ? channelBuffers : [])
+    .map((buffer) => cloneArrayBuffer(buffer))
+    .filter((buffer) => buffer.byteLength > 0);
+}
+
+function concatenateUint8Chunks(chunks, totalLength = null) {
+  const list = (Array.isArray(chunks) ? chunks : []).map(uint8View).filter((chunk) => chunk.byteLength > 0);
+  const length = totalLength == null ? list.reduce((sum, chunk) => sum + chunk.byteLength, 0) : totalLength;
+  const output = new Uint8Array(Math.max(0, length));
+  let offset = 0;
+  for (const chunk of list) {
+    output.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return output;
+}
+
+function decodeBase64ToUint8Array(value) {
+  const normalized = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
+  const binary = atob(normalized);
+  const output = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    output[index] = binary.charCodeAt(index);
+  }
+  return output;
+}
+
+async function ensureTapePlayerWasmModule() {
+  if (!tapePlayerWasmPromise) {
+    tapePlayerWasmPromise = import(versionedAssetUrl("./player-wasm/player_wasm.js")).then(async (module) => {
+      if (typeof module.default === "function") {
+        await module.default({
+          module_or_path: versionedAssetUrl("./player-wasm/player_wasm_bg.wasm"),
+        });
+      }
+      return module;
+    });
+  }
+  return tapePlayerWasmPromise;
+}
+
+async function ensureTapePcmHelpers() {
+  if (!tapePcmHelpersPromise) {
+    tapePcmHelpersPromise = (async () => {
+      await import(versionedAssetUrl("./player-pcm-helpers.js"));
+      const helperFactory = globalThis.BitneedlePlayerPcmHelpers?.createPlayerPcmHelpers;
+      if (typeof helperFactory !== "function") {
+        throw new Error("BitneedlePlayerPcmHelpers is unavailable.");
+      }
+      const soundkitModule = await import(versionedAssetUrl("./soundkit-wasm/soundkit_wasm.js"));
+      if (typeof soundkitModule.default === "function") {
+        await soundkitModule.default({
+          module_or_path: versionedAssetUrl("./soundkit-wasm/soundkit_wasm_bg.wasm"),
+        });
+      }
+      return {
+        playerWasm: await ensureTapePlayerWasmModule(),
+        helpers: helperFactory({
+          clamp,
+          getScratchAudioContext: () => null,
+          ensureSoundkitOpusModule: () => soundkitModule,
+          buildSoundkitFrameHeader,
+          uint8View,
+          yieldToMainThread: () => Promise.resolve(),
+          assertPlayerRuntimeActive: () => {},
+          concatenateUint8Chunks,
+          soundkitOpusPacketItemsFromPackets,
+          decodeBase64ToUint8Array,
+        }),
+      };
+    })();
+  }
+  return tapePcmHelpersPromise;
 }
 
 function embedParamColor(name, fallback = "") {
@@ -201,6 +316,7 @@ const elements = {
   load: document.querySelector("#load"),
   play: document.querySelector("#play"),
   needle: document.querySelector("#needle"),
+  tape: document.querySelector("#tape"),
   platter: document.querySelector("#platter"),
   seek: document.querySelector("#seek"),
   status: document.querySelector("#status"),
@@ -259,6 +375,8 @@ const state = {
   listeners: new Set(),
   loadedFile: null,
   recordHash: "",
+  recordReleaseId: "",
+  basePcmSource: null,
   scratchRecorders: new Set(),
   scratchReplayRequests: new Map(),
   scratchReplayId: 0,
@@ -277,6 +395,15 @@ const state = {
   programmeMap: null,
   recordHeaderProof: null,
   recordDescriptorJson: "",
+  tape: {
+    checkedKey: "",
+    available: false,
+    active: false,
+    loading: false,
+    source: null,
+    releaseId: "",
+    sourceLabel: "",
+  },
 };
 
 const DEFAULT_POST_MESSAGE_BRIDGE = Object.freeze({
@@ -635,6 +762,451 @@ async function markLoadedReady() {
   elements.seek.disabled = false;
 }
 
+function resetTapeState() {
+  state.tape.checkedKey = "";
+  state.tape.available = false;
+  state.tape.active = false;
+  state.tape.loading = false;
+  state.tape.source = null;
+  state.tape.releaseId = "";
+  state.tape.sourceLabel = "";
+}
+
+function updateTapeButton() {
+  if (!elements.tape) return;
+  elements.tape.hidden = false;
+  elements.tape.textContent = state.tape.loading ? "TAPE..." : "TAPE";
+  elements.tape.disabled = !state.tape.available || state.tape.loading || !state.basePcmSource;
+  elements.tape.classList.toggle("is-active", Boolean(state.tape.active));
+  elements.tape.setAttribute("aria-pressed", state.tape.active ? "true" : "false");
+  elements.tape.title = state.tape.active
+    ? "Using HQ Opus tape master"
+    : state.tape.available
+      ? "Switch to HQ Opus tape master"
+      : "HQ Opus tape master unavailable";
+}
+
+function tapeMasterObjectUrl(releaseId, action) {
+  const base = String(startupTapeMasterUrl() || "").replace(/\/+$/, "");
+  return `${base}/objects/${encodeURIComponent(releaseId)}/${action}`;
+}
+
+async function fetchTapeMasterRemoteManifest(releaseId) {
+  try {
+    const response = await fetch(tapeMasterObjectUrl(releaseId, "manifest"), {
+      mode: "cors",
+      credentials: "omit",
+      cache: "no-store",
+    });
+    if (!response.ok) return null;
+    const manifest = await response.json();
+    if (manifest?.status !== "sealed") return null;
+    if (!(Number(manifest?.durationFrames) > 0) || !(Number(manifest?.committedBytes) > 0)) return null;
+    const codec = String(manifest?.codec || "").toLowerCase();
+    const contentType = String(manifest?.contentType || "").toLowerCase();
+    const encrypted = manifest?.encrypted !== false;
+    if (encrypted) {
+      if (codec !== "bce1" && contentType !== "application/vnd.bitneedle.bce1") return null;
+    } else if (codec !== "opus" && !contentType.includes("opus")) {
+      return null;
+    }
+    return manifest;
+  } catch (error) {
+    console.warn("[vin.yl.player] tape master manifest fetch failed", error);
+    return null;
+  }
+}
+
+async function fetchTapeMasterRemoteStream(releaseId) {
+  const manifest = await fetchTapeMasterRemoteManifest(releaseId);
+  if (!manifest) return null;
+  const totalBytes = Math.max(0, Math.floor(Number(manifest.committedBytes) || 0));
+  if (!(totalBytes > 0)) return null;
+  const chunkSize = 4 * 1024 * 1024;
+  const streamChunks = [];
+  try {
+    for (let offset = 0; offset < totalBytes; offset += chunkSize) {
+      const end = Math.min(totalBytes, offset + chunkSize) - 1;
+      const response = await fetch(tapeMasterObjectUrl(releaseId, "stream"), {
+        mode: "cors",
+        credentials: "omit",
+        cache: "no-store",
+        headers: { Range: `bytes=${offset}-${end}` },
+      });
+      if (!response.ok) return null;
+      streamChunks.push(new Uint8Array(await response.arrayBuffer()));
+    }
+  } catch (error) {
+    console.warn("[vin.yl.player] tape master stream fetch failed", error);
+    return null;
+  }
+  return {
+    meta: {
+      sampleRate: Number(manifest.timescale) || 48000,
+      channels: Number(manifest.channels) || 2,
+      frameCount: Number(manifest.durationFrames) || 0,
+      bitsPerSample: Number(manifest.bitsPerSample) || 16,
+      encrypted: manifest.encrypted !== false,
+      encryptedCache: manifest.encrypted !== false,
+      audioFormat: "soundkit_v2_opus_stream",
+      format: "soundkit_v2_opus_stream",
+      streamCodec: "opus",
+    },
+    streamChunks,
+  };
+}
+
+function tapeIdbRequest(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("IndexedDB request failed"));
+  });
+}
+
+function openTapeMasterDb() {
+  return new Promise((resolve) => {
+    if (typeof indexedDB === "undefined") {
+      resolve(null);
+      return;
+    }
+    let request;
+    try {
+      request = indexedDB.open("bitneedle-source-audio-local");
+    } catch (_error) {
+      resolve(null);
+      return;
+    }
+    request.onupgradeneeded = () => {
+      try {
+        request.transaction?.abort();
+      } catch (_error) {}
+      resolve(null);
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => resolve(null);
+    request.onblocked = () => resolve(null);
+  });
+}
+
+async function readTapeMasterMeta(releaseId) {
+  const db = await openTapeMasterDb();
+  if (!db) return null;
+  try {
+    if (!db.objectStoreNames.contains("source-stream-meta")) return null;
+    const store = db.transaction("source-stream-meta", "readonly").objectStore("source-stream-meta");
+    return (await tapeIdbRequest(store.get(String(releaseId)))) || null;
+  } catch (error) {
+    console.warn("[vin.yl.player] tape master meta read failed", error);
+    return null;
+  } finally {
+    db.close();
+  }
+}
+
+async function readTapeMasterStream(releaseId) {
+  const db = await openTapeMasterDb();
+  if (!db) return null;
+  try {
+    if (!db.objectStoreNames.contains("source-stream-meta") || !db.objectStoreNames.contains("source-stream-blobs")) {
+      return null;
+    }
+    const transaction = db.transaction(["source-stream-meta", "source-stream-blobs"], "readonly");
+    const meta = await tapeIdbRequest(transaction.objectStore("source-stream-meta").get(String(releaseId)));
+    if (!meta) return null;
+    const rows = await tapeIdbRequest(transaction.objectStore("source-stream-blobs").index("cacheKey").getAll(String(releaseId)));
+    const streamChunks = (Array.isArray(rows) ? rows : [])
+      .filter((row) => row?.kind === "stream" && row.chunk instanceof ArrayBuffer)
+      .sort((a, b) => (Number(a.chunkIndex) || 0) - (Number(b.chunkIndex) || 0))
+      .map((row) => new Uint8Array(row.chunk.slice(0)));
+    if (!streamChunks.length) return null;
+    return { meta, streamChunks };
+  } catch (error) {
+    console.warn("[vin.yl.player] tape master stream read failed", error);
+    return null;
+  } finally {
+    db.close();
+  }
+}
+
+function tapeMasterEnvelopeLength(bytes, offset = 0) {
+  const headerLength = 84;
+  if (!(bytes instanceof Uint8Array) || offset < 0 || offset + headerLength > bytes.length) return 0;
+  if (bytes[offset] !== 0x42 || bytes[offset + 1] !== 0x43 || bytes[offset + 2] !== 0x45 || bytes[offset + 3] !== 0x31) {
+    return 0;
+  }
+  const plaintextLength = (
+    (bytes[offset + 56] << 24)
+    | (bytes[offset + 57] << 16)
+    | (bytes[offset + 58] << 8)
+    | bytes[offset + 59]
+  ) >>> 0;
+  if (!(plaintextLength > 0)) return 0;
+  return headerLength + plaintextLength + 16;
+}
+
+function tapeMasterReadBigUint64BE(bytes, offset) {
+  if (!(bytes instanceof Uint8Array) || offset < 0 || offset + 8 > bytes.length) return 0;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (typeof view.getBigUint64 === "function") {
+    try {
+      return Number(view.getBigUint64(offset, false));
+    } catch (_error) {}
+  }
+  let value = 0;
+  for (let index = 0; index < 8; index += 1) {
+    value = (value * 256) + bytes[offset + index];
+  }
+  return value;
+}
+
+function tapeMasterEncryptionContext({
+  cacheKey = "",
+  chunkIndex = 0,
+  packetOffset = 0,
+  plaintextLength = 0,
+  codecIdentifier = "soundkit_v2_opus_stream",
+} = {}) {
+  return {
+    protocolVersion: 1,
+    cacheFormatVersion: 1,
+    cacheStoreName: "bitneedle-source-audio-master",
+    cacheKey: String(cacheKey || ""),
+    chunkIndex: Math.max(0, Math.floor(Number(chunkIndex) || 0)),
+    packetOffset: Math.max(0, Math.floor(Number(packetOffset) || 0)),
+    plaintextLength: Math.max(0, Math.floor(Number(plaintextLength) || 0)),
+    codecIdentifier: String(codecIdentifier || "soundkit_v2_opus_stream"),
+  };
+}
+
+async function decryptTapeMasterStreamChunks(streamChunks, descriptorJson, cacheKey, codecIdentifier = "soundkit_v2_opus_stream") {
+  const chunks = Array.isArray(streamChunks) ? streamChunks : [];
+  if (!chunks.length) return null;
+  const { playerWasm } = await ensureTapePcmHelpers();
+  if (typeof playerWasm?.decryptCacheEntry !== "function") {
+    throw new Error("player-wasm decryptCacheEntry is unavailable.");
+  }
+  const sourceBytes = concatenateUint8Chunks(chunks);
+  const plaintextChunks = [];
+  let offset = 0;
+  while (offset < sourceBytes.length) {
+    const envelopeLength = tapeMasterEnvelopeLength(sourceBytes, offset);
+    if (!(envelopeLength > 0) || offset + envelopeLength > sourceBytes.length) {
+      throw new Error("Invalid BCE1 tape master envelope.");
+    }
+    const envelope = sourceBytes.slice(offset, offset + envelopeLength);
+    const chunkIndex = tapeMasterReadBigUint64BE(envelope, 40);
+    const packetOffset = tapeMasterReadBigUint64BE(envelope, 48);
+    const plaintextLength = (
+      (envelope[56] << 24)
+      | (envelope[57] << 16)
+      | (envelope[58] << 8)
+      | envelope[59]
+    ) >>> 0;
+    const plaintext = playerWasm.decryptCacheEntry(
+      descriptorJson,
+      JSON.stringify(tapeMasterEncryptionContext({
+        cacheKey,
+        chunkIndex,
+        packetOffset,
+        plaintextLength,
+        codecIdentifier,
+      })),
+      envelope,
+    );
+    const packetBytes = uint8View(plaintext);
+    if (!(packetBytes.byteLength > 0)) {
+      throw new Error("Decrypted tape master chunk was empty.");
+    }
+    plaintextChunks.push(packetBytes);
+    offset += envelopeLength;
+  }
+  return concatenateUint8Chunks(plaintextChunks);
+}
+
+function buildPcmSourceFromProvider(provider, sampleRate, frameCount) {
+  const channelBuffers = provider.channelData
+    .map((channel) => channel.buffer.slice(channel.byteOffset, channel.byteOffset + channel.byteLength))
+    .filter((buffer) => buffer.byteLength > 0);
+  return {
+    sampleRate,
+    audioLength: frameCount,
+    channels: channelBuffers.length,
+    channelBuffers,
+  };
+}
+
+async function decodeTapeMasterSource(stored, releaseId) {
+  const sampleRate = Math.max(1, Math.floor(Number(stored?.meta?.sampleRate) || state.sampleRate || 48000));
+  const channels = Math.max(1, Math.floor(Number(stored?.meta?.channels) || 2));
+  const frameCount = Math.max(0, Math.floor(Number(stored?.meta?.frameCount) || Number(stored?.meta?.audioLength) || 0));
+  if (!(frameCount > 0)) return null;
+  if (!state.recordDescriptorJson) return null;
+  const codecIdentifier = String(stored?.meta?.audioFormat || stored?.meta?.format || "soundkit_v2_opus_stream");
+  const encrypted = stored?.meta?.encrypted !== false && stored?.meta?.encryptedCache !== false;
+  const streamBytes = encrypted
+    ? await decryptTapeMasterStreamChunks(stored.streamChunks, state.recordDescriptorJson, releaseId, codecIdentifier)
+    : concatenateUint8Chunks(stored.streamChunks);
+  if (!(streamBytes?.byteLength > 0)) return null;
+  const { helpers } = await ensureTapePcmHelpers();
+  const pcmBytes = await helpers.decodeSoundkitOpusPacketsToPcmBytes(
+    {
+      sampleRate,
+      channels,
+      startFrame: 0,
+      endFrame: frameCount,
+    },
+    [streamBytes],
+  );
+  if (!(pcmBytes?.byteLength > 0)) return null;
+  const provider = helpers.createS16PcmWindowProviderFromPcmBytes({
+    pcmBytes,
+    frameCount,
+    sampleRate,
+    channels,
+    bitsPerSample: Math.max(1, Math.floor(Number(stored?.meta?.bitsPerSample) || 16)),
+    audioFormat: "tape_master_pcm",
+  });
+  return buildPcmSourceFromProvider(provider, sampleRate, frameCount);
+}
+
+async function ensureTapeMasterSource() {
+  const releaseId = String(state.recordReleaseId || "").trim();
+  if (!releaseId) return null;
+  if (state.tape.source && state.tape.releaseId === releaseId) return state.tape.source;
+  const stored = (await readTapeMasterStream(releaseId)) || (await fetchTapeMasterRemoteStream(releaseId));
+  if (!stored) return null;
+  const source = await decodeTapeMasterSource(stored, releaseId);
+  if (!source) return null;
+  if (source.sampleRate !== state.sampleRate || source.audioLength !== Math.round(state.duration * state.sampleRate)) {
+    throw new Error("Tape master geometry does not match the loaded record.");
+  }
+  state.tape.source = source;
+  state.tape.releaseId = releaseId;
+  return source;
+}
+
+function storeBasePcmSource({ sampleRate, audioLength, s16ChannelBuffers }) {
+  const channelBuffers = cloneChannelBuffers(s16ChannelBuffers);
+  if (!channelBuffers.length) {
+    state.basePcmSource = null;
+    return;
+  }
+  state.basePcmSource = {
+    sampleRate: Math.max(1, Math.floor(Number(sampleRate) || 48000)),
+    audioLength: Math.max(0, Math.floor(Number(audioLength) || new Int16Array(channelBuffers[0]).length)),
+    channels: channelBuffers.length,
+    channelBuffers,
+  };
+}
+
+async function replaceActivePcmSource(source) {
+  if (!state.node || !source) return;
+  const view = deckView();
+  if (state.scratching || state.view?.lead_in_active || state.view?.deadwax_active) {
+    throw new Error("TAPE switching is unavailable while scratching or cueing.");
+  }
+  clearTimeout(state.seekTimer);
+  state.queuedSeekSeconds = null;
+  const wasPlaying = Boolean(view?.playing);
+  const motorRunning = Boolean(view?.transport_on);
+  const needleLifted = Boolean(view?.needle_lifted);
+  const position = clamp(Math.floor(Number(state.positionFrames) || 0), 0, Math.max(0, source.audioLength - 1));
+  if (wasPlaying) {
+    state.node.port.postMessage({ type: "stop", handoff: false });
+  }
+  const channelBuffers = cloneChannelBuffers(source.channelBuffers);
+  state.node.port.postMessage({
+    type: "stream-init",
+    sampleRate: source.sampleRate,
+    audioLength: source.audioLength,
+    channels: source.channels,
+  });
+  state.node.port.postMessage({
+    type: "append-pcm",
+    startFrame: 0,
+    endFrame: source.audioLength,
+    channelBuffers,
+  }, channelBuffers);
+  state.node.port.postMessage({ type: "stream-complete" });
+  seekWorklet(position);
+  state.node.port.postMessage({ type: "transport", running: motorRunning });
+  state.node.port.postMessage({ type: "needle", lifted: needleLifted });
+  if (wasPlaying) {
+    state.node.port.postMessage({
+      type: "play",
+      position,
+      rate: state.baseRpm > 0 ? state.rpm / state.baseRpm : 1,
+      handoff: false,
+    });
+  }
+  state.sampleRate = source.sampleRate;
+  state.duration = source.sampleRate > 0 ? source.audioLength / source.sampleRate : state.duration;
+  state.streamInitialised = true;
+  state.streamReady = true;
+  state.streamDecodedFrames = source.audioLength;
+}
+
+async function setTapeMonitor(active) {
+  const next = Boolean(active);
+  if (next === state.tape.active) return;
+  if (!state.basePcmSource) {
+    setStatus("TAPE monitor is unavailable until the record finishes decoding.");
+    return;
+  }
+  state.tape.loading = true;
+  updateTapeButton();
+  try {
+    if (next) {
+      setStatus("TAPE: loading HQ Opus master...");
+      const source = await ensureTapeMasterSource();
+      if (!source) {
+        state.tape.available = false;
+        setStatus("HQ Opus tape master is unavailable for this record.");
+        return;
+      }
+      await replaceActivePcmSource(source);
+      state.tape.active = true;
+      state.tape.available = true;
+      state.tape.sourceLabel = "hq-opus";
+      setStatus("TAPE: HQ Opus");
+    } else {
+      await replaceActivePcmSource(state.basePcmSource);
+      state.tape.active = false;
+      setStatus("TAPE: record audio");
+    }
+  } finally {
+    state.tape.loading = false;
+    updateTapeButton();
+    publishState();
+  }
+}
+
+async function maybeRefreshTapeAvailability() {
+  const releaseId = String(state.recordReleaseId || "").trim();
+  const checkedKey = `${state.recordHash}|${releaseId}`;
+  if (!releaseId || state.tape.checkedKey === checkedKey) {
+    updateTapeButton();
+    return;
+  }
+  state.tape.checkedKey = checkedKey;
+  state.tape.available = false;
+  state.tape.active = false;
+  state.tape.source = null;
+  state.tape.releaseId = "";
+  state.tape.sourceLabel = "";
+  updateTapeButton();
+  const localMeta = await readTapeMasterMeta(releaseId);
+  if (state.tape.checkedKey !== checkedKey) return;
+  let available = Boolean(localMeta && (Number(localMeta.frameCount) > 0 || Number(localMeta.audioLength) > 0));
+  if (!available) {
+    const manifest = await fetchTapeMasterRemoteManifest(releaseId);
+    if (state.tape.checkedKey !== checkedKey) return;
+    available = Boolean(manifest);
+  }
+  state.tape.available = available;
+  updateTapeButton();
+}
+
 async function flushQueuedSeek() {
   if (state.seekInFlight || state.queuedSeekSeconds == null) return;
   let seconds = state.queuedSeekSeconds;
@@ -927,9 +1499,13 @@ async function loadFile(file, { cache, resumeAudio = true } = {}) {
   state.streamAppendChain = Promise.resolve();
   state.decodeProgressText = "";
   state.programmeMap = null;
+  state.recordReleaseId = "";
+  state.basePcmSource = null;
+  resetTapeState();
   elements.play.disabled = false;
   elements.needle.disabled = false;
   elements.seek.disabled = true;
+  updateTapeButton();
   if (state.recordObjectUrl) URL.revokeObjectURL(state.recordObjectUrl);
   state.recordObjectUrl = URL.createObjectURL(file);
   elements.recordImage.src = state.recordObjectUrl;
@@ -968,11 +1544,13 @@ async function loadFile(file, { cache, resumeAudio = true } = {}) {
     });
   }
   state.programmeMap = parseJsonObject(inspected.programmeMapJson, null);
+  state.recordReleaseId = String(inspected.releaseId || "").trim();
   elements.metadata.hidden = isEmbedMode();
   elements.metaProfile.textContent = inspected.recordProfile || "unknown";
   elements.metaContainer.textContent = inspected.payloadContainer || "unknown";
   elements.metaRelease.textContent = inspected.releaseId || "unsigned / unavailable";
   publishState();
+  void maybeRefreshTapeAvailability();
   state.baseRpm = profileRpm(inspected.recordProfile);
   state.rpm = state.baseRpm;
   updateRpmButtons();
@@ -1017,6 +1595,8 @@ async function loadFile(file, { cache, resumeAudio = true } = {}) {
   state.baseRpm = profileRpm(inspected.recordProfile);
   state.rpm = state.baseRpm;
   updateRpmButtons();
+  storeBasePcmSource({ sampleRate, audioLength, s16ChannelBuffers: s16Buffers });
+  updateTapeButton();
   if (!state.streamInitialised) {
     await loadDecodedPcm({ sampleRate, audioLength, s16ChannelBuffers: s16Buffers });
   }
@@ -1099,6 +1679,7 @@ function render() {
   if (!view) return;
   elements.play.textContent = (view.transport_on || view.playing || state.view?.lead_in_active || state.view?.deadwax_active) ? "STOP" : "START";
   elements.needle.textContent = view.needle_lifted ? "NEEDLE DOWN" : "NEEDLE UP";
+  updateTapeButton();
   publishState();
 }
 
@@ -1307,6 +1888,8 @@ function publicState() {
     currentTrackIndex: currentTrackIndex(),
     currentTrackTitle: programmeTracks()[currentTrackIndex()]?.title || "",
     trackCount: programmeTracks().length,
+    tapeAvailable: Boolean(state.tape.available),
+    tapeActive: Boolean(state.tape.active),
   });
 }
 
@@ -1588,6 +2171,12 @@ elements.needle.addEventListener("click", () => {
   state.node?.port.postMessage({ type: "needle", lifted });
   if (!lifted && view.transport_on) state.node?.port.postMessage({ type: "needle-drop" });
 });
+elements.tape?.addEventListener("click", () => {
+  void setTapeMonitor(!state.tape.active).catch((error) => {
+    setStatus(error?.message || String(error));
+    updateTapeButton();
+  });
+});
 elements.seek.addEventListener("pointerdown", () => { state.draggingSeek = true; });
 elements.seek.addEventListener("input", () => {
   const seconds = Number(elements.seek.value) * state.duration;
@@ -1610,4 +2199,5 @@ elements.platter.addEventListener("pointermove", moveScratch);
 elements.platter.addEventListener("pointerup", event => void endScratch(event));
 elements.platter.addEventListener("pointercancel", event => void endScratch(event));
 
+updateTapeButton();
 initialise().catch(error => setStatus(error.message));
