@@ -40,7 +40,8 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
   let components = { ...CANVAS_COMPONENTS, ...(options.components || {}) };
   let theme = { ...CANVAS_THEME, ...(options.theme || {}) };
   let interaction = {
-    loadOnEmptyRecordTap: Boolean(options.loadOnEmptyRecordTap)
+    loadOnEmptyRecordTap: Boolean(options.loadOnEmptyRecordTap),
+    recordFill: options.recordFill === true,
   };
   let snapshot = player.getState();
   let image = null;
@@ -255,7 +256,11 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
     updateUiFade(timestamp);
     const dt = Math.min(0.1, Math.max(0, (timestamp - lastTimestamp) / 1000));
     lastTimestamp = timestamp;
-    if (snapshot.motorRunning && !snapshot.scratching) {
+    // Playback can be audible while the deck's transport flag is false (for
+    // example during the lead-in/deadwax handoff). Keep the platter moving
+    // for the actual playback state as well, otherwise audio plays while the
+    // record appears frozen.
+    if ((snapshot.motorRunning || snapshot.playing) && !snapshot.scratching) {
       visualRotation = (visualRotation + (Number(snapshot.rpm) || 0) * 6 * dt) % 360;
     }
     loadImage(snapshot.recordImageUrl);
@@ -265,7 +270,7 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
       ctx.fillRect(0, 0, width, height);
     }
     hitRegions = [];
-    const geometry = buildCanvasGeometry(width, height);
+    const geometry = buildCanvasGeometry(width, height, interaction);
     latestGeometry = geometry;
     // syncRings kept as a legacy master switch; the strobe subsystem is now
     // gated per-part: syncDots (base ring dots), strobe (lit sampling +
@@ -485,6 +490,9 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
           ...interaction,
           loadOnEmptyRecordTap: Boolean(next.loadOnEmptyRecordTap)
         };
+      }
+      if (Object.prototype.hasOwnProperty.call(next, "recordFill")) {
+        interaction = { ...interaction, recordFill: next.recordFill === true };
       }
       if (typeof next.strobeLightOn === "boolean") strobeLightOn = next.strobeLightOn;
       scheduleRender();

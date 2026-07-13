@@ -566,7 +566,9 @@
     };
   }
 
-  globalThis.BitneedlePlayerPcmHelpers = {
+  // Keep the Player runtime's helper namespace private from Press, which also
+  // ships a legacy helper with a different SoundKit encoder contract.
+  globalThis.BitneedlePlayerRuntimePcmHelpers = {
     createPlayerPcmHelpers,
   };
 })();

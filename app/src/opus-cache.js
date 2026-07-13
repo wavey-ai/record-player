@@ -18,12 +18,18 @@ let playerWasmModulePromise = null;
 let soundKitWasmModulePromise = null;
 
 function versionedAssetUrl(path) {
-  const url = new URL(path, globalThis.location?.href || import.meta.url);
+  const assetBaseUrl = globalThis.VIN_YL_PLAYER_ASSET_BASE_URL || import.meta.url;
+  const url = new URL(path, assetBaseUrl);
   const version = new URL(globalThis.location?.href || import.meta.url).searchParams.get("v");
   if (version) {
     url.searchParams.set("v", version);
   }
   return url.toString();
+}
+
+function sharedWasmAssetUrl(path) {
+  const base = globalThis.VIN_YL_PLAYER_SHARED_WASM_BASE_URL;
+  return versionedAssetUrl(base ? `${String(base).replace(/\/+$/, "")}/${String(path).replace(/^\/+/, "")}` : path);
 }
 
 async function loadScriptOnce(path, globalName) {
@@ -40,13 +46,13 @@ async function loadScriptOnce(path, globalName) {
 async function ensureSharedModules() {
   if (!sharedModulesPromise) {
     sharedModulesPromise = (async () => {
-      await loadScriptOnce("./player-cache-config.js", "BitneedlePlayerCacheConfig");
-      await loadScriptOnce("./player-cache.js", "BitneedlePlayerCache");
-      await loadScriptOnce("./player-pcm-helpers.js", "BitneedlePlayerPcmHelpers");
+      await loadScriptOnce("./player-cache-config.js", "BitneedlePlayerRuntimeCacheConfig");
+      await loadScriptOnce("./player-cache.js", "BitneedlePlayerRuntimeCache");
+      await loadScriptOnce("./player-pcm-helpers.js", "BitneedlePlayerRuntimePcmHelpers");
       return {
-        cache: globalThis.BitneedlePlayerCache,
-        cacheConfig: globalThis.BitneedlePlayerCacheConfig,
-        pcmHelpers: globalThis.BitneedlePlayerPcmHelpers,
+        cache: globalThis.BitneedlePlayerRuntimeCache,
+        cacheConfig: globalThis.BitneedlePlayerRuntimeCacheConfig,
+        pcmHelpers: globalThis.BitneedlePlayerRuntimePcmHelpers,
       };
     })();
   }
@@ -67,10 +73,10 @@ async function ensurePlayerWasmModule() {
 
 async function ensureSoundKitWasmModule() {
   if (!soundKitWasmModulePromise) {
-    soundKitWasmModulePromise = import("./soundkit-wasm/soundkit_wasm.js").then(async (module) => {
+    soundKitWasmModulePromise = import(sharedWasmAssetUrl("soundkit-wasm/soundkit_wasm.js")).then(async (module) => {
       if (typeof module.default === "function") {
         await module.default({
-          module_or_path: versionedAssetUrl("./soundkit-wasm/soundkit_wasm_bg.wasm"),
+          module_or_path: sharedWasmAssetUrl("soundkit-wasm/soundkit_wasm_bg.wasm"),
         });
       }
       return module;
@@ -229,7 +235,9 @@ async function createOpusRuntime(config = {}) {
     decodeSegmentCacheStoreName: String(config.storeName || "opus-chunks"),
     waveformCacheStoreName: "waveform-peaks",
     decodeSegmentRemoteCacheFormats: new Set(config.acceptedFormats || DEFAULT_REMOTE_CACHE_FORMATS),
-    remoteCacheApiBaseUrl: String(config.apiBaseUrl || DEFAULT_REMOTE_API_BASE_URL),
+    remoteCacheApiBaseUrl: config.disableRemoteCache
+      ? ""
+      : String(config.apiBaseUrl || DEFAULT_REMOTE_API_BASE_URL),
     remoteCacheStreamContentType: String(
       config.remoteCacheStreamContentType
       || cacheConfig.PLAYER_REMOTE_CACHE_STREAM_CONTENT_TYPE

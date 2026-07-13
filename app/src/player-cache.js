@@ -1177,7 +1177,7 @@
     };
   }
 
-  globalThis.BitneedlePlayerCache = {
+  globalThis.BitneedlePlayerRuntimeCache = {
     createPlayerCache,
   };
 })();

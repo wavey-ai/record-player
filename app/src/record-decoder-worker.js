@@ -69,7 +69,7 @@ function resolveWorkerAssetPath(path) {
     return value;
   }
   if (isLocalDevelopmentHost(self.location.hostname)) {
-    return value.startsWith("/") ? value.slice(1) : value;
+    return value.startsWith("/") ? value : `/${value}`;
   }
   return new URL(value.replace(/^\/+/, ""), PUBLIC_WASM_BASE_URL).toString();
 }

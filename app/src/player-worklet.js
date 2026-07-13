@@ -476,7 +476,10 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
     this.reportCounter += frameCount;
     if (this.reportCounter >= 1024) {
       this.reportCounter = 0;
-      this.lastPosition = this.dsp.position;
+      // dsp.stop() may reset its internal cursor while an underrun is being
+      // held. The transport position must remain at the buffer boundary until
+      // more PCM arrives, otherwise the UI playhead jumps back to zero.
+      if (!this.waitingForData) this.lastPosition = this.dsp.position;
       this.send({
         type: "position",
         position: this.lastPosition,

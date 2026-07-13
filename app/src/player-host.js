@@ -7,6 +7,10 @@ import { buildSoundkitFrameHeader, soundkitOpusPacketItemsFromPackets } from "./
 import { clearScratchPerformances, deleteScratchPerformance, getScratchPerformance, listScratchPerformances, saveScratchPerformance } from "./scratch-performance-store.js";
 
 const log = createLogger("host");
+const HOST_CONFIG = globalThis.VIN_YL_PLAYER_HOST_CONFIG || {};
+const playerRoot = HOST_CONFIG.root || document;
+const playerAssetBaseUrl = new URL(HOST_CONFIG.assetBaseUrl || "./", import.meta.url);
+const sharedWasmBaseUrl = String(HOST_CONFIG.sharedWasmBaseUrl || globalThis.VIN_YL_PLAYER_SHARED_WASM_BASE_URL || "").replace(/\/+$/, "");
 const initialLoggingParam = new URLSearchParams(globalThis.location?.search || "").get("player_log");
 setPlayerLoggingEnabled(initialLoggingParam === "1");
 const DEFAULT_TAPE_API_URL = "https://yl.vin/api/play/tape";
@@ -73,12 +77,17 @@ function startupTapeMasterUrl() {
 }
 
 function versionedAssetUrl(path) {
-  const url = new URL(path, globalThis.location?.href || import.meta.url);
+  const url = new URL(path, playerAssetBaseUrl);
   const version = queryParams().get("v");
   if (version) {
     url.searchParams.set("v", version);
   }
   return url.toString();
+}
+
+function sharedWasmAssetUrl(path) {
+  if (!sharedWasmBaseUrl) return versionedAssetUrl(path);
+  return versionedAssetUrl(`${sharedWasmBaseUrl}/${String(path).replace(/^\/+/, "")}`);
 }
 
 function clamp(value, min, max) {
@@ -146,14 +155,14 @@ async function ensureTapePcmHelpers() {
   if (!tapePcmHelpersPromise) {
     tapePcmHelpersPromise = (async () => {
       await import(versionedAssetUrl("./player-pcm-helpers.js"));
-      const helperFactory = globalThis.BitneedlePlayerPcmHelpers?.createPlayerPcmHelpers;
+      const helperFactory = globalThis.BitneedlePlayerRuntimePcmHelpers?.createPlayerPcmHelpers;
       if (typeof helperFactory !== "function") {
-        throw new Error("BitneedlePlayerPcmHelpers is unavailable.");
+        throw new Error("BitneedlePlayerRuntimePcmHelpers is unavailable.");
       }
-      const soundkitModule = await import(versionedAssetUrl("./soundkit-wasm/soundkit_wasm.js"));
+      const soundkitModule = await import(sharedWasmAssetUrl("soundkit-wasm/soundkit_wasm.js"));
       if (typeof soundkitModule.default === "function") {
         await soundkitModule.default({
-          module_or_path: versionedAssetUrl("./soundkit-wasm/soundkit_wasm_bg.wasm"),
+          module_or_path: sharedWasmAssetUrl("soundkit-wasm/soundkit_wasm_bg.wasm"),
         });
       }
       return {
@@ -312,24 +321,24 @@ const LEAD_IN_TURNS = 2;
 const DEADWAX_TURNS = 2;
 
 const elements = {
-  file: document.querySelector("#file"),
-  load: document.querySelector("#load"),
-  play: document.querySelector("#play"),
-  needle: document.querySelector("#needle"),
-  tape: document.querySelector("#tape"),
-  platter: document.querySelector("#platter"),
-  seek: document.querySelector("#seek"),
-  status: document.querySelector("#status"),
-  recordImage: document.querySelector("#record-image"),
-  metadata: document.querySelector("#record-metadata"),
-  metaProfile: document.querySelector("#meta-profile"),
-  metaContainer: document.querySelector("#meta-container"),
-  metaRelease: document.querySelector("#meta-release"),
-  rpm33: document.querySelector("#rpm-33"),
-  rpm45: document.querySelector("#rpm-45"),
-  rpm: document.querySelector("#rpm"),
-  volume: document.querySelector("#volume"),
-  xfade: document.querySelector("#xfade")
+  file: playerRoot.querySelector("#file"),
+  load: playerRoot.querySelector("#load"),
+  play: playerRoot.querySelector("#play"),
+  needle: playerRoot.querySelector("#needle"),
+  tape: playerRoot.querySelector("#tape"),
+  platter: playerRoot.querySelector("#platter"),
+  seek: playerRoot.querySelector("#seek"),
+  status: playerRoot.querySelector("#status"),
+  recordImage: playerRoot.querySelector("#record-image"),
+  metadata: playerRoot.querySelector("#record-metadata"),
+  metaProfile: playerRoot.querySelector("#meta-profile"),
+  metaContainer: playerRoot.querySelector("#meta-container"),
+  metaRelease: playerRoot.querySelector("#meta-release"),
+  rpm33: playerRoot.querySelector("#rpm-33"),
+  rpm45: playerRoot.querySelector("#rpm-45"),
+  rpm: playerRoot.querySelector("#rpm"),
+  volume: playerRoot.querySelector("#volume"),
+  xfade: playerRoot.querySelector("#xfade")
 };
 
 const state = {
@@ -340,6 +349,7 @@ const state = {
   pending: new Map(),
   view: null,
   duration: 0,
+  metadataDuration: 0,
   sampleRate: 48000,
   positionFrames: 0,
   pendingSeekGeneration: 0,
@@ -362,7 +372,10 @@ const state = {
   streamInitialised: false,
   streamReady: false,
   streamDecodedFrames: 0,
+  buffering: false,
   streamReadyPromise: null,
+  streamReadyResolve: null,
+  streamReadyReject: null,
   baseRpm: 33.3333333333,
   seekTimer: 0,
   seekInFlight: false,
@@ -439,6 +452,10 @@ const DEFAULT_POST_MESSAGE_BRIDGE = Object.freeze({
     currentTime: Number(snapshot.positionSeconds) || 0,
     duration: Number(snapshot.durationSeconds) || 0,
     volume: Math.max(0, Math.min(1, Number(snapshot.volume) || 0)),
+    buffering: Boolean(snapshot.buffering),
+    scratching: Boolean(snapshot.scratching),
+    playbackRate: Number(snapshot.playbackRate) || 0,
+    bufferedSeconds: Number(snapshot.bufferedSeconds) || 0,
   }),
   formatRecord: snapshot => snapshot.ready ? {
     title: snapshot.releaseId || "",
@@ -637,6 +654,11 @@ function setStatus(message) {
   log.state("status", { message });
   elements.status.value = message;
   elements.status.textContent = message;
+  try {
+    HOST_CONFIG.onStatus?.(String(message || ""));
+  } catch (error) {
+    log.warn("status-callback-failed", { message: error instanceof Error ? error.message : String(error) });
+  }
 }
 
 
@@ -655,7 +677,19 @@ function formatDecodeProgress(progress) {
 
 function renderDecodeStatus() {
   if (!state.decodeProgressText) return;
-  setStatus(state.streamReady ? `Ready · ${state.decodeProgressText}` : state.decodeProgressText);
+  const prefix = state.streamReady
+    ? "Ready · "
+    : state.streamInitialised
+      ? "Buffering · "
+      : "";
+  setStatus(`${prefix}${state.decodeProgressText}`);
+}
+
+function resetStreamReadyPromise() {
+  state.streamReadyPromise = new Promise((resolve, reject) => {
+    state.streamReadyResolve = resolve;
+    state.streamReadyReject = reject;
+  });
 }
 
 function profileRpm(recordProfile) {
@@ -680,7 +714,9 @@ async function initialiseProgressiveStream({ sampleRate, audioLength, channels, 
   if (state.streamInitialised) return;
   const channelCount = Math.max(1, Math.min(2, Number(channels) || 2));
   state.sampleRate = Math.max(1, Number(sampleRate) || 48000);
-  state.duration = Math.max(1, Number(audioLength) || 1) / state.sampleRate;
+  state.duration = state.metadataDuration > 0
+    ? state.metadataDuration
+    : Math.max(1, Number(audioLength) || 1) / state.sampleRate;
   state.positionFrames = 0;
   state.lastReportedPosition = 0;
   state.streamDecodedFrames = 0;
@@ -720,20 +756,23 @@ async function appendProgressiveSegments(segments) {
   }
 }
 
-// Matches the worklet's own resume-from-underrun threshold (player-worklet.js
-// `waitingForData && decodedLength > lastPosition + 1024`) — the smallest
-// buffer depth the engine already treats as safe to start from.
-const PROGRESSIVE_READY_THRESHOLD_FRAMES = 1024;
+// Keep a few seconds ahead of the playhead before handing control back to the
+// caller. The remaining ECDC segments continue decoding in the background.
+const PROGRESSIVE_READY_SECONDS = 3;
 
 async function handleWorkletBuffered(message) {
   state.streamDecodedFrames = Math.max(0, Math.floor(Number(message.decodedLength) || 0));
+  publishState();
   if (state.streamReady) return;
   const totalFrames = Math.max(1, Math.round(state.duration * state.sampleRate));
-  const contiguousReady = state.streamDecodedFrames >= Math.min(totalFrames, PROGRESSIVE_READY_THRESHOLD_FRAMES);
+  const thresholdFrames = Math.max(1024, Math.round(state.sampleRate * PROGRESSIVE_READY_SECONDS));
+  const contiguousReady = state.streamDecodedFrames >= Math.min(totalFrames, thresholdFrames);
   if (contiguousReady) {
     state.streamReady = true;
     await markLoadedReady();
     renderDecodeStatus();
+    state.streamReadyResolve?.();
+    state.streamReadyResolve = null;
   }
 }
 
@@ -1182,6 +1221,12 @@ async function setTapeMonitor(active) {
 }
 
 async function maybeRefreshTapeAvailability() {
+  if (HOST_CONFIG.disableTapeRemote === true) {
+    state.tape.checkedKey = `${state.recordHash}|local-only`;
+    state.tape.available = false;
+    updateTapeButton();
+    return;
+  }
   const releaseId = String(state.recordReleaseId || "").trim();
   const checkedKey = `${state.recordHash}|${releaseId}`;
   if (!releaseId || state.tape.checkedKey === checkedKey) {
@@ -1370,10 +1415,10 @@ function seekWorklet(position) {
 async function initialiseAudio() {
   if (state.context) return;
   state.context = new AudioContext({ latencyHint: "interactive" });
-  const recordPlayerWasmResponse = await fetch("./record-player/record_player_bg.wasm");
+  const recordPlayerWasmResponse = await fetch(versionedAssetUrl("./record-player/record_player_bg.wasm"));
   if (!recordPlayerWasmResponse.ok) throw new Error(`Failed to load record-player WASM: ${recordPlayerWasmResponse.status}`);
   const recordPlayerWasmModule = await WebAssembly.compileStreaming(recordPlayerWasmResponse);
-  await state.context.audioWorklet.addModule("./player-worklet.js");
+  await state.context.audioWorklet.addModule(versionedAssetUrl("./player-worklet.js"));
   state.node = new AudioWorkletNode(state.context, "bitneedle-player", {
     numberOfInputs: 0,
     numberOfOutputs: 1,
@@ -1399,7 +1444,7 @@ async function initialiseAudio() {
 // fallback, mirroring the original's warning path.
 async function loadNeedleSurfaceAsset() {
   try {
-    const response = await fetch("./assets/audio/needle-surface.opus", { cache: "force-cache" });
+    const response = await fetch(versionedAssetUrl("./assets/audio/needle-surface.opus"), { cache: "force-cache" });
     if (!response.ok) throw new Error(`Needle surface audio asset failed: ${response.status} ${response.statusText}`);
     const audioBuffer = await state.context.decodeAudioData(await response.arrayBuffer());
     if (!(audioBuffer?.duration > 0)) throw new Error("Needle surface audio asset decoded empty.");
@@ -1421,6 +1466,7 @@ function handleWorkletMessage(event) {
     if (state.pendingSeekGeneration !== state.acknowledgedSeekGeneration) return;
     const previousPosition = state.lastReportedPosition;
     state.positionFrames = message.position;
+    state.buffering = false;
     state.lastReportedPosition = message.position;
     if (!state.draggingSeek) elements.seek.value = String(state.duration > 0 ? framesToSeconds(message.position) / state.duration : 0);
     if (!message.scratching && Number.isFinite(previousPosition)) {
@@ -1433,7 +1479,11 @@ function handleWorkletMessage(event) {
     state.acknowledgedSeekGeneration = Math.max(state.acknowledgedSeekGeneration, message.generation ?? 0);
     state.positionFrames = message.position;
   } else if (message.type === "buffering") {
+    state.positionFrames = Math.max(0, Number(message.position) || state.positionFrames);
+    state.lastReportedPosition = state.positionFrames;
+    state.buffering = true;
     setStatus("Buffering decoded groove audio…");
+    publishState();
   } else if (message.type === "buffered") {
     void handleWorkletBuffered(message);
   } else if (message.type === "worklet-error") {
@@ -1487,7 +1537,7 @@ async function loadFile(file, { cache, resumeAudio = true } = {}) {
   if (state.decoder) {
     state.decoder.close();
   }
-  state.decoder = new RecordDecoderClient("./record-decoder-worker.js", {
+  state.decoder = new RecordDecoderClient(versionedAssetUrl("./record-decoder-worker.js"), {
     loggingEnabled: isPlayerLoggingEnabled(),
     cache: state.cacheHandler,
   });
@@ -1496,7 +1546,11 @@ async function loadFile(file, { cache, resumeAudio = true } = {}) {
   state.streamInitialised = false;
   state.streamReady = false;
   state.streamDecodedFrames = 0;
+  state.buffering = false;
+  state.duration = 0;
+  state.metadataDuration = 0;
   state.streamAppendChain = Promise.resolve();
+  resetStreamReadyPromise();
   state.decodeProgressText = "";
   state.programmeMap = null;
   state.recordReleaseId = "";
@@ -1544,6 +1598,17 @@ async function loadFile(file, { cache, resumeAudio = true } = {}) {
     });
   }
   state.programmeMap = parseJsonObject(inspected.programmeMapJson, null);
+  const programmeSampleRate = Math.max(1, Number(state.programmeMap?.sampleRate) || 48000);
+  const programmeDuration = Number(state.programmeMap?.durationMs) > 0
+    ? Number(state.programmeMap.durationMs) / 1000
+    : Number(state.programmeMap?.totalSamples) > 0
+      ? Number(state.programmeMap.totalSamples) / programmeSampleRate
+      : 0;
+  if (programmeDuration > 0) {
+    state.sampleRate = programmeSampleRate;
+    state.duration = programmeDuration;
+    state.metadataDuration = programmeDuration;
+  }
   state.recordReleaseId = String(inspected.releaseId || "").trim();
   elements.metadata.hidden = isEmbedMode();
   elements.metaProfile.textContent = inspected.recordProfile || "unknown";
@@ -1555,10 +1620,8 @@ async function loadFile(file, { cache, resumeAudio = true } = {}) {
   state.rpm = state.baseRpm;
   updateRpmButtons();
   setStatus(`Decoding ${file.name}…`);
-  let decoded;
   let lastLoggedDecodeChunk = -1;
-  try {
-    decoded = await state.decoder.decode(sourceBytes, inspected.recordProfile || "", {
+  const decodePromise = state.decoder.decode(sourceBytes, inspected.recordProfile || "", {
       recordBindingHex: state.recordHash,
     }, progress => {
       if (loadSequence !== state.loadSequence) return;
@@ -1579,42 +1642,51 @@ async function loadFile(file, { cache, resumeAudio = true } = {}) {
           });
       }
     });
-  } catch (error) {
-    if (loadSequence !== state.loadSequence) return null;
-    throw error;
-  }
-  if (loadSequence !== state.loadSequence) return null;
+  decodePromise.then(async decoded => {
+    if (loadSequence !== state.loadSequence) return;
+    await state.streamAppendChain;
+    if (loadSequence !== state.loadSequence) return;
 
-  await state.streamAppendChain;
-  if (loadSequence !== state.loadSequence) return null;
+    const sampleRate = Math.max(1, Number(decoded.sampleRate) || 48000);
+    const audioLength = Math.max(1, Number(decoded.audioLength) || 0);
+    const s16Buffers = Array.isArray(decoded.s16ChannelBuffers) ? decoded.s16ChannelBuffers : [];
+    if (!s16Buffers.length) throw new Error("Record decoder returned no PCM channels");
+    state.baseRpm = profileRpm(inspected.recordProfile);
+    state.rpm = state.baseRpm;
+    updateRpmButtons();
+    storeBasePcmSource({ sampleRate, audioLength, s16ChannelBuffers: s16Buffers });
+    updateTapeButton();
+    if (!state.streamInitialised) {
+      await loadDecodedPcm({ sampleRate, audioLength, s16ChannelBuffers: s16Buffers });
+    }
+    state.node.port.postMessage({ type: "stream-complete" });
+    if (!state.streamReady) {
+      await markLoadedReady();
+      state.streamReady = true;
+      state.streamReadyResolve?.();
+      state.streamReadyResolve = null;
+    }
+    publishState();
+    if (isPlayerLoggingEnabled()) {
+      console.log("[vin.yl.player] loadFile:complete", {
+        name: file?.name || "",
+        durationSeconds: state.duration,
+        sampleRate,
+        payloadContainer: inspected.payloadContainer || "",
+      });
+    }
+    setStatus(`${file.name} · ${state.duration.toFixed(1)}s · ${sampleRate} Hz · ${inspected.payloadContainer || "record"}`);
+  }).catch(error => {
+    if (loadSequence !== state.loadSequence) return;
+    state.streamReadyReject?.(error);
+    state.streamReadyReject = null;
+    setStatus(`Playback decode failed: ${error.message || error}`);
+  });
 
-  const sampleRate = Math.max(1, Number(decoded.sampleRate) || 48000);
-  const audioLength = Math.max(1, Number(decoded.audioLength) || 0);
-  const s16Buffers = Array.isArray(decoded.s16ChannelBuffers) ? decoded.s16ChannelBuffers : [];
-  if (!s16Buffers.length) throw new Error("Record decoder returned no PCM channels");
-  state.baseRpm = profileRpm(inspected.recordProfile);
-  state.rpm = state.baseRpm;
-  updateRpmButtons();
-  storeBasePcmSource({ sampleRate, audioLength, s16ChannelBuffers: s16Buffers });
-  updateTapeButton();
-  if (!state.streamInitialised) {
-    await loadDecodedPcm({ sampleRate, audioLength, s16ChannelBuffers: s16Buffers });
-  }
-  state.node.port.postMessage({ type: "stream-complete" });
-  if (!state.streamReady) {
-    await markLoadedReady();
-    state.streamReady = true;
-  }
-  publishState();
-  if (isPlayerLoggingEnabled()) {
-    console.log("[vin.yl.player] loadFile:complete", {
-      name: file?.name || "",
-      durationSeconds: state.duration,
-      sampleRate,
-      payloadContainer: inspected.payloadContainer || "",
-    });
-  }
-  setStatus(`${file.name} · ${state.duration.toFixed(1)}s · ${sampleRate} Hz · ${inspected.payloadContainer || "record"}`);
+  // Start as soon as the worklet has a small contiguous lead-in; the rest
+  // continues decoding and appending in the background.
+  await state.streamReadyPromise;
+  if (loadSequence !== state.loadSequence) return null;
 }
 
 async function loadRecordFromUrl(url, options = {}) {
@@ -1658,7 +1730,10 @@ async function configureStartupCache() {
   if (isPlayerLoggingEnabled()) {
     console.info("[vin.yl.player] configureStartupCache:start", { cacheUrl });
   }
-  const cache = createRemoteOpusChunkCacheHandler({ apiBaseUrl: cacheUrl });
+  const cache = createRemoteOpusChunkCacheHandler({
+    apiBaseUrl: cacheUrl,
+    disableRemoteCache: HOST_CONFIG.disableRemoteCache === true,
+  });
   state.cacheHandler = normalizeCacheHandler(cache);
   if (typeof state.cacheHandler.setRecordContext === "function" && state.recordDescriptorJson) {
     await state.cacheHandler.setRecordContext({
@@ -1869,8 +1944,13 @@ function publicState() {
     motorRunning: Boolean(view?.transport_on),
     needleLifted: Boolean(view?.needle_lifted),
     scratching: state.scratching,
+    buffering: state.buffering,
     positionSeconds: framesToSeconds(state.positionFrames),
     durationSeconds: state.duration,
+    bufferedSeconds: Math.min(
+      state.duration,
+      framesToSeconds(state.streamDecodedFrames),
+    ),
     positionRatio: state.duration > 0 ? framesToSeconds(state.positionFrames) / state.duration : 0,
     rpm: state.rpm,
     nativeRpm: state.baseRpm,
@@ -1972,6 +2052,10 @@ const api = Object.freeze({
   createRemoteOpusPrecache,
   loadRecord: loadFile,
   loadRecordFromUrl,
+  activateAudio: async () => {
+    await initialiseAudio();
+    await state.context.resume();
+  },
   startTransport: async () => {
     await initialiseAudio();
     await state.context.resume();
@@ -1996,6 +2080,36 @@ const api = Object.freeze({
   pause: async () => {
     const view = deckView();
     if (view?.transport_on || view?.playing || state.view?.lead_in_active || state.view?.deadwax_active) await stopPlaybackTransport();
+  },
+  reset: async () => {
+    state.loadSequence += 1;
+    clearTimeout(state.regionTimer);
+    state.regionTimer = 0;
+    state.surfaceRegion = null;
+    if (state.node) await stopPlaybackTransport().catch(() => {});
+    state.decoder?.close();
+    state.decoder = null;
+    state.streamReadyReject?.(new Error("Player reset"));
+    state.streamReadyResolve = null;
+    state.streamReadyReject = null;
+    state.streamReadyPromise = null;
+    state.streamInitialised = false;
+    state.streamReady = false;
+    state.streamDecodedFrames = 0;
+    state.streamAppendChain = Promise.resolve();
+    state.decodeProgressText = "";
+    state.basePcmSource = null;
+    state.node?.port.postMessage({ type: "reset" });
+    state.node?.disconnect();
+    state.gainNode?.disconnect();
+    await state.context?.close().catch?.(() => {});
+    state.node = null;
+    state.gainNode = null;
+    state.context = null;
+    const canvas = playerRoot.querySelector("#player-canvas");
+    const context = canvas?.getContext("2d");
+    if (context) context.clearRect(0, 0, canvas.width, canvas.height);
+    publishState();
   },
   togglePlayback: async () => {
     await initialiseAudio();
@@ -2104,7 +2218,7 @@ globalThis.vin.yl ??= {};
 globalThis.vin.yl.player = api;
 
 async function initialise() {
-  state.worker = new Worker("./player-core-worker.js", { type: "module" });
+  state.worker = new Worker(versionedAssetUrl("./player-core-worker.js"), { type: "module" });
   log.action("core-worker-created", {});
   state.worker.onmessage = event => {
     const request = state.pending.get(event.data?.id);
@@ -2119,16 +2233,17 @@ async function initialise() {
     if (ok) request.resolve(result);
     else request.reject(new Error(error));
   };
-  const result = await coreRequest("init", { moduleUrl: "./record-player/record_player.js" });
+  const result = await coreRequest("init", { moduleUrl: versionedAssetUrl("./record-player/record_player.js") });
   state.view = result.view;
   elements.play.disabled = false;
   elements.needle.disabled = false;
   render();
-  const canvas = document.querySelector("#player-canvas");
+  const canvas = playerRoot.querySelector("#player-canvas");
   if (canvas) {
     state.canvasController = createVinylPlayerCanvas(api, canvas);
     const embedOptions = embedCanvasOptions();
     if (embedOptions) state.canvasController.configure(embedOptions);
+    if (HOST_CONFIG.canvasOptions) state.canvasController.configure(HOST_CONFIG.canvasOptions);
   }
   globalThis.addEventListener("message", event => { void handleBridgeMessage(event); });
   if (document.documentElement.classList.contains("embed-mode")) {
@@ -2139,6 +2254,9 @@ async function initialise() {
     // bridge is live now so the host can (re)send whatever record it holds.
     const parentWindow = globalThis.parent !== globalThis ? globalThis.parent : null;
     if (parentWindow) parentWindow.postMessage({ type: "bitneedle-embed-ready" }, "*");
+  }
+  if (HOST_CONFIG.postMessageBridge) {
+    api.configurePostMessageBridge(HOST_CONFIG.postMessageBridge);
   }
   await configureStartupCache();
   const initialSrc = startupRecordSrc();

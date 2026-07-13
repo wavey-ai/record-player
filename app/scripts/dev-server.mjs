@@ -29,7 +29,7 @@ createServer((request, response) => {
   }
 
   try {
-    const path = (relative.startsWith("wasm")) ? join("../../vin.yl.vendor", relative) : candidate;
+    const path = (relative.startsWith("wasm")) ? join("../../../vin.yl.vendor", relative) : candidate;
     const info = statSync(path);
     if (!info.isFile()) throw new Error("not a file");
     response.writeHead(200, {

@@ -89,8 +89,11 @@ export function pointOnCircle(geometry, angleDeg, radius) {
   };
 }
 
-export function buildCanvasGeometry(width, height) {
-  const scale = Math.max(0.55, Math.min(width / 800, height / 840));
+export function buildCanvasGeometry(width, height, options = {}) {
+  const recordFill = options.recordFill === true;
+  const scale = recordFill
+    ? Math.max(0.01, Math.min(width, height) / 576)
+    : Math.max(0.55, Math.min(width / 800, height / 840));
   const localWidth = 800 * scale;
   const localHeight = 840 * scale;
   const left = (width - localWidth) / 2;

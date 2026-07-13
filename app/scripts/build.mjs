@@ -8,7 +8,7 @@ const appDir = resolve(scriptDir, "..");
 const rootDir = resolve(appDir, "..");
 const distDir = resolve(appDir, "dist");
 const testdataDir = resolve(rootDir, "testdata");
-const vendorSoundkitDir = resolve(rootDir, "..", "vin.yl.vendor", "wasm", "soundkit-wasm", "pkg");
+const vendorSoundkitDir = resolve(rootDir, "..", "vin.yl.vendor", "wasm", "soundkit-wasm");
 
 async function requirePath(path, label) {
   try {

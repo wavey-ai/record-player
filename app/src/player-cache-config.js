@@ -97,7 +97,7 @@
     };
   }
 
-  globalThis.BitneedlePlayerCacheConfig = Object.freeze({
+  globalThis.BitneedlePlayerRuntimeCacheConfig = Object.freeze({
     MOBILE_LP_PARSE_CACHE_CUTOFF_SECONDS,
     OPUS_CACHE_BITRATE,
     OPUS_CACHE_FRAME_DURATION_MS,
