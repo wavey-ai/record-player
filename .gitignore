@@ -10,3 +10,4 @@ __pycache__
 /vendor/
 .tmp-local/
 /tmp/
+/tmp-wrangler/
