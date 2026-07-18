@@ -59,7 +59,12 @@ struct MultiTrackSegmentBudget {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EcdcProgrammeBuildOptions {
-    ecdc_descriptor: serde_json::Value,
+    #[serde(default)]
+    ecdc_descriptor: Option<serde_json::Value>,
+    #[serde(default)]
+    ecdc_descriptors: Vec<serde_json::Value>,
+    #[serde(default)]
+    entry_descriptor_indexes: Vec<u8>,
     track_titles: Vec<String>,
     track_entry_counts: Vec<usize>,
     gap_entry_counts: Vec<usize>,
@@ -391,6 +396,22 @@ fn build_ecdc_programme_json(options_json: &str) -> Result<String> {
         bail!("track_titles and track_entry_counts lengths must match");
     }
 
+    let mut ecdc_descriptors = options.ecdc_descriptors;
+    if ecdc_descriptors.is_empty() {
+        ecdc_descriptors.push(
+            options
+                .ecdc_descriptor
+                .context("ECDC programme requires at least one descriptor")?,
+        );
+    } else if let Some(legacy_descriptor) = options.ecdc_descriptor {
+        if ecdc_descriptors.first() != Some(&legacy_descriptor) {
+            bail!("ecdcDescriptor must match ecdcDescriptors[0]");
+        }
+    }
+    if ecdc_descriptors.len() > 256 {
+        bail!("ECDC programme supports at most 256 descriptors");
+    }
+
     let mut payload_cursor = 0usize;
     let mut tracks = Vec::with_capacity(options.track_titles.len());
     let mut track_gaps = Vec::new();
@@ -418,8 +439,33 @@ fn build_ecdc_programme_json(options_json: &str) -> Result<String> {
         }
     }
 
+    let entry_descriptor_indexes = if options.entry_descriptor_indexes.is_empty() {
+        vec![0u8; payload_cursor]
+    } else {
+        if options.entry_descriptor_indexes.len() != payload_cursor {
+            bail!(
+                "entry_descriptor_indexes length {} does not match programme entry count {}",
+                options.entry_descriptor_indexes.len(),
+                payload_cursor
+            );
+        }
+        options.entry_descriptor_indexes
+    };
+    for (entry_index, descriptor_index) in entry_descriptor_indexes.iter().enumerate() {
+        if usize::from(*descriptor_index) >= ecdc_descriptors.len() {
+            bail!(
+                "entry descriptor index {} for entry {} exceeds descriptor count {}",
+                descriptor_index,
+                entry_index,
+                ecdc_descriptors.len()
+            );
+        }
+    }
+
     serde_json::to_string(&serde_json::json!({
-        "ecdcDescriptor": options.ecdc_descriptor,
+        "ecdcDescriptor": ecdc_descriptors[0].clone(),
+        "ecdcDescriptors": ecdc_descriptors,
+        "entryDescriptorIndexes": entry_descriptor_indexes,
         "tracks": tracks,
         "trackGaps": track_gaps,
     }))
@@ -689,13 +735,25 @@ fn decode_record_png_payload_bytes(png_bytes: &[u8]) -> Result<Vec<u8>> {
     decoded_chunk_stream_payload_bytes(&decoded.chunk_stream.bytes)
 }
 
+fn decode_pattern_aware_chunk_stream(
+    png_bytes: &[u8],
+    record_profile: &str,
+    byte_length: Option<usize>,
+) -> Result<record_decode::DecodedChunkStream> {
+    let restored = record_sidecar::restore_patternized_record_png(png_bytes, Some(record_profile))?;
+    record_decode::decode_record_png_to_chunk_stream_for_profile_with_length(
+        restored.as_deref().unwrap_or(png_bytes),
+        record_profile,
+        byte_length,
+    )
+}
+
 fn decode_record_png_payload_bytes_for_profile(
     png_bytes: &[u8],
     record_profile: &str,
 ) -> Result<Vec<u8>> {
-    let decoded =
-        record_decode::decode_record_png_to_chunk_stream_for_profile(png_bytes, record_profile)
-            .context("failed to decode Bitneedle record PNG for profile")?;
+    let decoded = decode_pattern_aware_chunk_stream(png_bytes, record_profile, None)
+        .context("failed to decode Bitneedle record PNG for profile")?;
     decoded_chunk_stream_payload_bytes(&decoded.bytes)
 }
 
@@ -712,12 +770,8 @@ fn decode_record_png_to_payload_with_length(
     let decode_with_length = || -> Result<WasmPayloadDecodeResult> {
         let (profile, _descriptor) = decode_record_descriptor_resolving_profile(png_bytes, None)
             .context("failed to decode Bitneedle record descriptor")?;
-        let decoded = record_decode::decode_record_png_to_chunk_stream_for_profile_with_length(
-            png_bytes,
-            &profile,
-            Some(byte_length),
-        )
-        .context("failed to decode Bitneedle record PNG with explicit byte length")?;
+        let decoded = decode_pattern_aware_chunk_stream(png_bytes, &profile, Some(byte_length))
+            .context("failed to decode Bitneedle record PNG with explicit byte length")?;
         decoded_payload_result_from_chunk_stream_bytes(&decoded.bytes)
     };
 
@@ -734,9 +788,8 @@ fn decode_record_png_to_payload_for_profile(
     png_bytes: &[u8],
     record_profile: &str,
 ) -> Result<WasmPayloadDecodeResult> {
-    let decoded =
-        record_decode::decode_record_png_to_chunk_stream_for_profile(png_bytes, record_profile)
-            .context("failed to decode Bitneedle record PNG for profile")?;
+    let decoded = decode_pattern_aware_chunk_stream(png_bytes, record_profile, None)
+        .context("failed to decode Bitneedle record PNG for profile")?;
     decoded_payload_result_from_chunk_stream_bytes(&decoded.bytes)
 }
 
@@ -746,12 +799,11 @@ fn decode_record_png_to_payload_for_profile_with_length(
     byte_length: usize,
 ) -> Result<WasmPayloadDecodeResult> {
     let decode_with_length = || -> Result<WasmPayloadDecodeResult> {
-        let decoded = record_decode::decode_record_png_to_chunk_stream_for_profile_with_length(
-            png_bytes,
-            record_profile,
-            Some(byte_length),
-        )
-        .context("failed to decode Bitneedle record PNG for profile with explicit byte length")?;
+        let decoded =
+            decode_pattern_aware_chunk_stream(png_bytes, record_profile, Some(byte_length))
+                .context(
+                    "failed to decode Bitneedle record PNG for profile with explicit byte length",
+                )?;
         decoded_payload_result_from_chunk_stream_bytes(&decoded.bytes)
     };
 
@@ -824,7 +876,7 @@ fn decode_record_png_resolving_profile(
 ) -> Result<record_decode::DecodedRecord> {
     let (normalized_profile, descriptor) =
         decode_record_descriptor_resolving_profile(png_bytes, record_profile)?;
-    let chunk_stream = record_decode::decode_record_png_to_chunk_stream_for_profile_with_length(
+    let chunk_stream = decode_pattern_aware_chunk_stream(
         png_bytes,
         &normalized_profile,
         Some(descriptor.stream_byte_length),
@@ -1729,6 +1781,43 @@ mod tests {
                 .as_u64()
                 .unwrap(),
             0
+        );
+        assert_eq!(
+            programme["entryDescriptorIndexes"].as_array().unwrap(),
+            &vec![serde_json::json!(0); 6]
+        );
+    }
+
+    #[test]
+    fn build_ecdc_programme_json_preserves_mixed_descriptor_indexes() {
+        let programme: serde_json::Value = serde_json::from_str(
+            &build_ecdc_programme_json(
+                &serde_json::json!({
+                    "ecdcDescriptors": [
+                        { "codec": "ECDC", "rate": 12 },
+                        { "codec": "ECDC", "rate": 6 }
+                    ],
+                    "entryDescriptorIndexes": [0, 0, 1, 1],
+                    "trackTitles": ["Twelve", "Six"],
+                    "trackEntryCounts": [2, 2],
+                    "gapEntryCounts": [0, 0],
+                })
+                .to_string(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(programme["ecdcDescriptors"].as_array().unwrap().len(), 2);
+        assert_eq!(programme["ecdcDescriptor"]["rate"], 12);
+        assert_eq!(
+            programme["entryDescriptorIndexes"].as_array().unwrap(),
+            &vec![
+                serde_json::json!(0),
+                serde_json::json!(0),
+                serde_json::json!(1),
+                serde_json::json!(1),
+            ]
         );
     }
 }

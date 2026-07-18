@@ -496,7 +496,7 @@ The workspace contains two browser-facing Rust crates:
 - `record-player`: the real-time transport, mixer, scratch and acoustic engine loaded by the AudioWorklet.
 - `player-wasm`: the player-only record reader and ECDC decoder loaded by the decoder worker.
 
-`player-wasm` deliberately exports only the functions used by `app/src/record-decoder-worker.js`. It does not expose record authoring, rendering, sidecar inspection, cache encryption, remote-scratch identity or wallet helpers. Its generated browser package is `app/dist/wasm/player-wasm/player_wasm.js`.
+`player-wasm` deliberately exports only the functions used by `web/record-decoder-worker.js`. It does not expose record authoring, rendering, sidecar inspection, cache encryption, remote-scratch identity or wallet helpers. Its generated browser package is `dist/wasm/player-wasm/player_wasm.js`.
 
 ## Progressive startup
 

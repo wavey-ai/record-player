@@ -3,7 +3,9 @@ import { createServer } from "node:http";
 import { extname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const root = resolve(fileURLToPath(new URL("../dist/", import.meta.url)));
+const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
+const root = resolve(repoRoot, "dist");
+const vendorRoot = resolve(repoRoot, "..", "vin.yl.vendor");
 const port = Number(process.env.PORT || process.argv[2] || 5193);
 const types = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -29,7 +31,7 @@ createServer((request, response) => {
   }
 
   try {
-    const path = (relative.startsWith("wasm")) ? join("../../../vin.yl.vendor", relative) : candidate;
+    const path = (relative.startsWith("wasm")) ? join(vendorRoot, relative) : candidate;
     const info = statSync(path);
     if (!info.isFile()) throw new Error("not a file");
     response.writeHead(200, {

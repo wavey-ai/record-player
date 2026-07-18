@@ -70,10 +70,90 @@
     return "";
   }
 
+  function readUint32Be(bytes, offset) {
+    return (
+      (bytes[offset] * 0x1000000)
+      + (bytes[offset + 1] << 16)
+      + (bytes[offset + 2] << 8)
+      + bytes[offset + 3]
+    ) >>> 0;
+  }
+
+  // record-wasm reconstructs one standalone ECDC object per musical
+  // revolution. Walk the explicit header and CRC-wrapped packet lengths rather
+  // than searching entropy-coded bytes for magic strings.
+  function splitStandaloneEcdcObjects(payload, recordContext = null) {
+    const bytes = payload instanceof Uint8Array ? payload : new Uint8Array(payload || 0);
+    const objects = [];
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      if (
+        offset + 9 > bytes.byteLength
+        || bytes[offset] !== 0x45
+        || bytes[offset + 1] !== 0x43
+        || bytes[offset + 2] !== 0x44
+        || bytes[offset + 3] !== 0x43
+      ) {
+        throw new Error(`Invalid standalone ECDC object at byte ${offset}.`);
+      }
+      if (bytes[offset + 4] !== 0) {
+        throw new Error(`Unsupported ECDC version ${bytes[offset + 4]} at byte ${offset}.`);
+      }
+      const metadataLength = readUint32Be(bytes, offset + 5);
+      const metadataStart = offset + 9;
+      const metadataEnd = metadataStart + metadataLength;
+      if (!metadataLength || metadataEnd > bytes.byteLength) {
+        throw new Error(`Truncated ECDC metadata at byte ${offset}.`);
+      }
+      let metadata;
+      try {
+        metadata = JSON.parse(new TextDecoder().decode(bytes.subarray(metadataStart, metadataEnd)));
+      } catch (error) {
+        throw new Error(`Invalid ECDC metadata at byte ${offset}: ${error?.message || error}`);
+      }
+      let cursor = metadataEnd;
+      let packetCount = 0;
+      while (cursor < bytes.byteLength) {
+        if (
+          packetCount > 0
+          && cursor + 4 <= bytes.byteLength
+          && bytes[cursor] === 0x45
+          && bytes[cursor + 1] === 0x43
+          && bytes[cursor + 2] === 0x44
+          && bytes[cursor + 3] === 0x43
+        ) {
+          break;
+        }
+        if (cursor + 8 > bytes.byteLength) {
+          throw new Error(`Truncated ECDC packet header at byte ${cursor}.`);
+        }
+        const packetLength = readUint32Be(bytes, cursor);
+        const packetEnd = cursor + 8 + packetLength;
+        if (!packetLength || packetEnd > bytes.byteLength) {
+          throw new Error(`Invalid ECDC packet length at byte ${cursor}.`);
+        }
+        cursor = packetEnd;
+        packetCount += 1;
+      }
+      if (!packetCount) throw new Error(`Standalone ECDC object at byte ${offset} has no packets.`);
+      objects.push({
+        index: objects.length,
+        bytes: bytes.subarray(offset, cursor),
+        metadata,
+        audioLength: Math.max(0, Number(metadata?.al ?? metadata?.audio_length) || 0),
+        bundleName: encodeBundleNameFromEcdcMetadata(metadata, recordContext),
+        packetCount,
+      });
+      offset = cursor;
+    }
+    return objects;
+  }
+
   globalScope.BitneedleEncodecBundleNames = Object.freeze({
     ...(globalScope.BitneedleEncodecBundleNames || {}),
     encodeBundleNameForRecord,
     encodeBundleNameFromEcdcMetadata,
+    splitStandaloneEcdcObjects,
     getRecordMeta,
     normalizeRecordProfileName,
     recordPayloadByteLength,

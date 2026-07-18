@@ -2,7 +2,7 @@
 
 Source of truth: `../yl.vin/apps/play` (inspected directly — not READMEs or prior notes).
 Destination: this repository — Rust engine (`src/acoustic.rs`, `src/engine.rs`) + worklet
-(`app/src/player-worklet.js`) + host (`app/src/player-host.js`).
+(`web/player-worklet.js`) + host (`web/player-host.js`).
 
 Original files inspected in full or in the relevant regions:
 

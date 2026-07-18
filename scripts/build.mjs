@@ -4,9 +4,9 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
-const appDir = resolve(scriptDir, "..");
-const rootDir = resolve(appDir, "..");
-const distDir = resolve(appDir, "dist");
+const rootDir = resolve(scriptDir, "..");
+const webDir = resolve(rootDir, "web");
+const distDir = resolve(rootDir, "dist");
 const testdataDir = resolve(rootDir, "testdata");
 const vendorSoundkitDir = resolve(rootDir, "..", "vin.yl.vendor", "wasm", "soundkit-wasm");
 
@@ -36,8 +36,7 @@ function buildWasm(crateDir, outDir, outName, extraArgs = []) {
 }
 
 await rm(distDir, { recursive: true, force: true });
-await cp(resolve(appDir, "src"), distDir, { recursive: true });
-await cp(resolve(appDir, "src"), distDir, { recursive: true });
+await cp(webDir, distDir, { recursive: true });
 await requirePath(vendorSoundkitDir, "SoundKit wasm package");
 await cp(vendorSoundkitDir, resolve(distDir, "soundkit-wasm"), { recursive: true });
 

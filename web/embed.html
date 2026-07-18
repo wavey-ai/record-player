@@ -9,6 +9,19 @@
     (function () {
       var params = new URLSearchParams(location.search);
       var root = document.documentElement;
+      var themes = {
+        "red": { bg: "#ff0a16", tone: "#fff8f6", turntable: "#ff003c" },
+        "hifi-black": { bg: "#050505", tone: "#f5f5ef", turntable: "#161616" },
+        "hifi-white": { bg: "#f5f5ef", tone: "#050505", turntable: "#deded8" }
+      };
+
+      var theme = params.get("theme");
+      if (themes[theme]) {
+        root.dataset.theme = theme;
+        root.style.setProperty("--embed-bg", themes[theme].bg);
+        root.style.setProperty("--embed-tone", themes[theme].tone);
+        root.style.setProperty("--embed-turntable", themes[theme].turntable);
+      }
 
       function normalizeHex(value) {
         if (!value) return null;
@@ -22,7 +35,8 @@
         if (color) root.style.setProperty(variable, color);
       }
 
-      // ?bg=transparent skips the hex-colour path entirely (it fails
+      // Explicit colour parameters override the selected theme. ?bg=transparent
+      // skips the hex-colour path entirely (it fails
       // normalizeHex's hex check) and instead flips a class so the host
       // page showing through behind the iframe is possible — see the
       // html.embed-mode.embed-transparent-bg override in styles.css,

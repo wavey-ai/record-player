@@ -12,6 +12,13 @@ export default {
       return new Response("Not found", { status: 404 });
     }
 
+    // Preserve the app root as a directory URL so relative asset references
+    // remain below /apps/play/.
+    if (pathname === ROUTE_PREFIX) {
+      url.pathname = `${ROUTE_PREFIX}/`;
+      return Response.redirect(url, 308);
+    }
+
     const relativePath = pathname.slice(ROUTE_PREFIX.length) || "/";
 
     if (relativePath.startsWith(ONNX_BUNDLE_PATH) && (relativePath.endsWith(".onnx") || relativePath.endsWith(".bin"))) {

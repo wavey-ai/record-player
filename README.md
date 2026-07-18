@@ -74,7 +74,7 @@ With this repository at `/path/to/vin.yl.player`, the expected sibling layout is
 └── bitneedle/
 ```
 
-The decoder helper scripts (`browser-formatting.js`, `encodec-bundle-names.js`, `onnx-runtime-session.js`, `onnx-worker-tensors.js`, `ecdc-pcm-layout.js`, `player-cache-config.js`, `player-cache.js`, `player-pcm-helpers.js`) live directly in `app/src` — this repo owns them, they are not vendored from elsewhere.
+The decoder helper scripts (`browser-formatting.js`, `encodec-bundle-names.js`, `onnx-runtime-session.js`, `onnx-worker-tensors.js`, `ecdc-pcm-layout.js`, `player-cache-config.js`, `player-cache.js`, `player-pcm-helpers.js`) live directly in `web` — this repo owns them, they are not vendored from elsewhere.
 
 The browser build additionally needs ONNX Runtime Web assets and the EnCodec ONNX bundles. Their locations can be supplied with environment variables; by default they're read from `vendor/wasm/` in this repo.
 
@@ -82,8 +82,8 @@ The browser build additionally needs ONNX Runtime Web assets and the EnCodec ONN
 
 | Variable | Required | Default | Purpose |
 | --- | --- | --- | --- |
-| `BITNEEDLE_ONNX_RUNTIME_DIR` | No | `vendor/wasm/onnxruntime-web` | ONNX Runtime Web distribution copied into `app/dist/wasm/onnxruntime-web`. |
-| `BITNEEDLE_ENCODEC_BUNDLES_DIR` | No | `vendor/wasm/encodec-rs/bundles` | EnCodec ONNX bundles; small `bundle.json` manifests are copied into `app/dist/wasm/encodec-rs/onnx-bundles`, the large model weights are uploaded to R2 separately (see `make sync-onnx-assets`). |
+| `BITNEEDLE_ONNX_RUNTIME_DIR` | No | `vendor/wasm/onnxruntime-web` | ONNX Runtime Web distribution copied into `dist/wasm/onnxruntime-web`. |
+| `BITNEEDLE_ENCODEC_BUNDLES_DIR` | No | `vendor/wasm/encodec-rs/bundles` | EnCodec ONNX bundles; small `bundle.json` manifests are copied into `dist/wasm/encodec-rs/onnx-bundles`, the large model weights are uploaded to R2 separately (see `make sync-onnx-assets`). |
 | `PORT` | No | `5193` | Port used by the development server. A positional argument to `npm run dev -- 8000` also works. |
 
 ## Build and run
@@ -102,20 +102,20 @@ http://localhost:5193
 
 The build:
 
-1. clears `app/dist`;
-2. copies `app/src` into `app/dist`;
-3. builds the root `record-player` crate into `app/dist/wasm/record-player`;
-4. builds `player-wasm` into `app/dist/wasm/player-wasm`;
+1. clears `dist`;
+2. copies `web` into `dist`;
+3. builds the root `record-player` crate into `dist/wasm/record-player`;
+4. builds `player-wasm` into `dist/wasm/player-wasm`;
 5. copies the shared decoder scripts;
 6. copies ONNX Runtime Web and the EnCodec bundles.
 
 Generated browser modules:
 
 ```text
-app/dist/wasm/record-player/record_player.js
-app/dist/wasm/record-player/record_player_bg.wasm
-app/dist/wasm/player-wasm/player_wasm.js
-app/dist/wasm/player-wasm/player_wasm_bg.wasm
+dist/wasm/record-player/record_player.js
+dist/wasm/record-player/record_player_bg.wasm
+dist/wasm/player-wasm/player_wasm.js
+dist/wasm/player-wasm/player_wasm_bg.wasm
 ```
 
 ## Runtime WASM Bundles
@@ -124,11 +124,11 @@ The player uses separate browser contexts, so the runtime is split across a few 
 
 - **`record-player`**
   - files:
-    - `app/dist/wasm/record-player/record_player.js`
-    - `app/dist/wasm/record-player/record_player_bg.wasm`
+    - `dist/wasm/record-player/record_player.js`
+    - `dist/wasm/record-player/record_player_bg.wasm`
   - loaded by:
-    - `app/src/player-host.js`
-    - `app/src/player-worklet.js`
+    - `web/player-host.js`
+    - `web/player-worklet.js`
   - responsibility:
     - transport state
     - playback engine init
@@ -136,11 +136,11 @@ The player uses separate browser contexts, so the runtime is split across a few 
 
 - **`player-wasm`**
   - files:
-    - `app/dist/wasm/player-wasm/player_wasm.js`
-    - `app/dist/wasm/player-wasm/player_wasm_bg.wasm`
+    - `dist/wasm/player-wasm/player_wasm.js`
+    - `dist/wasm/player-wasm/player_wasm_bg.wasm`
   - loaded by:
-    - `app/src/record-decoder-worker.js`
-    - `app/src/opus-cache.js`
+    - `web/record-decoder-worker.js`
+    - `web/opus-cache.js`
   - responsibility:
     - record header and descriptor decode
     - playback metadata helpers
@@ -149,17 +149,17 @@ The player uses separate browser contexts, so the runtime is split across a few 
 
 - **`onnxruntime-web`**
   - files under:
-    - `app/dist/wasm/onnxruntime-web/`
+    - `dist/wasm/onnxruntime-web/`
   - loaded by:
-    - `app/src/record-decoder-worker.js`
+    - `web/record-decoder-worker.js`
   - responsibility:
     - ONNX execution for the decoder worker
 
 - **EnCodec ONNX bundles**
   - files under:
-    - `app/dist/wasm/encodec-rs/onnx-bundles/`
+    - `dist/wasm/encodec-rs/onnx-bundles/`
   - loaded by:
-    - `app/src/record-decoder-worker.js`
+    - `web/record-decoder-worker.js`
   - responsibility:
     - model/data bundles used by the ECDC decode path
 
@@ -586,7 +586,7 @@ The root crate can be tested natively:
 cargo test
 ```
 
-Build the complete browser application through `app/scripts/build.mjs`; it supplies the `wasm` feature and correct output names.
+Build the complete browser application through `scripts/build.mjs`; it supplies the `wasm` feature and correct output names.
 
 ## Deployment checklist
 
@@ -597,14 +597,14 @@ A static deployment must preserve:
 - COOP `same-origin`;
 - COEP `require-corp`;
 - same-origin access to workers, WASM, ONNX models and `.data` files;
-- all files generated under `app/dist/wasm`;
-- the copied decoder helper scripts at the root of `app/dist`.
+- all files generated under `dist/wasm`;
+- the copied decoder helper scripts at the root of `dist`.
 
-Do not open `app/dist/index.html` with `file://`; workers, modules, AudioWorklet and cross-origin isolation require an HTTP server.
+Do not open `dist/index.html` with `file://`; workers, modules, AudioWorklet and cross-origin isolation require an HTTP server.
 
 ## Additional API reference
 
-See [`API.md`](./API.md) for the method-by-method API notes. The source of truth remains `app/src/player-host.js`, `app/src/player-canvas.js`, `app/src/player-worklet.js` and `src/acoustic.rs`.
+See [`API.md`](./API.md) for the method-by-method API notes. The source of truth remains `web/player-host.js`, `web/player-canvas.js`, `web/player-worklet.js` and `src/acoustic.rs`.
 ## Publishing `record-player`
 
 The root crate is the workspace default and is publishable. The local `player-wasm` workspace member is marked `publish = false`, so it cannot be accidentally uploaded to crates.io.
@@ -640,7 +640,7 @@ vin.yl.player.setLogging(true);
 console.log(vin.yl.player.loggingEnabled);
 ```
 
-The shared implementation is `app/src/player-message-logger.js`. Payload summaries report buffer types and byte lengths rather than printing PCM or PNG contents.
+The shared implementation is `web/player-message-logger.js`. Payload summaries report buffer types and byte lengths rather than printing PCM or PNG contents.
 
 
 ## Shared message logger loading

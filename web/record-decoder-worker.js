@@ -570,6 +570,7 @@ const {
   getRecordMeta,
   recordPayloadByteLength,
   recordVisibleTurns,
+  splitStandaloneEcdcObjects,
 } = bitneedleEncodecBundleNames;
 
 function playerEncodeBundleNameForRecord(record) {
@@ -786,7 +787,10 @@ async function extractPayloadFromRecordPng({ id, pngBytes, record = {}, recordPr
         : payloadBytes;
       const metadata = (await ensureEncodecWasmModule()).ecdcMetadata(ecdcForMetadata);
       bundleName = playerEncodeBundleNameFromEcdcMetadata(metadata, record);
-      recordHeaderProof = lengthPrefixedEntries
+      const mixedDescriptorCount = Array.isArray(decoded.metadata?.payloadDescriptors)
+        ? decoded.metadata.payloadDescriptors.length
+        : 0;
+      recordHeaderProof = lengthPrefixedEntries || mixedDescriptorCount > 1
         ? null
         : createWorkerEcdcCacheProofContext(payloadBytes);
       workerDecodeDebug("[bitneedle-cache-dbg] worker recordHeaderProof", {
@@ -1239,7 +1243,8 @@ function normalizedProgressSegments(segments, { sampleRate, channels, audioLengt
   });
 }
 
-function postDecodedPcmSegments(id, segments, { sampleRate, channels, audioLength }) {
+function postDecodedPcmSegments(id, segments, { sampleRate, channels, audioLength, suppress = false }) {
+  if (suppress) return;
   if (!Array.isArray(segments) || !segments.length) {
     return;
   }
@@ -1248,7 +1253,8 @@ function postDecodedPcmSegments(id, segments, { sampleRate, channels, audioLengt
   postDecodeProgress(id, { decodedPcmSegments }, transfer);
 }
 
-function postRawDecodedPcmSegments(id, segments, { sampleRate, channels, audioLength }) {
+function postRawDecodedPcmSegments(id, segments, { sampleRate, channels, audioLength, suppress = false }) {
+  if (suppress) return;
   if (!Array.isArray(segments) || !segments.length) {
     return;
   }
@@ -1717,7 +1723,7 @@ function spliceSilenceIntoChannelData(channelData, audioLength, samplesPerChunk,
   return { channelData: splicedChannelData, audioLength: splicedAudioLength };
 }
 
-async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, bundleName = "", meta, runtime, audioLength, record = null, cacheDecodedSegments = false, cachedPcmSegments = [], silenceMap = [], cache = null, recordBindingHex = "" }) {
+async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, bundleName = "", meta, runtime, audioLength, record = null, cacheDecodedSegments = false, cachedPcmSegments = [], silenceMap = [], cache = null, recordBindingHex = "", suppressProgressiveSegments = false }) {
   workerDecodeDebug("[play:client-playback-worker.js] decodePlayback", { id, ecdcBytes: ecdcBuffer?.byteLength || 0, bundleName, cacheDecodedSegments, silenceSpans: Array.isArray(silenceMap) ? silenceMap.length : 0 });
   if (!ecdcBuffer) {
     throw new Error("Client playback worker requires the ECDC round-trip payload.");
@@ -1962,6 +1968,7 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
               sampleRate,
               channels,
               audioLength: safeAudioLength,
+              suppress: suppressProgressiveSegments,
             });
           }
           if (encodedFrames[index]) {
@@ -1980,6 +1987,7 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
             sampleRate,
             channels,
             audioLength: safeAudioLength,
+            suppress: suppressProgressiveSegments,
           });
         }
       }
@@ -1996,6 +2004,7 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
           sampleRate,
           channels,
           audioLength: safeAudioLength,
+          suppress: suppressProgressiveSegments,
         });
       }
       workerPerfEnd(id, perfMark, {
@@ -2075,12 +2084,14 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
               sampleRate,
               channels: Number(selectedMeta.channels) || 2,
               audioLength: safeAudioLength,
+              suppress: suppressProgressiveSegments,
             });
           }
           postDecodedPcmSegments(id, emittedSegments, {
             sampleRate,
             channels: Number(selectedMeta.channels) || 2,
             audioLength: safeAudioLength,
+            suppress: suppressProgressiveSegments,
           });
           if (encodedFrames[index]) {
             encodedFrames[index].codes = null;
@@ -2151,6 +2162,7 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
             sampleRate,
             channels: Number(selectedMeta.channels) || 2,
             audioLength: safeAudioLength,
+            suppress: suppressProgressiveSegments,
           });
         }
         if (cacheEnabled) {
@@ -2165,6 +2177,7 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
           sampleRate,
           channels: Number(selectedMeta.channels) || 2,
           audioLength: safeAudioLength,
+          suppress: suppressProgressiveSegments,
         });
       } finally {
         // Codes were consumed by the decoder above; release them so peak
@@ -2188,6 +2201,7 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
         sampleRate,
         channels: Number(selectedMeta.channels) || 2,
         audioLength: safeAudioLength,
+        suppress: suppressProgressiveSegments,
       });
     }
     if (cacheEnabled) {
@@ -2202,6 +2216,7 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
       sampleRate,
       channels: Number(selectedMeta.channels) || 2,
       audioLength: safeAudioLength,
+      suppress: suppressProgressiveSegments,
     });
     const s16Result = s16Writer.result();
     const samplesPerChunk = Math.max(
@@ -2231,6 +2246,101 @@ async function decodePlayback({ id, frames, ecdcBuffer, bundleJson, bundleRoot, 
   } finally {
     await session?.release?.();
   }
+}
+
+function concatenateStandaloneEcdcObjects(objects) {
+  const byteLength = objects.reduce((sum, object) => sum + object.bytes.byteLength, 0);
+  const bytes = new Uint8Array(byteLength);
+  let offset = 0;
+  for (const object of objects) {
+    bytes.set(object.bytes, offset);
+    offset += object.bytes.byteLength;
+  }
+  return bytes;
+}
+
+async function decodeMixedEcdcPlayback({ ecdcBuffer, silenceMap = [], record = null, ...options }) {
+  const objects = splitStandaloneEcdcObjects(ecdcBuffer, record);
+  const bundleNames = [...new Set(objects.map((object) => object.bundleName))];
+  if (bundleNames.length <= 1) {
+    return decodePlayback({
+      ...options,
+      record,
+      ecdcBuffer,
+      silenceMap,
+      bundleName: options.bundleName || bundleNames[0] || "",
+    });
+  }
+
+  // Keep decode allocations bounded on Safari. A run never crosses a codec
+  // change and is capped at 64 revolutions (~85s at 45 RPM / ~115s on LP), then
+  // copied into the final PCM allocation and released before the next run.
+  const runs = [];
+  const maxRunObjects = 64;
+  for (const object of objects) {
+    const last = runs[runs.length - 1];
+    if (last && last.bundleName === object.bundleName && last.objects.length < maxRunObjects) {
+      last.objects.push(object);
+    } else {
+      runs.push({ bundleName: object.bundleName, objects: [object] });
+    }
+  }
+  const totalAudioLength = objects.reduce((sum, object) => sum + object.audioLength, 0);
+  if (!(totalAudioLength > 0)) throw new Error("Mixed ECDC programme has no PCM duration.");
+  let channelData = null;
+  let channels = 0;
+  let sampleRate = 0;
+  let writeOffset = 0;
+  for (let runIndex = 0; runIndex < runs.length; runIndex += 1) {
+    const run = runs[runIndex];
+    postDecodeProgress(options.id, {
+      msg: `Decoding bitrate group ${runIndex + 1}/${runs.length}`,
+      progressPercent: Math.round((runIndex / runs.length) * 100),
+    });
+    const decoded = await decodePlayback({
+      ...options,
+      record,
+      ecdcBuffer: concatenateStandaloneEcdcObjects(run.objects),
+      bundleName: run.bundleName,
+      silenceMap: [],
+      cacheDecodedSegments: false,
+      cachedPcmSegments: [],
+      cache: null,
+      suppressProgressiveSegments: true,
+    });
+    if (!channelData) {
+      channels = decoded.channels;
+      sampleRate = decoded.sampleRate;
+      channelData = Array.from({ length: channels }, () => new Int16Array(totalAudioLength));
+    }
+    if (decoded.channels !== channels || decoded.sampleRate !== sampleRate) {
+      throw new Error("Mixed ECDC descriptors disagree on PCM channel/sample-rate geometry.");
+    }
+    if (writeOffset + decoded.audioLength > totalAudioLength) {
+      throw new Error("Mixed ECDC decode exceeded its declared PCM duration.");
+    }
+    for (let channel = 0; channel < channels; channel += 1) {
+      channelData[channel].set(decoded.s16ChannelData[channel], writeOffset);
+    }
+    writeOffset += decoded.audioLength;
+  }
+  if (writeOffset !== totalAudioLength) {
+    throw new Error(`Mixed ECDC decode produced ${writeOffset}/${totalAudioLength} PCM samples.`);
+  }
+  const samplesPerChunk = Math.max(1, objects[0]?.audioLength || Math.round(totalAudioLength / objects.length));
+  const spliced = spliceSilenceIntoChannelData(
+    channelData,
+    totalAudioLength,
+    samplesPerChunk,
+    silenceMap,
+  );
+  return {
+    s16ChannelData: spliced.channelData,
+    channels,
+    sampleRate,
+    audioLength: spliced.audioLength,
+    bundleName: `mixed:${bundleNames.join("+")}`,
+  };
 }
 
 async function decodeRecordPngPlayback({
@@ -2264,6 +2374,7 @@ async function decodeRecordPngPlayback({
       payloadContainer: extracted.payloadContainer,
       payloadCodec: extracted.payloadCodec,
       entryContainer: extracted.entryContainer,
+      payloadMetadata: extracted.payloadMetadata,
       bundleName: extracted.bundleName,
       record,
       recordProfile: extracted.recordProfile,
@@ -2345,7 +2456,7 @@ async function decodePayloadPlayback({ payloadBuffer, payloadContainer = "", pay
       recordProfile,
     }));
   }
-  return decorate(await decodePlayback({
+  return decorate(await decodeMixedEcdcPlayback({
     ...rest,
     ecdcBuffer: payloadBuffer,
   }));
