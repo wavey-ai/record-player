@@ -28,6 +28,42 @@ function playbackStats(totalDurationMs) {
   };
 }
 
+function passingPointerInputProfile() {
+  return {
+    schemaVersion: 1,
+    durationMs: 180,
+    events: 22,
+    contactSamples: 20,
+    maximumConcurrentPointers: 2,
+    pointerCancels: 0,
+    lostPointerCaptures: 0,
+    pointerTypes: ["touch"],
+    types: {
+      touch: {
+        pointerType: "touch",
+        gripPolicy: "full-contact",
+        events: 22,
+        contactSamples: 20,
+        moveSamples: 18,
+        coalescedEvents: 18,
+        coalescedSamples: 18,
+        pressure: {
+          samples: 20,
+          minimum: 0.5,
+          maximum: 0.5,
+          distinctValues: [0.5],
+          distinctValuesTruncated: false,
+          variable: false,
+        },
+        contactWidthPx: { samples: 20, minimum: 18, maximum: 22 },
+        contactHeightPx: { samples: 20, minimum: 17, maximum: 21 },
+        sampleIntervalMs: { samples: 18, minimum: 4, p50: 8, p95: 9, maximum: 10 },
+        medianSampleRateHz: 125,
+      },
+    },
+  };
+}
+
 function participant(participantIndex) {
   const id = `dj-${String(participantIndex + 1).padStart(2, "0")}`;
   const trials = Array.from({ length: 24 }, (_, trialIndex) => {
@@ -103,7 +139,7 @@ function passingResults() {
     "cue-codebook",
   ];
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     candidate: {
       commit: "2".repeat(40),
       worktreeDirty: false,
@@ -129,6 +165,7 @@ function passingResults() {
       baseLatencyMs: 5,
       outputLatencyMs: 20,
       interfaceBufferFrames: 128,
+      pointerInputProfile: passingPointerInputProfile(),
       pointerCommandLatencyMs: { p50: 6, p95: 12, maximum: 18 },
       acousticLoopback: {
         samples: 5,
@@ -334,17 +371,18 @@ test("requires frozen cue coding when a participant reports a cue", () => {
 
 test("rejects older schemas because they cannot bind capture evidence", () => {
   const results = passingResults();
-  results.schemaVersion = 2;
-  assert.throws(() => analyzeFixture(results), /schema version 2 lacks build-bound capture evidence/);
+  results.schemaVersion = 3;
+  assert.throws(() => analyzeFixture(results), /schema version 3 lacks measured target-device input evidence/);
 });
 
-test("generates a schema-three collection template with pinned settings", () => {
+test("generates a schema-four collection template with pinned settings", () => {
   const template = createDjValidationTemplate();
-  assert.equal(template.schemaVersion, 3);
+  assert.equal(template.schemaVersion, 4);
   assert.equal(template.candidate.settings.highFrequencyAccelerationLimit, 0.35);
   assert.equal(template.candidate.settings.stylusTracingLimit, 0.72);
   assert.equal(template.candidate.settings.faderCurve, 0.08);
   assert.equal(template.candidate.worktreeDirty, null);
+  assert.equal(template.environment.pointerInputProfile, null);
   assert.equal(template.participants.length, 1);
   assert.equal(template.participants[0].trials.length, 1);
   assert.deepEqual(template.participants[0].trials[0].captureSha256, { physical: "", player: "" });

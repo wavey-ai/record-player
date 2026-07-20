@@ -116,6 +116,32 @@ input[type="checkbox"] { min-height: auto; }
 .inline-actions { display: flex; align-items: end; flex-wrap: wrap; gap: 0.6rem; }
 .inline-actions label { min-width: 10rem; flex: 1; }
 .notice { color: #c7a86a; font-size: 0.82rem; }
+.pointer-probe {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.8rem;
+  border: 1px solid #34332f;
+  border-radius: 0.3rem;
+  background: #080807;
+}
+.pointer-probe p { margin: 0; color: #bdb9ae; font-size: 0.82rem; }
+.pointer-probe .inline-actions { margin: 0; }
+.pointer-probe-pad {
+  display: grid;
+  min-height: 9rem;
+  place-items: center;
+  border: 1px dashed #77736a;
+  border-radius: 0.3rem;
+  color: #f4f1e8;
+  background: radial-gradient(circle at center, #2a2925 0 8%, #121210 9% 100%);
+  font-weight: 750;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.pointer-probe-pad:focus-visible { outline: 2px solid #ff5d52; outline-offset: 2px; }
+#pointer-profile-result { color: #ff968c; font-size: 0.82rem; }
+#pointer-profile-result.ready { color: #a9d7a2; }
 .artifact-grid { display: grid; gap: 0.6rem; }
 .artifact-row { display: grid; grid-template-columns: 10rem 1fr 1.4fr; gap: 0.5rem; align-items: end; }
 

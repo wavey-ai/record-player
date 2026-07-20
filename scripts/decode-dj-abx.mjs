@@ -9,6 +9,7 @@ import {
   decodeDjBlindAbxResponses,
   reconstructDjAbxBlindManifest,
 } from "../web/dj-abx.js";
+import { DJ_VALIDATION_SCHEMA_VERSION } from "../web/dj-validation-template.js";
 
 function usage() {
   return [
@@ -69,8 +70,10 @@ async function readJsonWithSha256(path, label) {
 }
 
 function mergeDecodedTrials(resultsInput, decoded) {
-  if (!resultsInput || resultsInput.schemaVersion !== 3 || !Array.isArray(resultsInput.participants)) {
-    throw new TypeError("The validation draft must use schema version 3");
+  if (!resultsInput
+    || resultsInput.schemaVersion !== DJ_VALIDATION_SCHEMA_VERSION
+    || !Array.isArray(resultsInput.participants)) {
+    throw new TypeError(`The validation draft must use schema version ${DJ_VALIDATION_SCHEMA_VERSION}`);
   }
   const results = structuredClone(resultsInput);
   if (decoded.candidate?.commit !== results.candidate?.commit

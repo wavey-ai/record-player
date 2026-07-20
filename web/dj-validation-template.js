@@ -1,4 +1,4 @@
-export const DJ_VALIDATION_SCHEMA_VERSION = 3;
+export const DJ_VALIDATION_SCHEMA_VERSION = 4;
 
 export const DJ_GESTURE_FAMILIES = Object.freeze([
   "baby-drag-cue",
@@ -142,6 +142,7 @@ export function createDjValidationTemplate({ includeExample = true } = {}) {
       baseLatencyMs: null,
       outputLatencyMs: null,
       interfaceBufferFrames: null,
+      pointerInputProfile: null,
       pointerCommandLatencyMs: { p50: null, p95: null, maximum: null },
       acousticLoopback: {
         samples: null,

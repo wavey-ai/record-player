@@ -4,6 +4,42 @@ import test from "node:test";
 import { DjValidationSession } from "../web/dj-validation-session.js";
 import { createDjValidationTemplate } from "../web/dj-validation-template.js";
 
+function passingPointerInputProfile(pointerType = "mouse") {
+  return {
+    schemaVersion: 1,
+    durationMs: 160,
+    events: 18,
+    contactSamples: 16,
+    maximumConcurrentPointers: 1,
+    pointerCancels: 0,
+    lostPointerCaptures: 0,
+    pointerTypes: [pointerType],
+    types: {
+      [pointerType]: {
+        pointerType,
+        gripPolicy: pointerType === "pen" ? "pointer-pressure" : "full-contact",
+        events: 18,
+        contactSamples: 16,
+        moveSamples: 15,
+        coalescedEvents: 15,
+        coalescedSamples: 15,
+        pressure: {
+          samples: 16,
+          minimum: 0.5,
+          maximum: 0.5,
+          distinctValues: [0.5],
+          distinctValuesTruncated: false,
+          variable: false,
+        },
+        contactWidthPx: { samples: 16, minimum: 1, maximum: 1 },
+        contactHeightPx: { samples: 16, minimum: 1, maximum: 1 },
+        sampleIntervalMs: { samples: 15, minimum: 8, p50: 8, p95: 8, maximum: 8 },
+        medianSampleRateHz: 125,
+      },
+    },
+  };
+}
+
 function playerSnapshot(totalDurationMs, pointerToAudioLatencyMs = null, pointerAppliedCommandId = null) {
   return {
     highFrequencyAccelerationLimit: 0.35,
@@ -29,6 +65,9 @@ function playerSnapshot(totalDurationMs, pointerToAudioLatencyMs = null, pointer
 }
 
 function addParticipant(session, id = "dj-01") {
+  if (!session.snapshot().environment.pointerInputProfile) {
+    session.setPointerInputProfile(passingPointerInputProfile());
+  }
   return session.addParticipant({
     id,
     currentlyActiveDj: true,
@@ -38,13 +77,34 @@ function addParticipant(session, id = "dj-01") {
   });
 }
 
-test("creates an empty browser collection from the shared schema-three template", () => {
+test("creates an empty browser collection from the shared schema-four template", () => {
   const template = createDjValidationTemplate({ includeExample: false });
   const session = new DjValidationSession({ data: template });
-  assert.equal(session.snapshot().schemaVersion, 3);
+  assert.equal(session.snapshot().schemaVersion, 4);
   assert.deepEqual(session.snapshot().participants, []);
   assert.deepEqual(session.snapshot().blocks, []);
   assert.equal(session.summary().participants, 0);
+});
+
+test("requires measured pointer input evidence before an audio block", () => {
+  const session = new DjValidationSession();
+  session.addParticipant({
+    id: "dj-01",
+    currentlyActiveDj: true,
+    regularlyScratches: true,
+    experienceBand: "over-10-years",
+    trainingCompleted: true,
+  });
+  assert.throws(() => session.startBlock("dj-01", "live", playerSnapshot(1_000)), /pointer input probe/);
+  const malformed = passingPointerInputProfile();
+  malformed.types.mouse.gripPolicy = "pointer-pressure";
+  assert.throws(() => session.setPointerInputProfile(malformed), /full-contact/);
+  assert.equal(session.setPointerInputProfile(passingPointerInputProfile()).requirements.pass, true);
+  assert.doesNotThrow(() => session.startBlock("dj-01", "live", playerSnapshot(1_000)));
+  assert.throws(
+    () => session.setPointerInputProfile(passingPointerInputProfile("pen")),
+    /cannot change during an audio block/,
+  );
 });
 
 test("records participants and rejects duplicate anonymized ids", () => {

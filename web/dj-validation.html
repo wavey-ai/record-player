@@ -52,6 +52,21 @@
           <label class="check"><input name="quietRoom" type="checkbox"> Quiet room confirmed</label>
           <button type="submit">Save hardware details</button>
         </form>
+        <div class="pointer-probe">
+          <p id="pointer-probe-instructions">Drag across this pad as you would move the record. On a touchscreen, keep two fingers down together once. With a pen, vary pressure. Haptic Touch still uses full-contact grip.</p>
+          <div
+            id="pointer-probe-pad"
+            class="pointer-probe-pad"
+            role="application"
+            tabindex="0"
+            aria-label="Pointer input measurement pad"
+            aria-describedby="pointer-probe-instructions"
+          >Measure pointer input here</div>
+          <div class="inline-actions">
+            <button id="reset-pointer-probe" type="button">Reset pointer probe</button>
+          </div>
+          <output id="pointer-profile-result">No pointer input profile.</output>
+        </div>
         <div class="inline-actions">
           <label>Loopback input<select id="loopback-input"><option value="">Default input</option></select></label>
           <button id="refresh-inputs" type="button">Refresh inputs</button>

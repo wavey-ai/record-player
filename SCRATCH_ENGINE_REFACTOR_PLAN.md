@@ -9,7 +9,7 @@ is made.
 Current automated evidence:
 
 - `cargo test --workspace`: 92 tests (87 `record-player`, 5 `player-wasm`).
-- `node --test test/*.test.mjs`: 75 tests. Canvas tests check audio-owned phase
+- `node --test test/*.test.mjs`: 79 tests. Canvas tests check audio-owned phase
   at half-speed forward, full-speed reverse and rest, plus all eight preset and
   click-count selections through independent mouse and touch gestures.
 - The default tonearm now consumes decoded programme-gap anchors through the
@@ -70,7 +70,11 @@ Current automated evidence:
   live-control acceptance rules. Unit tests cover passing and failing studies.
 - `/dj-validation.html` embeds the real player and collects build-bound hardware,
   loopback, audio-block, participant, trial, routine and artifact evidence. It
-  refuses release measurements from a dirty or mismatched build.
+  refuses release measurements from a dirty or mismatched build. Its bounded
+  pointer probe records emitted pointer types, cadence, coalesced samples,
+  pressure range, contact geometry, multi-touch and cancellation evidence. The
+  schema-four session cannot start a block until that target-device profile
+  passes; touch is explicitly full-contact grip and requires two pointers.
 - `/dj-abx.html` runs participant-bound blind packages without condition labels.
   The coordinator tool verifies matched WAV captures, gives every A/B/X file a
   unique opaque identity, binds the package to the clean candidate build and

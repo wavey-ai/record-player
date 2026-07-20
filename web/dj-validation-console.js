@@ -3,8 +3,9 @@ import {
   createDjValidationTemplate,
   DJ_REQUIRED_ARTIFACT_ROLES,
 } from "./dj-validation-template.js";
+import { createPointerInputProfiler } from "./pointer-input-profile.js";
 
-const STORAGE_KEY = "vinyl-dj-validation-v3";
+const STORAGE_KEY = "vinyl-dj-validation-v4";
 const element = id => document.getElementById(id);
 const statusOutput = element("console-status");
 const playerFrame = element("validation-player");
@@ -21,6 +22,9 @@ let currentBuildInfo = null;
 let movementTraces = [];
 let activeScratchRecording = false;
 let renderQueued = false;
+let pointerInputProfiler = createPointerInputProfiler();
+let pointerProbeStarted = false;
+const activeProbePointers = new Set();
 
 function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
@@ -100,6 +104,35 @@ function setFormValue(form, name, value) {
   else input.value = value ?? "";
 }
 
+function formatPointerProfile(profile) {
+  if (!profile) return "No pointer input profile.";
+  const typeSummaries = profile.pointerTypes.map(pointerType => {
+    const type = profile.types[pointerType];
+    const cadence = Number.isFinite(type.medianSampleRateHz)
+      ? `${type.medianSampleRateHz.toFixed(1)} Hz median`
+      : "cadence pending";
+    const pressure = type.pressure.variable
+      ? `variable pressure ${type.pressure.minimum.toFixed(2)}–${type.pressure.maximum.toFixed(2)}`
+      : "no variable pressure";
+    return `${pointerType}: ${type.gripPolicy}, ${cadence}, ${pressure}`;
+  });
+  const readiness = profile.requirements.pass
+    ? "ready"
+    : profile.requirements.reasons.join("; ");
+  return [
+    `${profile.contactSamples} samples`,
+    `${profile.maximumConcurrentPointers} simultaneous pointers`,
+    ...typeSummaries,
+    readiness,
+  ].join(" · ");
+}
+
+function renderPointerProfile(profile = session.snapshot().environment.pointerInputProfile) {
+  const output = element("pointer-profile-result");
+  output.textContent = formatPointerProfile(profile);
+  output.classList.toggle("ready", Boolean(profile?.requirements?.pass));
+}
+
 function populateForms() {
   const data = session.snapshot();
   const environmentForm = element("environment-form");
@@ -126,6 +159,7 @@ function populateForms() {
     setFormValue(artifactForm, `${artifact.role}-sha256`, artifact.sha256);
   }
   const loopback = data.environment.acousticLoopback;
+  renderPointerProfile(data.environment.pointerInputProfile);
   element("loopback-result").textContent = Number.isFinite(loopback?.p95Ms)
     ? `p95 ${loopback.p95Ms.toFixed(2)} ms · jitter ${loopback.jitterMs.toFixed(2)} ms · correlation ${loopback.minimumCorrelation.toFixed(3)}`
     : "No physical loopback result.";
@@ -172,6 +206,9 @@ function saveAndRender(message) {
 function replaceSession(data, traces = []) {
   session = new DjValidationSession({ data });
   movementTraces = Array.isArray(traces) ? structuredClone(traces) : [];
+  pointerInputProfiler = createPointerInputProfiler();
+  pointerProbeStarted = false;
+  activeProbePointers.clear();
   refreshParticipantSelects();
   populateForms();
   render();
@@ -260,6 +297,44 @@ element("environment-form").addEventListener("submit", event => {
     setStatus(error.message || String(error), true);
   }
 });
+
+function resetPointerProbe() {
+  pointerInputProfiler = createPointerInputProfiler();
+  pointerProbeStarted = false;
+  activeProbePointers.clear();
+  session.clearPointerInputProfile();
+  renderPointerProfile(null);
+  persist();
+}
+
+function observePointerProbe(event) {
+  event.preventDefault();
+  if (event.type === "pointerdown") {
+    if (!pointerProbeStarted) {
+      pointerInputProfiler = createPointerInputProfiler();
+      pointerProbeStarted = true;
+    }
+    activeProbePointers.add(event.pointerId);
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // The profiler still records devices that do not expose pointer capture.
+    }
+  }
+  const profile = pointerInputProfiler.observe(event.type, event);
+  if (["pointerup", "pointercancel", "lostpointercapture"].includes(event.type)) {
+    activeProbePointers.delete(event.pointerId);
+  }
+  session.setPointerInputProfile(profile);
+  renderPointerProfile(profile);
+  if (event.type !== "pointermove") persist();
+}
+
+const pointerProbePad = element("pointer-probe-pad");
+for (const type of ["pointerdown", "pointermove", "pointerup", "pointercancel", "lostpointercapture"]) {
+  pointerProbePad.addEventListener(type, observePointerProbe);
+}
+element("reset-pointer-probe").addEventListener("click", resetPointerProbe);
 
 async function refreshInputs() {
   try {
@@ -595,4 +670,5 @@ globalThis.__VINYL_DJ_VALIDATION__ = Object.freeze({
   getSession: () => session,
   getPlayer: () => player,
   getBuildInfo: () => currentBuildInfo,
+  getPointerInputProfile: () => session.snapshot().environment.pointerInputProfile,
 });

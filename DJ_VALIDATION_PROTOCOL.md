@@ -28,6 +28,15 @@ been completed and its raw results retained.
 - Record browser, OS, input device, display sampling rate, AudioContext sample
   rate, `baseLatency`, `outputLatency` (where exposed), interface buffer and the
   measured pointer-command-apply latency distribution.
+- Before an audio block, use the console pointer pad with the exact controller
+  used for the session. Record at least 16 contact samples at a median rate of
+  at least 30 Hz. Put two fingers down together when the device reports touch.
+  Vary pen pressure when available. Reject pointer cancellation or capture loss.
+  Keep the generated `environment.pointerInputProfile` with the session.
+- Treat mouse, trackpad and finger touch as full contact. In particular, iPhone
+  Haptic Touch is not a continuous force input and does not vary engine grip.
+  Only a pen `PointerEvent.pressure` signal controls variable grip. The profile
+  records pressure and contact geometry so this policy is auditable.
 - Stop the transport and run `player.measureAcousticLoopbackLatency()` through
   the selected physical output and input path. Keep all probe results in
   `environment.acousticLoopback`. Reject fewer than three correlated probes.
@@ -164,7 +173,8 @@ Open `http://localhost:5193/dj-validation.html`. The console embeds the tested
 player and reads `player-build-info.json`. It refuses physical-loopback
 measurements and audio blocks if the build is dirty, the draft commit does not
 match the running build, or the `0.35` HF, `0.72` stylus and `0.08` fader settings
-are not pinned.
+are not pinned. It also refuses an audio block until the pointer-input pad has a
+passing profile from the session controller.
 
 Use the console to record the hardware chain, participants, browser audio blocks,
 physical loopback, live routines, preflight results, study controls, exclusions
@@ -255,7 +265,7 @@ must resolve every non-empty `cueCode` with the registered lower-case kebab-case
 codebook. Do not change the copied `audibleCue` text.
 
 After responses, exclusions and cue codes are frozen, decode one participant.
-Merge the trials into the schema-version-3 console export:
+Merge the trials into the schema-version-4 console export:
 
 ```sh
 npm run validation:decode-abx -- private/dj-01-codebook.json \
@@ -273,7 +283,7 @@ Bundle all private codebooks into the randomization-manifest artifact. Bundle
 all completed cue files into the cue-codebook artifact.
 
 The command-line template remains available for an offline workflow. Generate a
-version-3 JSON collection template:
+version-4 JSON collection template:
 
 ```sh
 npm run validation:template > dj-validation-results.json

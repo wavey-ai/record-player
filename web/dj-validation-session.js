@@ -8,6 +8,10 @@ import {
   DJ_SCRATCH_PRESETS,
   DJ_VALIDATION_SCHEMA_VERSION,
 } from "./dj-validation-template.js";
+import {
+  pointerInputProfileRequirements,
+  validatePointerInputProfile,
+} from "./pointer-input-profile.js";
 
 const blockKinds = new Set(DJ_BLOCK_KINDS);
 const conditions = new Set(DJ_CONDITIONS);
@@ -97,9 +101,14 @@ function participantById(data, participantId) {
 export class DjValidationSession {
   constructor({ data = createDjValidationTemplate({ includeExample: false }), now = () => Date.now() } = {}) {
     if (data?.schemaVersion !== DJ_VALIDATION_SCHEMA_VERSION || !Array.isArray(data?.participants) || !Array.isArray(data?.blocks)) {
-      throw new TypeError("A DJ validation schema version 3 collection is required");
+      throw new TypeError(`A DJ validation schema version ${DJ_VALIDATION_SCHEMA_VERSION} collection is required`);
     }
     this.data = clone(data);
+    if (this.data.environment?.pointerInputProfile !== null) {
+      this.data.environment.pointerInputProfile = validatePointerInputProfile(
+        this.data.environment?.pointerInputProfile,
+      );
+    }
     this.now = now;
     this.activeBlock = null;
   }
@@ -139,8 +148,23 @@ export class DjValidationSession {
     if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
       throw new TypeError("environment patch must be an object");
     }
+    if (Object.hasOwn(patch, "pointerInputProfile")) {
+      throw new TypeError("Use setPointerInputProfile or clearPointerInputProfile for pointer evidence");
+    }
     Object.assign(this.data.environment, clone(patch));
     return clone(this.data.environment);
+  }
+
+  setPointerInputProfile(profile) {
+    if (this.activeBlock) throw new Error("Pointer input evidence cannot change during an audio block");
+    const validated = validatePointerInputProfile(profile);
+    this.data.environment.pointerInputProfile = validated;
+    return clone(validated);
+  }
+
+  clearPointerInputProfile() {
+    if (this.activeBlock) throw new Error("Pointer input evidence cannot change during an audio block");
+    this.data.environment.pointerInputProfile = null;
   }
 
   setPreflight({ checks = null, ...measurements } = {}) {
@@ -283,6 +307,10 @@ export class DjValidationSession {
     if (this.activeBlock) throw new Error("Another audio block is already active");
     participantById(this.data, participantId);
     const blockKind = allowed(kind, blockKinds, "block kind");
+    const inputRequirements = pointerInputProfileRequirements(this.data.environment.pointerInputProfile);
+    if (!inputRequirements.pass) {
+      throw new Error(`Complete the pointer input probe before collection: ${inputRequirements.reasons.join("; ")}`);
+    }
     if (!hasPinnedPlayerSettings(playerSnapshot)) {
       throw new Error("The player does not have all shipped acoustic and limiter settings");
     }

@@ -10,6 +10,10 @@ import {
   DJ_SCRATCH_PRESETS,
   DJ_VALIDATION_SCHEMA_VERSION,
 } from "../web/dj-validation-template.js";
+import {
+  pointerInputProfileRequirements,
+  validatePointerInputProfile,
+} from "../web/pointer-input-profile.js";
 
 export {
   createDjValidationTemplate,
@@ -236,6 +240,13 @@ function validatePlaybackStats(value, path) {
 
 function validateEnvironment(value) {
   const environment = object(value, "environment");
+  let pointerInputProfile;
+  try {
+    pointerInputProfile = validatePointerInputProfile(environment.pointerInputProfile);
+  } catch (error) {
+    throw new TypeError(`environment.pointerInputProfile is invalid: ${error.message}`);
+  }
+  const pointerInputRequirements = pointerInputProfileRequirements(pointerInputProfile);
   const pointerLatency = object(environment.pointerCommandLatencyMs, "environment.pointerCommandLatencyMs");
   const p50 = number(pointerLatency.p50, "environment.pointerCommandLatencyMs.p50", { minimum: 0 });
   const p95 = number(pointerLatency.p95, "environment.pointerCommandLatencyMs.p95", { minimum: 0 });
@@ -285,6 +296,9 @@ function validateEnvironment(value) {
   optionalNonNegative(environment.outputLatencyMs, "environment.outputLatencyMs");
   number(environment.interfaceBufferFrames, "environment.interfaceBufferFrames", { minimum: 1, integer: true });
   return {
+    pointerInputProfile,
+    pointerInputPass: pointerInputRequirements.pass,
+    pointerInputReasons: [...pointerInputRequirements.reasons],
     pointerP95Ms: p95,
     acousticP95Ms: acousticP95,
     acousticJitterMs: acousticJitter,
@@ -385,9 +399,9 @@ export function analyzeDjValidation(input, {
   verifiedCandidateBuildInfo = null,
 } = {}) {
   const data = object(input, "results");
-  if (data.schemaVersion === 1 || data.schemaVersion === 2) {
+  if ([1, 2, 3].includes(data.schemaVersion)) {
     throw new RangeError(
-      `DJ validation schema version ${data.schemaVersion} lacks build-bound capture evidence; generate a version 3 template`,
+      `DJ validation schema version ${data.schemaVersion} lacks measured target-device input evidence; generate a version ${DJ_VALIDATION_SCHEMA_VERSION} template`,
     );
   }
   assertion(data.schemaVersion === DJ_VALIDATION_SCHEMA_VERSION, `Unsupported DJ validation schema version: ${data.schemaVersion}`);
@@ -628,6 +642,14 @@ export function analyzeDjValidation(input, {
     }, "Verify each required artifact and match the candidate build metadata."),
     preflight: criterion(preflightPass, preflight, "Pass all mechanical and signal checks with no rejection event."),
     studyControls: criterion(studyControlsPass, { blinding, cueCoding, allTrained, fixedPathDelayMs }, "Use the registered double-blind, training, cue-coding, and room controls."),
+    inputEvidence: criterion(
+      environmentMetrics.pointerInputPass,
+      {
+        profile: environmentMetrics.pointerInputProfile,
+        reasons: environmentMetrics.pointerInputReasons,
+      },
+      "Measure the target pointer device with enough contact samples, cadence, and multi-touch coverage and no lost contact.",
+    ),
     controlLatency: criterion(
       environmentMetrics.pointerP95Ms <= MAX_POINTER_COMMAND_P95_MS,
       environmentMetrics.pointerP95Ms,
@@ -663,6 +685,7 @@ export function analyzeDjValidation(input, {
     environment: Object.freeze({
       ...data.environment,
       listeningTransducers: Object.freeze([...data.environment.listeningTransducers]),
+      pointerInputProfile: Object.freeze(structuredClone(environmentMetrics.pointerInputProfile)),
       pointerCommandLatencyMs: Object.freeze({ ...data.environment.pointerCommandLatencyMs }),
     }),
     exclusions: Object.freeze(exclusions.map(exclusion => Object.freeze({ ...exclusion }))),
