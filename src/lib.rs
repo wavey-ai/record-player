@@ -17,7 +17,10 @@ pub use command::*;
 pub use engine::*;
 pub use event::*;
 pub use mixer::*;
-pub use scratch_gate::{ScratchGate, ScratchPreset, MAX_SCRATCH_CLICKS, MIN_SCRATCH_CLICKS};
+pub use scratch_gate::{
+    ScratchGate, ScratchPreset, MAX_SCRATCH_CLICKS, MIN_SCRATCH_CLICKS,
+    SCRATCH_GATE_ALGORITHM_VERSION,
+};
 pub use state::*;
 pub use view::*;
 

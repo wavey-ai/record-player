@@ -8,10 +8,11 @@ is made.
 
 Current automated evidence:
 
-- `cargo test --workspace`: 95 tests (90 `record-player`, 5 `player-wasm`).
+- `cargo test --workspace`: 97 tests (92 `record-player`, 5 `player-wasm`).
 - `node --test test/*.test.mjs`: 80 tests. Canvas tests check audio-owned phase
   at half-speed forward, full-speed reverse and rest, plus all eight preset and
-  click-count selections through independent mouse and touch gestures.
+  click-count selections through independent mouse and touch gestures. The
+  click control remains absent and non-interactive for techniques that ignore it.
 - The default tonearm now consumes decoded programme-gap anchors through the
   Rust monotone calibration. Its inverse projects the pointer onto physical arm
   length and recovers groove radius before seeking. Release WASM pinned a test
@@ -20,16 +21,18 @@ Current automated evidence:
   platter and its separate single-turn, event-rate-dependent differentiator
   were removed, so every bundled gesture uses the canonical tracker.
 - `npm run build`: both browser WASM packages build in release mode.
-- The 2026-07-20 browser integration rerun reached empty-deck motor phase,
-  automatic needle drop, all direct preset controls and every radial click
-  value. The strict run then reported one Chrome underrun under heavy unrelated
-  host load, so it is not a new release pass. The unchanged zero-underrun gate
-  still requires a clean-host rerun.
+- The current 2026-07-20 Chrome 150 integration run passed. It reached empty-deck
+  motor phase, automatic needle drop, all direct preset controls and every
+  radial click value through API, mouse, touch and keyboard paths. It verified
+  per-preset click memory and hid the control for non-click techniques. Chrome
+  reported zero underruns over `8.98 s`.
 - `npm run bench:worklet`: three release-WASM runs measured p95 at `1.47%`
   normal and `8.10–8.14%` for alternating `±8×` crab/8. Fresh six-second
   stereo PCM window p95 was `2.90–3.08%` against a `2.667 ms` quantum.
 - Two current high-contention benchmark attempts exceeded the fresh-window
-  threshold. The threshold was not relaxed; a clean-host rerun remains due.
+  threshold. The threshold was not relaxed. A later rerun passed with normal
+  p95 `0.3790 ms`, reversing Crab/8 p95 `0.8440 ms`, and fresh-window maximum
+  `0.3525 ms` against the `2.667 ms` quantum.
 - The post-calibration release run measured p95 `1.49%` normal, `8.70%` for
   alternating `±8×` crab/8 and `2.90%` for a fresh six-second window. Replay
   hashes remained unchanged, confirming that presentation calibration does not
@@ -37,8 +40,9 @@ Current automated evidence:
 - The release-WASM harness requires identical output SHA-256 and gate traces
   when 2,176 live frames separate two runs of the same take. It verifies
   preset, click and manual-fader events at four exact sub-quantum offsets. A
-  variable-grip take hashes to `5cada29f...`; its full-grip control retains the
-  prior `890df8bd...` output and must differ.
+  variable-grip take hashes to `0d44547b...`; its full-grip control hashes to
+  `d3bf7be0...` and must differ. The harness also proves that a version-3 replay
+  selects the historical Rust gate behavior and restores live version 4.
 - `npm run test:browser`: Chrome 150 loaded real release WASM at 48 kHz.
   It exercised all eight gates in both directions and captured rendered audio.
   It recorded, replayed and restored an engine-version-5 take with more than
@@ -56,11 +60,12 @@ Current automated evidence:
   It kept a trusted record touch active while a second touch moved XFADE. The
   API, trusted mouse, trusted touch and trusted keyboard paths each selected
   all eight presets and all eight click counts while XFADE remained at `0.37`.
+  Transform restored its stored click count. Chirp disabled and hid CLICKS.
   The embed exposed both canvas selectors and its collapsed advanced dropdown
   in the initial viewport.
-- The browser run measured less than `5.38 ms` maximum pointer-to-apply latency
-  in this synthetic trace. It reported `5.33 ms` base latency and `32 ms` output
-  latency. These are headless host results, not hardware population data.
+- The current browser run measured less than `5.44 ms` maximum pointer-to-apply
+  latency in this synthetic trace. It reported `5.33 ms` base latency and `32 ms`
+  output latency. These are headless host results, not hardware population data.
 - Three independent browser runs sampled Chrome's Web Audio render capacity by
   phase. The worst maximum was `13.33%`, and the worst run-level p95 was
   `10.65%`. A later build-and-test invocation produced a `62.66%` callback
@@ -245,6 +250,9 @@ Acceptance evidence:
 - Implement the gate as a Rust audio-rate state machine using filtered target rate,
   rendered rate, velocity confidence, acceleration, dwell, direction hysteresis,
   distance since reversal and a learned stroke span.
+- Gate algorithm 4 applies click count only to Transform, Flare, Crab and Orbit.
+  Each preset keeps its own setting. Versioned replay retains the version 1–3
+  global phase multiplier for historical takes.
 - Technique behavior:
   - Baby: assisted gate open; manual fader only.
   - Stab: forward stroke audible, return and hold cut.

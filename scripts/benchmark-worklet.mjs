@@ -436,6 +436,28 @@ function verifyReplayDurationBoundary() {
   assert.equal(processor.replay, null);
 }
 
+function verifyScratchGateVersionReplay() {
+  globalThis.currentFrame = 0;
+  globalThis.currentTime = 0;
+  const processor = createProcessor();
+  assert.equal(processor.dsp.scratchGateAlgorithmVersion, 4);
+
+  processor.handleMessage({
+    type: "replay-scratch",
+    id: 97,
+    performance: {
+      durationFrames: FRAME_COUNT * 2,
+      engine: { gateAlgorithmVersion: 3 },
+      initialState: { positionFrames: WINDOW_CENTER, preset: "chirp", clicks: 8 },
+      events: [],
+    },
+  });
+  assert.equal(processor.dsp.scratchGateAlgorithmVersion, 3);
+  processor.handleMessage({ type: "cancel-scratch-replay" });
+  assert.equal(processor.dsp.scratchGateAlgorithmVersion, 4);
+  assert.equal(processor.scratchGateAlgorithmVersion, 4);
+}
+
 function verifyReplayControlInterruption() {
   globalThis.currentFrame = 0;
   globalThis.currentTime = 0;
@@ -827,6 +849,7 @@ function benchmark(label, processor, beforeQuantum, afterQuantum) {
 
 verifyEofHandoffs();
 verifyReplayDurationBoundary();
+verifyScratchGateVersionReplay();
 verifyReplayControlInterruption();
 verifyFarWindowReplayCancellation();
 const deterministicReplay = verifyDeterministicReplay();

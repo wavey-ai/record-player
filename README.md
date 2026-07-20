@@ -360,10 +360,11 @@ player.setStylusTracingLimit(0.72);
 The canvas presents pitch as a Technics-style ±8% control around the record's native RPM, but the lower-level API accepts an absolute RPM.
 
 Scratch presets are `baby`, `stab`, `chirp`, `transform`, `flare`, `crab`,
-`orbit` and `drum`. Selecting one restores its preset-specific default click
-count; `setScratchClicks(n)` can then override that count. A new player starts
-on `baby`/1 click. The full defaults
-table appears under
+`orbit` and `drum`. Each preset keeps its own click setting. Its default is used
+until `setScratchClicks(n)` changes it. Click count changes the audible pattern
+only for `transform`, `flare`, `crab`, and `orbit`. The API still accepts and
+stores the value for every preset. A new player starts on `baby`/1 click. The
+full defaults table appears under
 [Crossfader ownership](#crossfader-ownership).
 
 The same controls are available on the canvas and under **ADVANCED CONTROLS**;
@@ -437,6 +438,7 @@ const unsubscribe = player.subscribe(state => {
     crossfaderOwner: state.crossfaderOwner,
     scratchPreset: state.scratchPreset,
     scratchClicks: state.scratchClicks,
+    scratchClicksEnabled: state.scratchClicksEnabled,
     scratchGate: state.scratchGate,
     scratchGateTarget: state.scratchGateTarget,
     scratchDirection: state.scratchDirection,
@@ -522,7 +524,7 @@ manual-crossfader changes are frame-timed events. The essential shape is:
   outputSampleRate: 48000,
   durationFrames,
   replaySeed,
-  engine: { version: 5, gateAlgorithmVersion: 3 },
+  engine: { version: 5, gateAlgorithmVersion: 4 },
   initialState: {
     positionFrames,
     rotationDegrees,
@@ -634,7 +636,9 @@ const controller = player.canvas.mount(canvas, {
 The bundled page mounts its canvas automatically. Eight compact, equal preset
 sectors sit at the upper left and right of the platter, so pointer and touch
 users can select a technique without cycling. A radial `CLICKS` slider follows
-`DRUM` as the final technique control and directly selects `1..8`.
+`DRUM` as the final technique control and directly selects `1..8`. It appears
+for `transform`, `flare`, `crab`, and `orbit`. Those are the techniques whose
+patterns use click count.
 The advanced dropdown contains the equivalent native HTML controls plus
 keyboard-operable `NEXT` and `+1` buttons. It starts collapsed and remains in
 the initial viewport in the default embed.
@@ -675,8 +679,8 @@ player.canvas.setStrobeLight(true);
 ```
 
 Scratch UI is optional. The click slider only exists when both
-`scratchPreset` and `scratchClicks` are visible. Hide both without changing the
-engine or API:
+`scratchPreset` and `scratchClicks` are visible and a click-driven technique is
+active. Hide both without changing the engine or API:
 
 ```js
 player.canvas.configure({
@@ -873,8 +877,11 @@ The eight profiles and their click defaults are:
 | `orbit` | 2 | Symmetric flare-style notches in both directions. |
 | `drum` | 1 | Short velocity-qualified onset, reversal and high-acceleration attacks. |
 
-Click counts are integer-clamped to `1..8`. Selecting a preset restores that
-preset's default click count; a later click-count change adjusts the pattern.
+Click counts are integer-clamped to `1..8`. Each preset restores its last click
+count. `Transform`, `flare`, `crab`, and `orbit` use that count in their
+travel-locked patterns. The other four patterns ignore it. Gate algorithm 4
+records this behavior. Replays recorded by gate algorithms 1–3 retain their
+original global click-phase behavior.
 
 ### Surface and handling layers
 
@@ -1135,6 +1142,7 @@ pub use scratch_gate::{
     ScratchPreset,
     MAX_SCRATCH_CLICKS,
     MIN_SCRATCH_CLICKS,
+    SCRATCH_GATE_ALGORITHM_VERSION,
 };
 ```
 

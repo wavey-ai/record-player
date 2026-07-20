@@ -7,7 +7,7 @@ import {
   minuteToDegrees,
   normalizeDegrees
 } from "./player-canvas-geometry.js";
-import { SCRATCH_PRESETS } from "./scratch-performance-schema.js";
+import { SCRATCH_PRESETS, scratchPresetUsesClicks } from "./scratch-performance-schema.js";
 
 const RPM_CENTER_MINUTE = 15;
 const RPM_RESET_PITCH_PCT = -6;
@@ -798,7 +798,11 @@ export function drawRadialControls(
     }
   }
 
-  if (components.scratchPreset && components.scratchClicks) {
+  if (
+    components.scratchPreset
+    && components.scratchClicks
+    && scratchPresetUsesClicks(state.scratchPreset)
+  ) {
     const clicks = clamp(Math.round(Number(state.scratchClicks) || 1), 1, 8);
     const ring = scratchClicksControlGeometry(geometry, clicks);
     drawSlider(

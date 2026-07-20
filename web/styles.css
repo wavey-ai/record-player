@@ -198,6 +198,10 @@ button.is-active {
   margin: 10px 12px 0;
 }
 
+.advanced-controls .timeline[hidden] {
+  display: none;
+}
+
 .advanced-controls .technique-control {
   width: auto;
   margin: 10px 12px 0;

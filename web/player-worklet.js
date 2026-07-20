@@ -66,6 +66,7 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
     this.dsp = new ScratchAcousticDsp(sampleRate, options?.processorOptions?.acousticConfig ?? undefined);
     this.scratchPreset = this.dsp.scratchPreset;
     this.scratchClicks = this.dsp.scratchClicks;
+    this.scratchGateAlgorithmVersion = this.dsp.scratchGateAlgorithmVersion;
     this.active = false;
     this.playing = false;
     this.motorRunning = false;
@@ -459,6 +460,14 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
         this.applyDspControl("replay-output-gain", () => {
           this.dsp.setOutputGain(Number(initial.volume ?? 1), 0);
         });
+        const requestedGateVersion = Number(performance.engine?.gateAlgorithmVersion);
+        const replayGateVersion = Number.isFinite(requestedGateVersion)
+          ? Math.max(1, Math.trunc(requestedGateVersion))
+          : this.scratchGateAlgorithmVersion;
+        this.applyDspControl("replay-scratch-gate-version", () => {
+          this.dsp.setScratchGateAlgorithmVersion(replayGateVersion);
+          this.scratchGateAlgorithmVersion = this.dsp.scratchGateAlgorithmVersion;
+        });
         this.effects = requested;
         this.dsp.setEffects(requested.acoustic, requested.surface);
         this.setScratchPresetAndClicks(initial.preset, initial.clicks);
@@ -565,6 +574,7 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
       effects: { ...this.effects },
       scratchPreset: this.scratchPreset,
       scratchClicks: this.scratchClicks,
+      scratchGateAlgorithmVersion: this.scratchGateAlgorithmVersion,
       needleLifted: this.needleLifted,
       motorRunning: this.motorRunning,
       playbackRate: this.playbackRate,
@@ -1042,6 +1052,7 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
     this.effects = { ...restoreState.effects };
     this.scratchPreset = restoreState.scratchPreset;
     this.scratchClicks = restoreState.scratchClicks;
+    this.scratchGateAlgorithmVersion = restoreState.scratchGateAlgorithmVersion;
     this.needleLifted = restoreState.needleLifted;
     this.motorRunning = restoreState.motorRunning;
     this.playbackRate = restoreState.playbackRate;
@@ -1102,6 +1113,7 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
     this.dsp.setManualFaderGain(1);
     this.dsp.setOutputGain(restoreState.outputGain, 0);
     this.dsp.setEffects(this.effects.acoustic, this.effects.surface);
+    this.dsp.setScratchGateAlgorithmVersion(restoreState.scratchGateAlgorithmVersion);
     this.setScratchPresetAndClicks(restoreState.scratchPreset, restoreState.scratchClicks);
     if (Number.isFinite(restoreState.nativeRpm) && restoreState.nativeRpm > 0) {
       this.dsp.setNativeRpm(restoreState.nativeRpm);

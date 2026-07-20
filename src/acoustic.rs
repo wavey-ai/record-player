@@ -1033,6 +1033,11 @@ impl ScratchAcousticDsp {
         self.scratch_gate.set_clicks(clicks);
     }
 
+    #[wasm_bindgen(js_name = setScratchGateAlgorithmVersion)]
+    pub fn set_scratch_gate_algorithm_version(&mut self, version: u32) {
+        self.scratch_gate.set_algorithm_version(version);
+    }
+
     #[wasm_bindgen(getter, js_name = scratchPreset)]
     pub fn scratch_preset(&self) -> String {
         self.scratch_gate.preset().as_str().to_owned()
@@ -1041,6 +1046,11 @@ impl ScratchAcousticDsp {
     #[wasm_bindgen(getter, js_name = scratchClicks)]
     pub fn scratch_clicks(&self) -> u8 {
         self.scratch_gate.clicks()
+    }
+
+    #[wasm_bindgen(getter, js_name = scratchGateAlgorithmVersion)]
+    pub fn scratch_gate_algorithm_version(&self) -> u32 {
+        self.scratch_gate.algorithm_version()
     }
 
     #[wasm_bindgen(getter, js_name = scratchGate)]

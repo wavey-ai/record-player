@@ -13,6 +13,7 @@ import {
   normalizeScratchClicks,
   normalizeScratchPerformance,
   normalizeScratchPreset,
+  scratchPresetUsesClicks,
   SCRATCH_GATE_ALGORITHM_VERSION,
   SCRATCH_PERFORMANCE_SCHEMA_VERSION,
   SCRATCH_PRESETS,
@@ -387,6 +388,7 @@ const elements = {
   scratchPreset: playerRoot.querySelector("#scratch-preset"),
   scratchPresetNext: playerRoot.querySelector("#scratch-preset-next"),
   scratchClicks: playerRoot.querySelector("#scratch-clicks"),
+  scratchClicksControl: playerRoot.querySelector("#scratch-clicks-control"),
   scratchClicksNext: playerRoot.querySelector("#scratch-clicks-next"),
   scratchClicksValue: playerRoot.querySelector("#scratch-clicks-value"),
   highFrequencyAccelerationLimit: playerRoot.querySelector("#hf-acceleration-limit"),
@@ -457,6 +459,9 @@ const state = {
   replayScratching: false,
   scratchPreset: "baby",
   scratchClicks: SCRATCH_PRESET_DEFAULT_CLICKS.baby,
+  scratchClicksByPreset: Object.fromEntries(
+    SCRATCH_PRESETS.map(preset => [preset, SCRATCH_PRESET_DEFAULT_CLICKS[preset]]),
+  ),
   scratchGate: 1,
   scratchGateTarget: 1,
   scratchDirection: 0,
@@ -965,14 +970,19 @@ async function setRpm(rpm) {
 }
 
 function updateScratchTechniqueControls() {
+  const clicksEnabled = scratchPresetUsesClicks(state.scratchPreset);
   if (elements.scratchPreset) elements.scratchPreset.value = state.scratchPreset;
   if (elements.scratchClicks) elements.scratchClicks.value = String(state.scratchClicks);
   if (elements.scratchClicksValue) elements.scratchClicksValue.value = String(state.scratchClicks);
+  if (elements.scratchClicksControl) elements.scratchClicksControl.hidden = !clicksEnabled;
+  if (elements.scratchClicks) elements.scratchClicks.disabled = !clicksEnabled;
+  if (elements.scratchClicksNext) elements.scratchClicksNext.disabled = !clicksEnabled;
 }
 
 function setScratchClicks(value, { record = true } = {}) {
   interruptScratchReplayNow("Scratch click control");
   state.scratchClicks = normalizeScratchClicks(value, state.scratchClicks);
+  state.scratchClicksByPreset[state.scratchPreset] = state.scratchClicks;
   updateScratchTechniqueControls();
   state.node?.port.postMessage({ type: "scratch-clicks", clicks: state.scratchClicks });
   if (record) recordScratchEvent({ type: "scratch-clicks", clicks: state.scratchClicks });
@@ -983,7 +993,8 @@ function setScratchClicks(value, { record = true } = {}) {
 function setScratchPreset(value, { record = true } = {}) {
   interruptScratchReplayNow("Scratch preset control");
   state.scratchPreset = normalizeScratchPreset(value, state.scratchPreset);
-  state.scratchClicks = SCRATCH_PRESET_DEFAULT_CLICKS[state.scratchPreset];
+  state.scratchClicks = state.scratchClicksByPreset[state.scratchPreset]
+    ?? SCRATCH_PRESET_DEFAULT_CLICKS[state.scratchPreset];
   updateScratchTechniqueControls();
   state.node?.port.postMessage({ type: "scratch-preset", preset: state.scratchPreset });
   state.node?.port.postMessage({ type: "scratch-clicks", clicks: state.scratchClicks });
@@ -2690,6 +2701,7 @@ function handleWorkletMessage(event) {
       }
       if (Number.isFinite(message.scratchClicks)) {
         state.scratchClicks = normalizeScratchClicks(message.scratchClicks, state.scratchClicks);
+        state.scratchClicksByPreset[state.scratchPreset] = state.scratchClicks;
       }
       updateScratchTechniqueControls();
     }
@@ -3521,6 +3533,7 @@ function publicState() {
     crossfaderOwner: state.scratchPreset === "baby" ? "manual" : "scratch-preset",
     scratchPreset: state.scratchPreset,
     scratchClicks: state.scratchClicks,
+    scratchClicksEnabled: scratchPresetUsesClicks(state.scratchPreset),
     scratchGate: state.scratchGate,
     scratchGateTarget: state.scratchGateTarget,
     scratchDirection: state.scratchDirection,

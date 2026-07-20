@@ -604,6 +604,17 @@ test("canvas mouse and touch controls directly select every scratch preset and r
     renderNext();
   }
 
+  const inactiveClickCalls = calls.clicks.length;
+  const inactiveClickPoint = scratchClicksControlGeometry(geometry, 4);
+  canvas.emit("pointerdown", pointer(pointerId, inactiveClickPoint.x, inactiveClickPoint.y, performance.now()));
+  canvas.emit("pointerup", pointer(pointerId, inactiveClickPoint.x, inactiveClickPoint.y, performance.now()));
+  pointerId += 1;
+  assert.equal(
+    calls.clicks.length,
+    inactiveClickCalls,
+    "CLICKS remained interactive while BABY ignored click count",
+  );
+
   for (const pointerType of ["mouse", "touch"]) {
     state.scratchPreset = "baby";
     state.scratchClicks = 1;
@@ -613,15 +624,19 @@ test("canvas mouse and touch controls directly select every scratch preset and r
     const clicksCallStart = calls.clicks.length;
 
     for (const preset of presets) tap(scratchPresetControlGeometry(geometry, preset), pointerType);
-    for (let clicks = 1; clicks <= 8; clicks += 1) {
-      tap(scratchClicksControlGeometry(geometry, clicks), pointerType);
-    }
-
     assert.deepEqual(
       calls.presets.slice(presetCallStart),
       presets,
       `${pointerType} did not reach every scratch preset`,
     );
+
+    // DRUM ends the direct-preset sweep and does not use click count. Select a
+    // click-driven technique before exercising its conditional radial slider.
+    tap(scratchPresetControlGeometry(geometry, "transform"), pointerType);
+    for (let clicks = 1; clicks <= 8; clicks += 1) {
+      tap(scratchClicksControlGeometry(geometry, clicks), pointerType);
+    }
+
     assert.deepEqual(
       calls.clicks.slice(clicksCallStart),
       [1, 2, 3, 4, 5, 6, 7, 8],

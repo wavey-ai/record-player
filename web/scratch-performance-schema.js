@@ -1,5 +1,5 @@
 export const SCRATCH_PERFORMANCE_SCHEMA_VERSION = 2;
-export const SCRATCH_GATE_ALGORITHM_VERSION = 3;
+export const SCRATCH_GATE_ALGORITHM_VERSION = 4;
 
 export const SCRATCH_PRESETS = Object.freeze([
   "baby",
@@ -22,6 +22,13 @@ export const SCRATCH_PRESET_DEFAULT_CLICKS = Object.freeze({
   orbit: 2,
   drum: 1,
 });
+
+export const SCRATCH_CLICK_PRESETS = Object.freeze([
+  "transform",
+  "flare",
+  "crab",
+  "orbit",
+]);
 
 const EVENT_TYPES = new Set([
   "scratch-start",
@@ -76,6 +83,10 @@ export function normalizeScratchClicks(value, fallback = 1) {
   return Number.isFinite(number)
     ? Math.max(1, Math.min(8, Math.round(number)))
     : fallback;
+}
+
+export function scratchPresetUsesClicks(value) {
+  return SCRATCH_CLICK_PRESETS.includes(normalizeScratchPreset(value));
 }
 
 function normalizeInitialState(value, sourceScale, { legacy = false } = {}) {
@@ -195,6 +206,13 @@ export function normalizeScratchPerformance(performance, target = {}) {
   const engine = performance.engine && typeof performance.engine === "object"
     ? performance.engine
     : {};
+  const gateAlgorithmVersion = Math.max(
+    1,
+    Math.floor(finite(engine.gateAlgorithmVersion, SCRATCH_GATE_ALGORITHM_VERSION)),
+  );
+  if (gateAlgorithmVersion > SCRATCH_GATE_ALGORITHM_VERSION) {
+    throw new TypeError(`Unsupported scratch gate algorithm version ${gateAlgorithmVersion}`);
+  }
 
   return {
     id: String(performance.id || ""),
@@ -211,10 +229,7 @@ export function normalizeScratchPerformance(performance, target = {}) {
     engine: {
       name: String(engine.name || "vin.yl.player.acoustic"),
       version: Math.max(1, Math.floor(finite(engine.version, 1))),
-      gateAlgorithmVersion: Math.max(
-        1,
-        Math.floor(finite(engine.gateAlgorithmVersion, SCRATCH_GATE_ALGORITHM_VERSION)),
-      ),
+      gateAlgorithmVersion,
       recordProfile: String(engine.recordProfile || ""),
       nativeRpm: Math.max(1, finite(engine.nativeRpm, 33.3333333333)),
     },

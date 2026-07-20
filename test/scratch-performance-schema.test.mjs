@@ -3,10 +3,12 @@ import test from "node:test";
 
 import {
   SCRATCH_GATE_ALGORITHM_VERSION,
+  SCRATCH_CLICK_PRESETS,
   SCRATCH_PRESET_DEFAULT_CLICKS,
   normalizeScratchClicks,
   normalizeScratchPerformance,
   normalizeScratchPreset,
+  scratchPresetUsesClicks,
 } from "../web/scratch-performance-schema.js";
 
 test("schema v1 migrates source positions and timestamps onto separate clocks", () => {
@@ -69,8 +71,8 @@ test("schema v2 preserves equal-frame ordering and normalizes controls", () => {
   assert.equal(normalized.initialState.rotationDegrees, -725.5);
   assert.equal(normalized.initialState.highFrequencyAccelerationLimit, 1);
   assert.equal(normalized.initialState.stylusTracingLimit, 0);
-  assert.equal(SCRATCH_GATE_ALGORITHM_VERSION, 3);
-  assert.equal(normalized.engine.gateAlgorithmVersion, 3);
+  assert.equal(SCRATCH_GATE_ALGORITHM_VERSION, 4);
+  assert.equal(normalized.engine.gateAlgorithmVersion, 4);
   assert.ok(Number.isInteger(normalized.replaySeed));
   assert.ok(normalized.replaySeed > 0);
   assert.equal(normalizeScratchPerformance(normalized).replaySeed, normalized.replaySeed);
@@ -100,11 +102,25 @@ test("preset and click normalization is bounded", () => {
   assert.equal(SCRATCH_PRESET_DEFAULT_CLICKS.crab, 4);
   assert.equal(normalizeScratchClicks(-4), 1);
   assert.equal(normalizeScratchClicks(12), 8);
+  assert.deepEqual(SCRATCH_CLICK_PRESETS, ["transform", "flare", "crab", "orbit"]);
+  assert.equal(scratchPresetUsesClicks("TRANSFORM"), true);
+  assert.equal(scratchPresetUsesClicks("chirp"), false);
+  assert.equal(scratchPresetUsesClicks("unknown"), false);
 });
 
 test("invalid schemas and event shapes are rejected", () => {
   assert.throws(() => normalizeScratchPerformance({ schemaVersion: 7, events: [] }), /Unsupported/);
   assert.throws(() => normalizeScratchPerformance({ schemaVersion: 2, sourceSampleRate: 48_000, outputSampleRate: 48_000, events: [{ type: "eval", frameOffset: 0 }] }), /Invalid/);
+  assert.throws(
+    () => normalizeScratchPerformance({
+      schemaVersion: 2,
+      sourceSampleRate: 48_000,
+      outputSampleRate: 48_000,
+      engine: { gateAlgorithmVersion: SCRATCH_GATE_ALGORITHM_VERSION + 1 },
+      events: [],
+    }),
+    /Unsupported scratch gate algorithm/,
+  );
 });
 
 test("rejects replay event density that could monopolize one audio quantum", () => {

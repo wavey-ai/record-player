@@ -3,6 +3,8 @@ use std::str::FromStr;
 
 pub const MIN_SCRATCH_CLICKS: u8 = 1;
 pub const MAX_SCRATCH_CLICKS: u8 = 8;
+pub const SCRATCH_GATE_ALGORITHM_VERSION: u32 = 4;
+const TECHNIQUE_SCOPED_CLICKS_GATE_VERSION: u32 = 4;
 
 const MOTION_ONSET_RATE: f64 = 0.035;
 const REST_RATE: f64 = 0.018;
@@ -21,9 +23,9 @@ const DRUM_REFRACTORY_SECONDS: f64 = 0.045;
 
 /// Intent-aware automatic crossfader patterns for common scratch techniques.
 ///
-/// The gate is deliberately independent of the manual deck crossfader. Its
-/// output is an additional per-deck gain, so a user's manual fader position is
-/// never overwritten by technique assistance.
+/// `Baby` leaves the stored manual crossfader in control. Every other preset
+/// owns the real audible crossfader through this gate. The host can still keep
+/// the manual position intact for an immediate return to `Baby`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ScratchPreset {
     #[default]
@@ -68,6 +70,14 @@ impl ScratchPreset {
             Self::Transform | Self::Orbit => 2,
             Self::Crab => 4,
         }
+    }
+
+    /// Reports whether click count changes this technique's audible pattern.
+    pub const fn uses_clicks(self) -> bool {
+        matches!(
+            self,
+            Self::Transform | Self::Flare | Self::Crab | Self::Orbit
+        )
     }
 
     /// Seed stroke span in source seconds. It adapts at each confirmed
@@ -139,6 +149,7 @@ enum MotionEvent {
 pub struct ScratchGate {
     preset: ScratchPreset,
     clicks: u8,
+    algorithm_version: u32,
     contact_active: bool,
     direction: i8,
     moving: bool,
@@ -170,6 +181,7 @@ impl ScratchGate {
         Self {
             preset,
             clicks: preset.default_clicks(),
+            algorithm_version: SCRATCH_GATE_ALGORITHM_VERSION,
             contact_active: false,
             direction: 0,
             moving: false,
@@ -214,12 +226,23 @@ impl ScratchGate {
         self.update_phase();
     }
 
+    pub fn algorithm_version(&self) -> u32 {
+        self.algorithm_version
+    }
+
+    pub fn set_algorithm_version(&mut self, version: u32) {
+        self.algorithm_version = version.clamp(1, SCRATCH_GATE_ALGORITHM_VERSION);
+        self.update_phase();
+    }
+
     /// Starts a recorded performance from one defined gate state while
     /// retaining its selected technique and click count.
     pub fn reset_for_replay(&mut self) {
         let preset = self.preset;
         let clicks = self.clicks;
+        let algorithm_version = self.algorithm_version;
         *self = Self::new(preset);
+        self.set_algorithm_version(algorithm_version);
         self.set_clicks(clicks);
     }
 
@@ -419,8 +442,17 @@ impl ScratchGate {
     }
 
     fn update_phase(&mut self) {
+        // Versions 1–3 applied the click multiplier to every preset. Preserve
+        // that behavior only while replaying a take recorded by those gates.
+        let phase_clicks = if self.algorithm_version < TECHNIQUE_SCOPED_CLICKS_GATE_VERSION
+            || self.preset.uses_clicks()
+        {
+            self.clicks
+        } else {
+            1
+        };
         let cycles =
-            self.stroke_travel / self.learned_span.max(MIN_LEARNED_SPAN) * f64::from(self.clicks);
+            self.stroke_travel / self.learned_span.max(MIN_LEARNED_SPAN) * f64::from(phase_clicks);
         self.phase = cycles.rem_euclid(1.0);
     }
 
@@ -593,9 +625,15 @@ mod tests {
     #[test]
     fn parses_every_preset_and_exposes_defaults() {
         let expected_clicks = [1, 1, 1, 2, 1, 4, 2, 1];
-        for (preset, clicks) in ScratchPreset::ALL.into_iter().zip(expected_clicks) {
+        let uses_clicks = [false, false, false, true, true, true, true, false];
+        for ((preset, clicks), expected_uses_clicks) in ScratchPreset::ALL
+            .into_iter()
+            .zip(expected_clicks)
+            .zip(uses_clicks)
+        {
             assert_eq!(preset.as_str().parse::<ScratchPreset>().unwrap(), preset);
             assert_eq!(preset.default_clicks(), clicks);
+            assert_eq!(preset.uses_clicks(), expected_uses_clicks);
             assert!(preset.initial_stroke_span() >= MIN_LEARNED_SPAN);
         }
         assert!("scribble".parse::<ScratchPreset>().is_err());
@@ -726,6 +764,44 @@ mod tests {
         let phase_before = one_click.phase();
         run(&mut one_click, 0.010, true, 2.0, 2.0);
         assert!(one_click.phase() - phase_before > 0.08);
+    }
+
+    #[test]
+    fn current_gate_ignores_click_count_for_non_click_techniques() {
+        for preset in [
+            ScratchPreset::Baby,
+            ScratchPreset::Stab,
+            ScratchPreset::Chirp,
+            ScratchPreset::Drum,
+        ] {
+            let trace = |clicks| {
+                let mut gate = ScratchGate::new(preset);
+                gate.set_clicks(clicks);
+                run(&mut gate, 0.043, true, 0.9, 0.9);
+                (gate.phase(), gate.target(), gate.gate())
+            };
+            let one = trace(1);
+            let eight = trace(8);
+            assert_eq!(eight, one, "{preset:?}");
+        }
+    }
+
+    #[test]
+    fn historical_gate_replay_retains_global_click_phase() {
+        let trace = |version, clicks| {
+            let mut gate = ScratchGate::new(ScratchPreset::Chirp);
+            gate.set_algorithm_version(version);
+            gate.set_clicks(clicks);
+            run(&mut gate, 0.043, true, 0.9, 0.9);
+            gate.phase()
+        };
+        let current_one = trace(SCRATCH_GATE_ALGORITHM_VERSION, 1);
+        let current_eight = trace(SCRATCH_GATE_ALGORITHM_VERSION, 8);
+        assert_eq!(current_eight, current_one);
+
+        let historical_one = trace(3, 1);
+        let historical_eight = trace(3, 8);
+        assert_ne!(historical_eight, historical_one);
     }
 
     #[test]

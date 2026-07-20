@@ -607,7 +607,7 @@ async function runBrowserScenario() {
   assert(recordedTake?.events?.length > 10, "The browser scratch take did not record engine events");
   assert(recordedTake.schemaVersion === 2, "The browser scratch take did not use schema version 2");
   assert(recordedTake.engine?.version === 5, "The browser scratch take did not identify projected-input capture engine version 5");
-  assert(recordedTake.engine?.gateAlgorithmVersion === 3, "The browser scratch take did not identify gate algorithm version 3");
+  assert(recordedTake.engine?.gateAlgorithmVersion === 4, "The browser scratch take did not identify gate algorithm version 4");
   assert(Number.isInteger(recordedTake.replaySeed) && recordedTake.replaySeed > 0, "The browser scratch take did not store a replay seed");
   assert(Number.isFinite(recordedTake.initialState?.rotationDegrees), "The browser scratch take did not store its platter angle");
   const recordedGrip = recordedTake.events
@@ -1081,7 +1081,21 @@ try {
         clicks.push({ clicks: state.scratchClicks, crossfader: state.crossfader });
       }
       const combined = player.setScratchTechnique({ preset: "crab", clicks: 7 });
-      return { presets, clicks, combined };
+      player.setScratchTechnique({ preset: "transform", clicks: 5 });
+      player.setScratchTechnique({ preset: "flare", clicks: 3 });
+      player.setScratchPreset("transform");
+      const restoredTransform = {
+        ...player.getState(),
+        clicksControlHidden: document.querySelector("#scratch-clicks-control")?.hidden,
+        clicksInputDisabled: document.querySelector("#scratch-clicks")?.disabled,
+      };
+      player.setScratchPreset("chirp");
+      const chirp = {
+        ...player.getState(),
+        clicksControlHidden: document.querySelector("#scratch-clicks-control")?.hidden,
+        clicksInputDisabled: document.querySelector("#scratch-clicks")?.disabled,
+      };
+      return { presets, clicks, combined, restoredTransform, chirp };
     })()`,
     returnByValue: true,
   });
@@ -1089,6 +1103,21 @@ try {
   verifyTechniqueTrace("Programmatic controls", programmatic, allPresets, allClicks);
   if (programmatic?.combined?.preset !== "crab" || programmatic?.combined?.clicks !== 7) {
     throw new Error(`Combined scratch API returned ${JSON.stringify(programmatic?.combined)}`);
+  }
+  if (
+    programmatic?.restoredTransform?.scratchClicks !== 5
+    || programmatic?.restoredTransform?.scratchClicksEnabled !== true
+    || programmatic?.restoredTransform?.clicksControlHidden !== false
+    || programmatic?.restoredTransform?.clicksInputDisabled !== false
+  ) {
+    throw new Error(`Transform did not restore its click setting: ${JSON.stringify(programmatic?.restoredTransform)}`);
+  }
+  if (
+    programmatic?.chirp?.scratchClicksEnabled !== false
+    || programmatic?.chirp?.clicksControlHidden !== true
+    || programmatic?.chirp?.clicksInputDisabled !== true
+  ) {
+    throw new Error(`Chirp incorrectly enabled click control: ${JSON.stringify(programmatic?.chirp)}`);
   }
   const manualOwnershipResult = await session.send("Runtime.evaluate", {
     expression: `(async () => {
@@ -1146,6 +1175,7 @@ try {
     await mouseTap(points.scratchPresets[preset]);
     pointer.presets.push(await readTechniqueControls());
   }
+  await mouseTap(points.scratchPresets.transform);
   for (const clicks of allClicks) {
     await mouseTap(points.scratchClicks[clicks]);
     pointer.clicks.push(await readTechniqueControls());
@@ -1172,6 +1202,7 @@ try {
     await touchTap(points.scratchPresets[preset]);
     touchControls.presets.push(await readTechniqueControls());
   }
+  await touchTap(points.scratchPresets.transform);
   for (const clicks of allClicks) {
     await touchTap(points.scratchClicks[clicks]);
     touchControls.clicks.push(await readTechniqueControls());
@@ -1231,6 +1262,11 @@ try {
     await dispatchKey("Enter", "Enter", 13);
     keyboard.presets.push(await readTechniqueControls());
   }
+  await session.send("Runtime.evaluate", {
+    expression: `globalThis.vin.yl.player.setScratchTechnique({ preset: "transform", clicks: 1 })`,
+    returnByValue: true,
+  });
+  await pause(25);
   const clicksButtonFocused = await session.send("Runtime.evaluate", {
     expression: `(() => {
       const button = document.querySelector("#scratch-clicks-next");
