@@ -8,7 +8,7 @@ is made.
 
 Current automated evidence:
 
-- `cargo test --workspace`: 104 tests (99 `record-player`, 5 `player-wasm`).
+- `cargo test --workspace`: 106 tests (101 `record-player`, 5 `player-wasm`).
 - Rust gate conformance traverses one learned stroke for Transform, Flare, Crab
   and Orbit. Click values 1, 4 and 8 produce exactly that many pulses or notches.
   At `8x`, the de-click envelope stays within its analytical fastest-attack
@@ -34,6 +34,13 @@ Current automated evidence:
 - `npm run bench:worklet`: three release-WASM runs measured p95 at `1.47%`
   normal and `8.10–8.14%` for alternating `±8×` crab/8. Fresh six-second
   stereo PCM window p95 was `2.90–3.08%` against a `2.667 ms` quantum.
+- The rate-adaptive sinc keeps eight output-domain frames of bounded support
+  instead of collapsing a fixed 24-source-tap kernel at high speed. Spectral
+  sweeps at `±2×`, `±4×` and `±8×` keep passband RMS within `0.012` and
+  stopband RMS below `0.003`, with exact forward/reverse symmetry. A recurrence
+  matches the direct sinc calculation within `1e-11` while avoiding per-tap
+  trigonometry. Release WASM measured `1.52%` normal, `6.60%` reversing Crab/8
+  and `3.28%` fresh-window p95 against the audio quantum.
 - Two current high-contention benchmark attempts exceeded the fresh-window
   threshold. The threshold was not relaxed. A later rerun passed with normal
   p95 `0.0573 ms`, reversing Crab/8 p95 `0.2599 ms`, and fresh-window maximum
