@@ -436,6 +436,96 @@ function verifyReplayDurationBoundary() {
   assert.equal(processor.replay, null);
 }
 
+function verifyLiveScratchReleasePolicy() {
+  const beginScratch = processor => {
+    processor.handleMessage({
+      type: "scratch",
+      active: true,
+      position: WINDOW_CENTER,
+      rate: -1,
+      impulse: 0.22,
+      grip: 1,
+    });
+    renderQuantum(processor, createOutput());
+  };
+  const releaseScratch = (processor, resumePlayback) => {
+    processor.handleMessage({
+      type: "scratch",
+      active: false,
+      position: processor.dsp.position,
+      rate: 0,
+      impulse: 0,
+      grip: 0,
+      resumePlayback,
+    });
+    const output = createOutput();
+    renderQuantum(processor, output);
+    return output;
+  };
+
+  globalThis.currentFrame = 0;
+  globalThis.currentTime = 0;
+  const explicitStop = createProcessor();
+  explicitStop.handleMessage({ type: "set-effects", acoustic: false, surface: false });
+  warmStablePlayback(explicitStop, 64);
+  beginScratch(explicitStop);
+  const stoppedOutput = releaseScratch(explicitStop, false);
+  assert.equal(explicitStop.playing, false, "resumePlayback false left programme playback running");
+  assert.equal(explicitStop.active, false, "resumePlayback false left the programme DSP active");
+  assert.equal(
+    channelEnergy(stoppedOutput[0][0], 0, FRAME_COUNT),
+    0,
+    "resumePlayback false leaked programme audio into the next quantum",
+  );
+
+  globalThis.currentFrame = 0;
+  globalThis.currentTime = 0;
+  const pausedOrigin = createProcessor();
+  pausedOrigin.handleMessage({ type: "set-effects", acoustic: false, surface: false });
+  warmStablePlayback(pausedOrigin, 64);
+  pausedOrigin.handleMessage({ type: "stop", handoff: false, playbackEpoch: 2 });
+  beginScratch(pausedOrigin);
+  const pausedOutput = releaseScratch(pausedOrigin, true);
+  assert.equal(pausedOrigin.playing, false, "a scratch from pause incorrectly resumed playback");
+  assert.equal(pausedOrigin.active, false, "a scratch from pause left the programme DSP active");
+  assert.equal(
+    channelEnergy(pausedOutput[0][0], 0, FRAME_COUNT),
+    0,
+    "a scratch from pause leaked programme audio into the next quantum",
+  );
+
+  globalThis.currentFrame = 0;
+  globalThis.currentTime = 0;
+  const playingOrigin = createProcessor();
+  playingOrigin.handleMessage({ type: "set-effects", acoustic: false, surface: false });
+  warmStablePlayback(playingOrigin, 64);
+  beginScratch(playingOrigin);
+  const resumedOutput = releaseScratch(playingOrigin, true);
+  assert.equal(playingOrigin.playing, true, "a playing scratch did not resume playback");
+  assert.equal(playingOrigin.active, true, "a playing scratch stopped the programme DSP");
+  assert.ok(
+    channelEnergy(resumedOutput[0][0], 0, FRAME_COUNT) > 0.01,
+    "a playing scratch did not resume programme audio in the next quantum",
+  );
+
+  globalThis.currentFrame = 0;
+  globalThis.currentTime = 0;
+  const liftedPlatter = createProcessor();
+  liftedPlatter.handleMessage({ type: "set-effects", acoustic: false, surface: false });
+  warmStablePlayback(liftedPlatter, 64);
+  liftedPlatter.handleMessage({ type: "needle", lifted: true });
+  beginScratch(liftedPlatter);
+  const turnsBeforeRelease = liftedPlatter.dsp.platterRotationTurns;
+  const liftedOutput = releaseScratch(liftedPlatter, false);
+  assert.equal(liftedPlatter.playing, false);
+  assert.equal(liftedPlatter.active, true, "a lifted powered platter stopped on scratch release");
+  assert.equal(channelEnergy(liftedOutput[0][0], 0, FRAME_COUNT), 0);
+  assert.ok(
+    liftedPlatter.dsp.platterRotationTurns > turnsBeforeRelease,
+    "a lifted powered platter did not keep rotating silently",
+  );
+}
+
 function verifyScratchGateVersionReplay() {
   globalThis.currentFrame = 0;
   globalThis.currentTime = 0;
@@ -848,6 +938,7 @@ function benchmark(label, processor, beforeQuantum, afterQuantum) {
 }
 
 verifyEofHandoffs();
+verifyLiveScratchReleasePolicy();
 verifyReplayDurationBoundary();
 verifyScratchGateVersionReplay();
 verifyReplayControlInterruption();

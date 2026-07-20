@@ -3921,7 +3921,16 @@ const api = Object.freeze({
       { type: "scratch-end", positionFrames: state.positionFrames, rate: 0, impulse: 0, grip: 0, resumePlayback: Boolean(resumePlayback), cancelled: Boolean(cancelled) },
       timing.outputFrame,
     );
-    state.node?.port.postMessage({ type: "scratch", active: false, position: state.positionFrames, rate: 0, impulse: 0, grip: 0, ...timing });
+    state.node?.port.postMessage({
+      type: "scratch",
+      active: false,
+      position: state.positionFrames,
+      rate: 0,
+      impulse: 0,
+      grip: 0,
+      resumePlayback: Boolean(resumePlayback),
+      ...timing,
+    });
     return dispatch({ type: "end_scratch", deck: "a", rendered_position_frames: state.positionFrames, rotation_degrees: rotationDegrees, resume_playback: Boolean(resumePlayback), save_sample: false, can_platter_handoff: true, output_frame: timing.outputFrame });
   },
   createScratchRecorder,

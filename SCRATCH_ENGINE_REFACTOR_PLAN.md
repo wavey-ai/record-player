@@ -55,6 +55,12 @@ Current automated evidence:
   variable-grip take hashes to `0d44547b...`; its full-grip control hashes to
   `d3bf7be0...` and must differ. The harness also proves that a version-4 replay
   selects the historical Rust gate behavior and restores live version 5.
+- The release-WASM harness also proves live scratch release policy in the next
+  128-frame quantum. Explicit `resumePlayback: false` and a grab that began
+  while paused produce exact silence and stop programme DSP immediately. A grab
+  that began during playback resumes, while a lifted powered platter keeps
+  rotating silently. Chrome captured all 12 post-release packets as silence,
+  spanning 5,760 contiguous frames.
 - `npm run test:browser`: Chrome 150 loaded real release WASM at 48 kHz.
   It exercised all eight gates in both directions and captured rendered audio.
   It recorded, replayed and restored an engine-version-5 take with more than

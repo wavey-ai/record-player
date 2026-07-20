@@ -72,6 +72,7 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
     this.motorRunning = false;
     this.needleLifted = true;
     this.scratching = false;
+    this.scratchWasPlaying = false;
     this.scratchGrip = 0;
     this.playbackRate = 1;
     this.length = 0;
@@ -135,6 +136,7 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
         this.active = this.motorRunning;
         this.playing = false;
         this.scratching = false;
+        this.scratchWasPlaying = false;
         this.scratchGrip = 0;
         this.waitingForData = false;
         this.windowRequestPending = false;
@@ -262,6 +264,7 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
       case "scratch-transport": {
         const handContact = Boolean(message.handContact);
         if (handContact) this.clearAutomaticSurfaceRegion("scratch-transport");
+        if (handContact && !this.scratching) this.scratchWasPlaying = this.playing;
         const motorRate = this.motorRunning
           ? (Number.isFinite(message.motorRate) ? message.motorRate : this.playbackRate)
           : 0;
@@ -282,6 +285,7 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
         const resetPosition = !handoff || !wasActive;
         this.playbackRate = Number.isFinite(message.rate) ? message.rate : 1;
         this.playing = true;
+        if (!this.scratching) this.scratchWasPlaying = false;
         this.active = true;
         if (resetPosition) {
           this.dsp.start();
@@ -297,6 +301,7 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
         this.playbackEpoch = Math.max(0, Math.floor(Number(message.playbackEpoch) || 0));
         const handoff = Boolean(message.handoff);
         this.playing = false;
+        if (!this.scratching) this.scratchWasPlaying = false;
         if (!handoff) {
           this.clearAutomaticSurfaceRegion("stop");
           this.active = false;
@@ -335,6 +340,7 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
         this.scratching = active;
         this.scratchGrip = grip;
         if (active) {
+          if (!wasScratching) this.scratchWasPlaying = this.playing;
           if (!this.active) {
             this.active = true;
             this.dsp.start();
@@ -345,11 +351,15 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
           this.dsp.setMotion(position, rate, wasScratching ? impulse : Math.max(impulse, 0.22));
           this.ensureWindowForPosition(position);
         } else {
+          const shouldResume = this.scratchWasPlaying && message.resumePlayback !== false;
+          this.scratchWasPlaying = false;
+          this.playing = shouldResume;
           this.dsp.setTransport(false, this.motorRate(), 0, 0);
-          if (!this.playing && !this.motorRunning) {
+          const keepSilentPlatterRunning = !shouldResume && this.needleLifted && this.motorRunning;
+          if (!shouldResume && !keepSilentPlatterRunning) {
             this.active = false;
             this.dsp.stop();
-          } else if (this.motorRunning) {
+          } else {
             this.active = true;
           }
         }
@@ -362,6 +372,7 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
         const rate = Number.isFinite(message.rate) ? message.rate : 0;
         const impulse = Number.isFinite(message.impulse) ? message.impulse : 0;
         const grip = normalizeScratchGrip(message.grip, this.scratching ? this.scratchGrip : 1);
+        if (!this.scratching) this.scratchWasPlaying = this.playing;
         this.scratching = true;
         this.scratchGrip = grip;
         this.active = true;
@@ -581,6 +592,7 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
       playing: this.playing,
       active: this.active,
       scratching: this.scratching,
+      scratchWasPlaying: this.scratchWasPlaying,
       scratchGrip: this.scratchGrip,
       position: this.clampPosition(this.dsp.position),
       nativeRpm: this.dsp.nativeRpm,
@@ -607,6 +619,7 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
       this.active = true;
       this.playing = false;
       this.scratching = false;
+      this.scratchWasPlaying = false;
       this.scratchGrip = 0;
       this.dsp.setNeedleLifted(this.needleLifted);
       this.dsp.setTransport(false, this.motorRate(), 0, 0);
@@ -647,6 +660,7 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
     this.active = true;
     this.playing = false;
     this.scratching = false;
+    this.scratchWasPlaying = false;
     this.scratchGrip = 0;
     if (!preservePlatter) this.dsp.start();
     this.dsp.setNeedleLifted(this.needleLifted);
@@ -715,6 +729,7 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
     this.active = this.motorRunning;
     this.playing = false;
     this.scratching = false;
+    this.scratchWasPlaying = false;
     this.length = 0;
     this.streamLength = 0;
     this.decodedLength = 0;
@@ -1058,6 +1073,7 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
     this.playbackRate = restoreState.playbackRate;
     this.playing = restoreState.playing;
     this.scratching = restoreState.scratching;
+    this.scratchWasPlaying = Boolean(restoreState.scratchWasPlaying);
     this.scratchGrip = normalizeScratchGrip(
       restoreState.scratchGrip,
       this.scratching ? 1 : 0,

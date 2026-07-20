@@ -594,6 +594,7 @@ async function runBrowserScenario() {
     }
   }
 
+  setPhase("scratch-release-stop");
   await player.endScratch({
     rotationDegrees: 0,
     resumePlayback: false,
@@ -602,6 +603,7 @@ async function runBrowserScenario() {
   });
   assert(player.getState().scratchGrip === 0, "The browser did not release scratch grip");
   await wait(120);
+  assert(!player.getState().playing, "resumePlayback false left browser playback running");
   unsubscribe();
   const recordedTake = await player.stopScratchRecording({ save: false });
   assert(recordedTake?.events?.length > 10, "The browser scratch take did not record engine events");
@@ -672,6 +674,16 @@ async function runBrowserScenario() {
   assert(
     Math.abs(continuity.timelineDurationErrorUs) < 5_000,
     `The browser capture timeline differed from its audio duration by ${continuity.timelineDurationErrorUs} us`,
+  );
+  const releaseStop = continuity.phases["scratch-release-stop"];
+  assert(releaseStop?.packets >= 5, "The browser did not capture the scratch release stop window");
+  assert(
+    releaseStop.silentPackets >= releaseStop.packets - 1,
+    `Scratch release leaked ${releaseStop.packets - releaseStop.silentPackets} non-silent packets`,
+  );
+  assert(
+    releaseStop.maximumSilentRunFrames >= loaded.outputSampleRate * 0.08,
+    `Scratch release produced only ${releaseStop.maximumSilentRunFrames} contiguous silent frames`,
   );
   assert(
     continuity.maximumAdjacentTimestampDeviationUs < 20_000,
