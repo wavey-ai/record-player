@@ -1,22 +1,29 @@
 # Playback and Scratch Engine Refactor Plan
 
-Status: automated implementation complete as of 2026-07-20. The original phases
-below are retained as the implementation record from checkpoint `5eccda9`
-(`Checkpoint audio preview and capture support`). Full browser/hardware runs and
-the blind DJ protocol remain outstanding, so no perceptual-indistinguishability
-claim is made.
+Status: automated engine and browser implementation is complete as of
+2026-07-20. The original phases below remain as the implementation record from
+checkpoint `5eccda9` (`Checkpoint audio preview and capture support`). Hardware
+measurements and the blind DJ protocol remain outstanding. No perceptual claim
+is made.
 
 Current automated evidence:
 
-- `cargo test --workspace`: 78 tests (73 `record-player`, 5 `player-wasm`).
+- `cargo test --workspace`: 80 tests (75 `record-player`, 5 `player-wasm`).
 - `node --test test/*.test.mjs`: 22 tests.
 - `npm run build`: both browser WASM packages build in release mode.
 - `npm run bench:worklet`: real release WASM in the deterministic worklet harness;
-  p95 `0.0389 ms` (`1.46%`) normal and `0.2135 ms` (`8.01%`) alternating
-  `±8×` crab/8. A fresh six-second stereo PCM window measured p95 `0.5699 ms`
-  (`21.37%`) and maximum `1.1154 ms` (`41.83%`) against a `2.667 ms` quantum.
-- A real browser audio-thread deadline run, the multi-pointer browser smoke and
-  the human protocol in `DJ_VALIDATION_PROTOCOL.md` are explicitly outstanding.
+  p95 `0.0387 ms` (`1.45%`) normal and `0.2104 ms` (`7.89%`) alternating
+  `±8×` crab/8. A fresh six-second stereo PCM window measured p95 `0.5260 ms`
+  (`19.73%`) and maximum `1.0373 ms` (`38.90%`) against a `2.667 ms` quantum.
+- `npm run test:browser`: Chrome 150 loaded real release WASM at 44.1 kHz.
+  It exercised all eight gates in both directions and captured rendered audio.
+  It recorded, replayed and restored a take with more than 400 events.
+  It kept a trusted record touch active while a second touch moved XFADE.
+- The browser run measured less than `6 ms` maximum pointer-to-apply latency in
+  this synthetic trace. It reported `5.80 ms` base latency and `32 ms` output
+  latency. These are one headless host result, not hardware population data.
+- A deadline/xrun instrumented browser run, physical controller runs and the
+  human protocol in `DJ_VALIDATION_PROTOCOL.md` remain outstanding.
 
 ## Objective and proof standard
 
@@ -166,6 +173,9 @@ Acceptance evidence:
   - Crab: velocity-scaled rapid open pulses.
   - Orbit: symmetric notches reset for each direction.
   - Drum: acceleration/onset transient with travel/time close and retrigger guard.
+- Filter Drum intent on the audio clock before differentiation. This prevents a
+  small held-target step from becoming a sample-rate-dependent false attack.
+- Require Drum onset and reversal attacks to exceed the minimum motion rate.
 - Apply velocity-dependent 0.35–4 ms attack/release envelopes to prevent digital
   discontinuities while retaining a sharp professional cut.
 - Return the technique gate to open on hand release so motor playback cannot remain
@@ -274,10 +284,9 @@ Acceptance evidence:
 
 ## Completion boundary
 
-The checkpoint preserves the pre-refactor work, and implementation was committed
-in reviewable clock/state, mechanics, limiter, replay and formatting slices before
-the integrated browser-host/worklet pass. Automated acceptance is complete for the
-native, pure-JavaScript and real-release-WASM harnesses listed above. The remaining
-deployment claim requires a real browser audio-thread run, the multi-pointer browser
-smoke and the pre-registered DJ protocol; those results must be attached here rather
-than inferred from unit tests.
+The checkpoint preserves the pre-refactor work. Implementation was committed in
+reviewable clock, mechanics, limiter, replay and browser slices. Automated
+acceptance is complete for the native, JavaScript, release-WASM and Chrome
+harnesses listed above. The remaining deployment claim requires instrumented
+deadline evidence on target hardware and the pre-registered DJ protocol. Those
+results must be attached here. They cannot be inferred from automated tests.

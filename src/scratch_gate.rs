@@ -14,6 +14,7 @@ const MIN_LEARNED_SPAN: f64 = 0.04;
 const MAX_LEARNED_SPAN: f64 = 0.80;
 const DRUM_MAX_OPEN_SECONDS: f64 = 0.055;
 const DRUM_OPEN_SPAN_FRACTION: f64 = 0.18;
+const DRUM_ACCELERATION_FILTER_SECONDS: f64 = 0.008;
 const DRUM_ACCELERATION_TRIGGER: f64 = 6.0;
 const DRUM_TRIGGER_MIN_RATE: f64 = 0.14;
 const DRUM_REFRACTORY_SECONDS: f64 = 0.045;
@@ -148,7 +149,9 @@ pub struct ScratchGate {
     phase: f64,
     gate: f64,
     target: f64,
-    last_intent_rate: f64,
+    drum_filtered_intent_rate: f64,
+    drum_filter_delta_seconds: f64,
+    drum_filter_alpha: f64,
     drum_open: bool,
     drum_elapsed: f64,
     drum_travel: f64,
@@ -177,7 +180,9 @@ impl ScratchGate {
             phase: 0.0,
             gate: 1.0,
             target: 1.0,
-            last_intent_rate: 0.0,
+            drum_filtered_intent_rate: 0.0,
+            drum_filter_delta_seconds: 0.0,
+            drum_filter_alpha: 1.0,
             drum_open: false,
             drum_elapsed: 0.0,
             drum_travel: 0.0,
@@ -261,7 +266,6 @@ impl ScratchGate {
         self.drum_refractory += dt;
         if !hand_contact {
             self.release();
-            self.last_intent_rate = intent_rate;
             self.advance_envelope(dt, intent_rate, rendered_rate);
             return self.gate;
         }
@@ -283,14 +287,11 @@ impl ScratchGate {
             self.update_phase();
         }
 
-        let acceleration = if dt > 0.0 {
-            ((intent_rate - self.last_intent_rate) / dt).abs()
-        } else {
-            0.0
-        };
-        self.update_drum(event, dt, rendered_rate, intent_rate, acceleration);
+        if self.preset == ScratchPreset::Drum {
+            let acceleration = self.filter_drum_acceleration(dt, intent_rate);
+            self.update_drum(event, dt, rendered_rate, intent_rate, acceleration);
+        }
         self.target = self.compute_target(intent_rate, rendered_rate);
-        self.last_intent_rate = intent_rate;
         self.advance_envelope(dt, intent_rate, rendered_rate);
         self.gate
     }
@@ -303,7 +304,7 @@ impl ScratchGate {
         self.rest_seconds = 0.0;
         self.stroke_travel = 0.0;
         self.phase = 0.0;
-        self.last_intent_rate = 0.0;
+        self.drum_filtered_intent_rate = 0.0;
         self.drum_open = false;
         self.drum_elapsed = 0.0;
         self.drum_travel = 0.0;
@@ -409,9 +410,11 @@ impl ScratchGate {
         intent_rate: f64,
         acceleration: f64,
     ) {
-        let direction_trigger = matches!(event, MotionEvent::Onset | MotionEvent::Reversal);
+        let speed = intent_rate.abs().max(rendered_rate.abs());
+        let direction_trigger = matches!(event, MotionEvent::Onset | MotionEvent::Reversal)
+            && speed >= DRUM_TRIGGER_MIN_RATE;
         let acceleration_trigger = self.moving
-            && intent_rate.abs().max(rendered_rate.abs()) >= DRUM_TRIGGER_MIN_RATE
+            && speed >= DRUM_TRIGGER_MIN_RATE
             && acceleration >= DRUM_ACCELERATION_TRIGGER
             && self.drum_refractory >= DRUM_REFRACTORY_SECONDS;
         if direction_trigger || acceleration_trigger {
@@ -427,6 +430,23 @@ impl ScratchGate {
                 self.drum_open = false;
             }
         }
+    }
+
+    fn filter_drum_acceleration(&mut self, dt: f64, intent_rate: f64) -> f64 {
+        if dt <= 0.0 {
+            return 0.0;
+        }
+        // Pointer targets are piecewise constant between browser events. A raw
+        // per-sample derivative would turn every target step into an impulse
+        // whose size grows with the output sample rate. This one-pole intent
+        // model gives the step a physical time base before differentiation.
+        if dt != self.drum_filter_delta_seconds {
+            self.drum_filter_delta_seconds = dt;
+            self.drum_filter_alpha = 1.0 - (-dt / DRUM_ACCELERATION_FILTER_SECONDS).exp();
+        }
+        let previous = self.drum_filtered_intent_rate;
+        self.drum_filtered_intent_rate += (intent_rate - previous) * self.drum_filter_alpha;
+        ((self.drum_filtered_intent_rate - previous) / dt).abs()
     }
 
     fn trigger_drum(&mut self) {
@@ -721,6 +741,41 @@ mod tests {
         run(&mut gate, 0.003, true, 1.5, 0.5);
         gate.process(1.0 / SAMPLE_RATE, true, 0.5, 0.5);
         assert_eq!(gate.target(), 1.0);
+    }
+
+    #[test]
+    fn drum_ignores_slow_onsets_and_small_pointer_rate_steps() {
+        let mut slow = ScratchGate::new(ScratchPreset::Drum);
+        settle_direction(&mut slow, 0.05);
+        assert_eq!(slow.target(), 0.0);
+
+        let mut jitter = ScratchGate::new(ScratchPreset::Drum);
+        settle_direction(&mut jitter, 0.5);
+        run(&mut jitter, 0.065, true, 0.5, 0.5);
+        assert_eq!(jitter.target(), 0.0);
+        run(&mut jitter, 0.012, true, 0.51, 0.5);
+        assert_eq!(jitter.target(), 0.0);
+    }
+
+    #[test]
+    fn drum_acceleration_intent_is_sample_rate_invariant() {
+        let trigger_at = |sample_rate: f64| {
+            let mut gate = ScratchGate::new(ScratchPreset::Drum);
+            let run_at_rate = |gate: &mut ScratchGate, seconds: f64, rate: f64| {
+                let frames = (seconds * sample_rate).round() as usize;
+                for _ in 0..frames {
+                    gate.process(1.0 / sample_rate, true, rate, 0.5);
+                }
+            };
+            run_at_rate(&mut gate, 0.070, 0.5);
+            assert_eq!(gate.target(), 0.0);
+            run_at_rate(&mut gate, 0.001, 1.5);
+            gate.target()
+        };
+
+        assert_eq!(trigger_at(44_100.0), 1.0);
+        assert_eq!(trigger_at(48_000.0), 1.0);
+        assert_eq!(trigger_at(96_000.0), 1.0);
     }
 
     #[test]

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  SCRATCH_GATE_ALGORITHM_VERSION,
   SCRATCH_PRESET_DEFAULT_CLICKS,
   normalizeScratchClicks,
   normalizeScratchPerformance,
@@ -65,6 +66,8 @@ test("schema v2 preserves equal-frame ordering and normalizes controls", () => {
   assert.equal(normalized.initialState.clicks, 8);
   assert.equal(normalized.initialState.highFrequencyAccelerationLimit, 1);
   assert.equal(normalized.initialState.stylusTracingLimit, 0);
+  assert.equal(SCRATCH_GATE_ALGORITHM_VERSION, 2);
+  assert.equal(normalized.engine.gateAlgorithmVersion, 2);
 });
 
 test("preset and click normalization is bounded", () => {

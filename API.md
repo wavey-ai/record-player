@@ -104,7 +104,7 @@ player starts on `baby`/1 click.
 | `flare` | 1 | Open phrase with short closed notches. |
 | `crab` | 4 | Rapid travel-locked open pulses. |
 | `orbit` | 2 | Symmetric flare-style notches in both directions. |
-| `drum` | 1 | Short onset, reversal and acceleration attacks. |
+| `drum` | 1 | Short velocity-qualified onset, reversal and acceleration attacks. |
 
 The gate is evaluated for every output frame in Rust. Filtered hand intent
 drives responsive direction decisions, while audible rendered travel drives
@@ -454,7 +454,7 @@ coordinates and rendered audio are not stored. Schema v2 separates its clocks:
   sourceSampleRate: 48000,
   outputSampleRate: 48000,
   durationFrames,
-  engine: { gateAlgorithmVersion: 1 },
+  engine: { gateAlgorithmVersion: 2 },
   initialState: {
     positionFrames,
     preset: "flare",
@@ -700,11 +700,11 @@ The decoder and tape/cache paths use `player-wasm` for record/ECDC parsing and
 the required cache encryption helpers; the real-time AudioWorklet does not
 import that crate.
 
-The current real-WASM timing smoke measured p95 render calls of `0.0389 ms`
-(`1.46%` of budget) for normal playback and `0.2135 ms` (`8.01%`) for
+The current real-WASM timing smoke measured p95 render calls of `0.0387 ms`
+(`1.45%` of budget) for normal playback and `0.2104 ms` (`7.89%`) for
 alternating `±8×` `crab`/8-click scratching. Applying a fresh six-second stereo
-PCM window measured p95 `0.5699 ms` (`21.37%`) and maximum `1.1154 ms`
-(`41.83%`). For comparison, a 128-frame quantum at 48 kHz lasts `2.667 ms`.
+PCM window measured p95 `0.5260 ms` (`19.73%`) and maximum `1.0373 ms`
+(`38.90%`). For comparison, a 128-frame quantum at 48 kHz lasts `2.667 ms`.
 Those measurements cover engine timing, not subjective feel or sound quality.
 
 Run `npm run bench:worklet` to rebuild release WASM before timing it. The figures
@@ -713,6 +713,10 @@ run. This is a deterministic Node harness with real release WASM and a mocked
 `AudioWorkletProcessor`, with render p95 guarded below 50% and PCM-window p95
 and maximum guarded below one full quantum; it is not a browser audio-thread
 deadline measurement.
+
+Run `npm run test:browser` for the real Chrome AudioWorklet smoke. It loads a
+synthetic source, exercises all presets in both directions, captures output,
+replays and restores a take, and injects independent record and XFADE touches.
 
 ## Progressive startup
 

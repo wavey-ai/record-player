@@ -211,10 +211,10 @@ cost: engine policy defaults to Rust unless the browser boundary would add work
 or latency.
 
 In the current real-WASM timing smoke benchmark, p95 render-call time was
-`0.0389 ms` (`1.46%` of budget) for normal playback and `0.2135 ms` (`8.01%`)
+`0.0387 ms` (`1.45%` of budget) for normal playback and `0.2104 ms` (`7.89%`)
 for alternating `±8×` scratching with `crab`/8 clicks. Applying a fresh
-six-second stereo PCM window measured p95 `0.5699 ms` (`21.37%`) and maximum
-`1.1154 ms` (`41.83%`). A 128-frame quantum at 48 kHz is `2.667 ms`. These are
+six-second stereo PCM window measured p95 `0.5260 ms` (`19.73%`) and maximum
+`1.0373 ms` (`38.90%`). A 128-frame quantum at 48 kHz is `2.667 ms`. These are
 engine timing measurements, not perceptual-validation results.
 
 `npm run bench:worklet` first rebuilds release WASM, then runs the deterministic
@@ -455,7 +455,7 @@ The essential shape is:
   sourceSampleRate: 48000,
   outputSampleRate: 48000,
   durationFrames,
-  engine: { gateAlgorithmVersion: 1 },
+  engine: { gateAlgorithmVersion: 2 },
   initialState: {
     positionFrames,
     preset: "flare",
@@ -658,7 +658,7 @@ Both feed the same damped rate spring:
 | `RATE_SPRING_ZETA` | `0.85` | Slightly underdamped response for a small reversal snap. |
 | `MOTOR_SPINUP_SECONDS` | `0.30 s` | Motor delivery ramp from rest. |
 | `MOTOR_BRAKE_SECONDS` | `0.32 s` | Motor delivery ramp toward zero. |
-| `GRIP_ATTACK_SECONDS` | `0.10 s` | Hand ownership fade-in. |
+| `GRIP_ATTACK_SECONDS` | `0.012 s` | Fast hand ownership for a deliberate grab. |
 | `GRIP_RELEASE_SECONDS` | `0.045 s` | Hand ownership release. |
 | `POSITION_CATCHUP_SECONDS` | `0.28 s` | Gentle position-error correction while scratching. |
 | `STILL_SNAP_SECONDS` | `0.03 s` | Collapses residual target error when the hand becomes still. |
@@ -761,7 +761,7 @@ The eight profiles and their click defaults are:
 | `flare` | 1 | An open phrase with short closed notches. |
 | `crab` | 4 | Rapid travel-locked open pulses. |
 | `orbit` | 2 | Symmetric flare-style notches in both directions. |
-| `drum` | 1 | Short onset, reversal and high-acceleration attacks. |
+| `drum` | 1 | Short velocity-qualified onset, reversal and high-acceleration attacks. |
 
 Click counts are integer-clamped to `1..8`. Selecting a preset restores that
 preset's default click count; a later click-count change adjusts the pattern
@@ -878,6 +878,11 @@ blind listening, control-task and free-performance procedure is defined in
 [`DJ_VALIDATION_PROTOCOL.md`](./DJ_VALIDATION_PROTOCOL.md), including hardware,
 level matching, failure reporting and acceptance criteria.
 
+The current engineering gap audit is in
+[`REFERENCE_ENGINE_GAP_AUDIT.md`](./REFERENCE_ENGINE_GAP_AUDIT.md). It compares
+this engine with `../yl.vin/apps/play` and separates deliberate improvements
+from remaining proof work.
+
 ## Rust API
 
 The main crate exports the transport types plus:
@@ -900,6 +905,12 @@ The root crate can be tested natively:
 
 ```bash
 cargo test
+```
+
+Run the real Chrome AudioWorklet and two-touch smoke test with:
+
+```bash
+npm run test:browser
 ```
 
 Build the complete browser application through `scripts/build.mjs`. It supplies the `wasm` feature and correct output names.

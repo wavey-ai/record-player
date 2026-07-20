@@ -1,5 +1,13 @@
 # Acoustic Migration Audit
 
+Status: historical migration record.
+
+This file describes the first acoustic port. Later work changed grip response,
+lead-in behavior, resampling, gate timing, gain ownership and browser evidence.
+Do not use the status cells below as the current release verdict. Use
+[`REFERENCE_ENGINE_GAP_AUDIT.md`](./REFERENCE_ENGINE_GAP_AUDIT.md) for the
+current source comparison.
+
 Source of truth: `../yl.vin/apps/play` (inspected directly — not READMEs or prior notes).
 Destination: this repository — Rust engine (`src/acoustic.rs`, `src/engine.rs`) + worklet
 (`web/player-worklet.js`) + host (`web/player-host.js`).
