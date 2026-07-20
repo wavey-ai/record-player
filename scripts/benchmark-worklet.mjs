@@ -12,6 +12,8 @@ const MEASURED_ITERATIONS = 5_000;
 const WINDOW_APPLY_WARMUP_ITERATIONS = 16;
 const WINDOW_APPLY_MEASURED_ITERATIONS = 128;
 const REGRESSION_BUDGET_FRACTION = 0.5;
+const WINDOW_APPLY_P95_BUDGET_FRACTION = 0.25;
+const WINDOW_APPLY_MAX_BUDGET_FRACTION = 0.5;
 const QUANTUM_BUDGET_MS = FRAME_COUNT / SAMPLE_RATE * 1_000;
 const WINDOW_CENTER = WINDOW_FRAMES / 2;
 
@@ -187,20 +189,34 @@ function benchmarkFreshWindowApplication() {
     assert.ok(Number.isFinite(value), `fresh PCM window application produced a non-finite ${name}`);
   }
   assert.ok(
-    result.p95Ms < QUANTUM_BUDGET_MS,
-    `fresh 6-second stereo PCM window p95 ${result.p95Ms.toFixed(4)} ms exceeded the ${(
-      QUANTUM_BUDGET_MS
-    ).toFixed(4)} ms quantum budget`,
+    result.p95Ms < QUANTUM_BUDGET_MS * WINDOW_APPLY_P95_BUDGET_FRACTION,
+    `fresh 6-second stereo PCM window p95 ${result.p95Ms.toFixed(4)} ms exceeded ${(
+      WINDOW_APPLY_P95_BUDGET_FRACTION * 100
+    ).toFixed(0)}% of the quantum budget`,
   );
   assert.ok(
-    result.maxMs < QUANTUM_BUDGET_MS,
-    `fresh 6-second stereo PCM window max ${result.maxMs.toFixed(4)} ms exceeded the ${(
-      QUANTUM_BUDGET_MS
-    ).toFixed(4)} ms quantum budget`,
+    result.maxMs < QUANTUM_BUDGET_MS * WINDOW_APPLY_MAX_BUDGET_FRACTION,
+    `fresh 6-second stereo PCM window max ${result.maxMs.toFixed(4)} ms exceeded ${(
+      WINDOW_APPLY_MAX_BUDGET_FRACTION * 100
+    ).toFixed(0)}% of the quantum budget`,
   );
   const applied = processor.port.messages.at(-1);
   assert.equal(applied?.type, "window-applied");
   assert.equal(applied?.applied, true);
+  processor.handleMessage({ type: "stream-complete" });
+  processor.handleMessage({ type: "set-effects", acoustic: false, surface: false });
+  processor.handleMessage({ type: "needle", lifted: false });
+  processor.handleMessage({ type: "transport", running: true });
+  processor.handleMessage({
+    type: "play",
+    position: WINDOW_CENTER,
+    rate: 1,
+    handoff: true,
+  });
+  const copiedOutput = createOutput();
+  for (let iteration = 0; iteration < 32; iteration += 1) renderQuantum(processor, copiedOutput);
+  assert.ok(channelEnergy(copiedOutput[0][0], 0, FRAME_COUNT) > 0.1, "left PCM copy rendered silence");
+  assert.ok(channelEnergy(copiedOutput[0][1], 0, FRAME_COUNT) > 0.1, "right PCM copy rendered silence");
   return result;
 }
 

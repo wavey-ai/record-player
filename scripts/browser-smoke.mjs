@@ -492,6 +492,20 @@ async function runBrowserScenario() {
     steadyContinuity.maximumSilentRunFrames <= loaded.outputSampleRate * 0.02,
     `Steady playback had ${steadyContinuity.maximumSilentRunFrames} consecutive silent frames`,
   );
+  const audioPlaybackStats = player.getState().audioPlaybackStats;
+  assert(audioPlaybackStats?.supported, "Chrome did not expose AudioContext playback statistics");
+  assert(
+    audioPlaybackStats.totalDurationMs > 1_000,
+    `Chrome reported only ${audioPlaybackStats.totalDurationMs} ms of observed audio`,
+  );
+  assert(
+    audioPlaybackStats.underrunEvents === 0,
+    `Chrome reported ${audioPlaybackStats.underrunEvents} audio underrun events`,
+  );
+  assert(
+    audioPlaybackStats.underrunDurationMs === 0,
+    `Chrome reported ${audioPlaybackStats.underrunDurationMs} ms of audio underruns`,
+  );
 
   return {
     chrome: navigator.userAgent,
@@ -500,6 +514,7 @@ async function runBrowserScenario() {
     outputSampleRate: loaded.outputSampleRate,
     audioBaseLatencyMs: player.getState().audioBaseLatencyMs,
     audioOutputLatencyMs: player.getState().audioOutputLatencyMs,
+    audioPlaybackStats,
     maximumPointerToAudioLatencyMs: maximumLatencyMs,
     captureBytes,
     continuity,

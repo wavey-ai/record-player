@@ -1,4 +1,5 @@
 import { createLogger, setPlayerLoggingEnabled, isPlayerLoggingEnabled, isPlayerVerboseLoggingEnabled, setPlayerLogLevel, getPlayerLogLevel, setPlayerTelemetryInterval } from "./player-message-logger.js";
+import { readAudioPlaybackStats } from "./audio-playback-stats.js";
 import { createVinylPlayerCanvas } from "./player-canvas.js";
 import { RecordDecoderClient } from "./record-decoder-client.js";
 import { createPcmChunkCacheHandler, recordCacheKey } from "./pcm-cache.js";
@@ -3392,6 +3393,7 @@ function currentDeadwaxProgress() {
 
 function publicState() {
   const view = deckView();
+  const audioPlaybackStats = readAudioPlaybackStats(state.context);
   return Object.freeze({
     ready: Boolean(view?.loaded),
     playing: Boolean(view?.playing),
@@ -3433,6 +3435,7 @@ function publicState() {
     audioOutputLatencyMs: Number.isFinite(state.context?.outputLatency)
       ? state.context.outputLatency * 1000
       : null,
+    audioPlaybackStats,
     recordProfile: elements.metaProfile?.textContent || "",
     payloadContainer: elements.metaContainer?.textContent || "",
     releaseId: elements.metaRelease?.textContent || "",

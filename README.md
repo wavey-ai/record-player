@@ -202,24 +202,25 @@ In practice:
 The performance boundary is deliberate. All per-sample DSP and the
 state-critical transport, scratch, gate, final packet/mixer gain, fader-replay
 and acoustic models run in Rust/WASM. `player-worklet.js` remains the output-frame scheduler,
-bounded-window coordinator and required interleaved-WASM-to-planar-Web-Audio
-copy layer. Gesture tracking and UI remain in JavaScript because they consume
-browser pointer APIs; signed-16-bit PCM retention, seam repair and bounded
-Float32 bank assembly remain in a JavaScript worker to avoid moving a whole
-record across the WASM boundary. Language placement follows measured real-time
-cost: engine policy defaults to Rust unless the browser boundary would add work
-or latency.
+bounded-window coordinator, direct bank-to-prepared-Rust copy path and required
+interleaved-WASM-to-planar-Web-Audio output layer. Gesture tracking and UI
+remain in JavaScript because they consume browser pointer APIs; signed-16-bit
+PCM retention, seam repair and bounded Float32 bank assembly remain in a
+JavaScript worker to avoid moving a whole record across the WASM boundary.
+Language placement follows measured real-time cost: engine policy defaults to
+Rust unless the browser boundary would add work or latency.
 
 In the current real-WASM timing smoke benchmark, p95 render-call time was
-`0.0387 ms` (`1.45%` of budget) for normal playback and `0.2102 ms` (`7.88%`)
+`0.0389 ms` (`1.46%` of budget) for normal playback and `0.2100 ms` (`7.87%`)
 for alternating `±8×` scratching with `crab`/8 clicks. Applying a fresh
-six-second stereo PCM window measured p95 `0.6670 ms` (`25.01%`) and maximum
-`1.4212 ms` (`53.30%`). A 128-frame quantum at 48 kHz is `2.667 ms`. These are
+six-second stereo PCM window measured p95 `0.0740 ms` (`2.77%`) and maximum
+`0.2569 ms` (`9.63%`). A 128-frame quantum at 48 kHz is `2.667 ms`. These are
 engine timing measurements, not perceptual-validation results.
 
 `npm run bench:worklet` first rebuilds release WASM, then runs the deterministic
 Node worklet harness and enforces a render p95 gate below 50% of the 128-frame
-budget plus p95 and maximum full-quantum gates for PCM-window application.
+budget. Fresh-window p95 must stay below 25%, and its maximum must stay below
+50% of a quantum.
 The figures above are a representative 2026-07-20 run on Apple Silicon macOS
 26.5 with Node 26.3.0. The harness uses real release WASM and a mocked
 `AudioWorkletProcessor`; it is a regression smoke test, not a browser audio-thread
@@ -233,9 +234,10 @@ callback reaches its full deadline. It also transfers captured audio packets to
 a dedicated worker and checks monotonic timestamps, cumulative timeline
 continuity and unintended silence during steady playback. Repeated 2026-07-20
 headless Chrome 150 runs had a worst sampled callback of `62.66%`; the three-run
-stress batch had a worst run-level p95 of `10.65%`. These results cover the real
-browser AudioWorklet and release WASM, but they do not replace physical
-output-device xrun tests.
+stress batch had a worst run-level p95 of `10.65%`. A later three-run device
+statistics batch reported zero underrun events and zero underrun duration over
+`12.05–13.05 s` per run. These results cover the real browser AudioWorklet and
+release WASM, but they do not replace physical output-device xrun tests.
 
 ## Architecture
 
@@ -417,6 +419,7 @@ const unsubscribe = player.subscribe(state => {
     pointerToAudioLatencyMs: state.pointerToAudioLatencyMs,
     audioBaseLatencyMs: state.audioBaseLatencyMs,
     audioOutputLatencyMs: state.audioOutputLatencyMs,
+    audioPlaybackStats: state.audioPlaybackStats,
     recordProfile: state.recordProfile,
     payloadContainer: state.payloadContainer,
     releaseId: state.releaseId,
@@ -444,6 +447,25 @@ wall-clock-derived. The latency fields are telemetry snapshots and may be
 measurement. During a published record ending, `deadwaxProgress` reaches `1`
 after the two-turn traversal while `deadwaxActive` remains true for the
 persistent lock.
+
+`audioPlaybackStats` normalizes Chromium's current `playbackStats` and legacy
+`playoutStats` APIs. Its stable shape is:
+
+```js
+{
+  supported: true,
+  api: "playbackStats",
+  underrunEvents: 0,
+  underrunDurationMs: 0,
+  totalDurationMs: 12046.202,
+  averageLatencyMs: 35.019,
+  minimumLatencyMs: 0,
+  maximumLatencyMs: 35.054
+}
+```
+
+Unsupported browsers return `supported: false` and `null` measurements. Do not
+interpret missing statistics as zero underruns.
 
 ## Scratch performances
 

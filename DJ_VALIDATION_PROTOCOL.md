@@ -28,6 +28,9 @@ been completed and its raw results retained.
 - Record browser, OS, input device, display sampling rate, AudioContext sample
   rate, `baseLatency`, `outputLatency` (where exposed), interface buffer and the
   measured pointer-to-output latency distribution.
+- Record `audioPlaybackStats` before and after each block. Require supported
+  device statistics, zero `underrunEvents` and zero `underrunDurationMs`. Keep
+  total duration and latency fields with the raw session data.
 - Keep an unprocessed master, the physical capture, the player capture, movement
   traces and randomized trial manifest under content hashes.
 - Pin every candidate manifest to the shipped Rust settings: programme HF
@@ -67,9 +70,9 @@ measurement capture covering:
    confirmation that programme limiting does not duck lows/mids or surface foley.
 
 Reject the candidate before listening if it clips unexpectedly, reads undecoded
-zeros, loses a pointer, changes timing with pointer event rate, leaves the gate
-closed after release, or produces a discontinuity above the declared de-click
-bound.
+zeros, reports an audio underrun, loses a pointer, changes timing with pointer
+event rate, leaves the gate closed after release, or produces a discontinuity
+above the declared de-click bound.
 
 ## Double-blind listening test
 

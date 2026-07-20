@@ -548,16 +548,77 @@ impl ScratchAcousticDsp {
             ));
         };
 
+        self.prepare_window(channel_count as u32, length as u32)?;
+        for (channel_index, value) in channels.iter().enumerate() {
+            let typed = Float32Array::new(&value);
+            typed.copy_to(&mut self.channels[channel_index]);
+        }
+        self.commit_window(
+            source_sample_rate,
+            window_start,
+            total_frames,
+            reset_position,
+        )
+    }
+
+    /// Prepares stable Rust-owned channel storage for a direct AudioWorklet
+    /// copy. This removes the wasm-bindgen Array traversal from the realtime
+    /// window replacement path while retaining Rust ownership of source PCM.
+    #[wasm_bindgen(js_name = prepareWindow)]
+    pub fn prepare_window(&mut self, channel_count: u32, length: u32) -> Result<(), JsValue> {
+        let channel_count = channel_count as usize;
+        let length = length as usize;
+        if !(1..=2).contains(&channel_count) {
+            return Err(JsValue::from_str("window channelCount must be 1 or 2"));
+        }
+        if length == 0 {
+            return Err(JsValue::from_str("window length must be positive"));
+        }
+
         // Window swaps are realtime control work. Reuse the active channel
         // allocations when geometry is stable so a normal progressive swap is
         // one bounded copy per channel rather than allocation + copy + drop.
         self.channels.resize_with(channel_count, Vec::new);
-        for (channel_index, value) in channels.iter().enumerate() {
-            let typed = Float32Array::new(&value);
-            let destination = &mut self.channels[channel_index];
-            destination.resize(length, 0.0);
-            typed.copy_to(destination);
+        for channel in &mut self.channels {
+            channel.resize(length, 0.0);
         }
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = windowChannelPtr)]
+    pub fn window_channel_ptr(&mut self, channel_index: u32) -> *mut f32 {
+        self.channels
+            .get_mut(channel_index as usize)
+            .map_or(std::ptr::null_mut(), |channel| channel.as_mut_ptr())
+    }
+
+    /// Publishes a fully copied prepared window. No allocation occurs on the
+    /// successful path.
+    #[wasm_bindgen(js_name = commitWindow)]
+    pub fn commit_window(
+        &mut self,
+        source_sample_rate: f64,
+        window_start: u32,
+        total_frames: u32,
+        reset_position: Option<f64>,
+    ) -> Result<(), JsValue> {
+        if !source_sample_rate.is_finite() || source_sample_rate <= 0.0 {
+            return Err(JsValue::from_str("sourceSampleRate must be positive"));
+        }
+        let Some(length) = self
+            .channels
+            .first()
+            .map(Vec::len)
+            .filter(|length| *length > 0)
+        else {
+            return Err(JsValue::from_str("window has not been prepared"));
+        };
+        if self.channels.iter().any(|channel| channel.len() != length) {
+            return Err(JsValue::from_str(
+                "prepared window channels must have equal lengths",
+            ));
+        }
+
         self.source_sample_rate = source_sample_rate;
         self.window_start = window_start as usize;
         self.window_end = self.window_start.saturating_add(length);
@@ -2093,6 +2154,29 @@ mod tests {
         dsp.rate = rate;
         dsp.rate_velocity = 0.0;
         dsp
+    }
+
+    #[test]
+    fn prepared_window_reuses_rust_channel_allocations() {
+        const WINDOW_FRAMES: usize = 48_000 * 6;
+        let mut dsp = ScratchAcousticDsp::new_internal(48_000.0, AcousticConfig::default());
+        dsp.prepare_window(2, WINDOW_FRAMES as u32).unwrap();
+        let first_pointers = [dsp.channels[0].as_ptr(), dsp.channels[1].as_ptr()];
+        dsp.channels[0][17] = 0.25;
+        dsp.channels[1][17] = -0.25;
+        dsp.commit_window(48_000.0, 500, 2_000_000, Some(144_000.0))
+            .unwrap();
+
+        assert_eq!(dsp.window_start, 500);
+        assert_eq!(dsp.window_end, 500 + WINDOW_FRAMES);
+        assert_eq!(dsp.total_frames, 2_000_000);
+        assert_eq!(dsp.position, 144_000.0);
+
+        dsp.prepare_window(2, WINDOW_FRAMES as u32).unwrap();
+        assert_eq!(dsp.channels[0].as_ptr(), first_pointers[0]);
+        assert_eq!(dsp.channels[1].as_ptr(), first_pointers[1]);
+        assert_eq!(dsp.channels[0][17], 0.25);
+        assert_eq!(dsp.channels[1][17], -0.25);
     }
 
     #[test]

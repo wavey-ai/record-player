@@ -174,6 +174,7 @@ const unsubscribe = player.subscribe(state => {
   state.pointerToAudioLatencyMs;
   state.audioBaseLatencyMs;
   state.audioOutputLatencyMs;
+  state.audioPlaybackStats;
   state.sampleRate;
   state.outputSampleRate;
   state.cleanEnd;
@@ -198,6 +199,12 @@ progress are travel-derived values; the worklet publishes snapshots rather than
 calling JavaScript once per audio frame. Browser/command latency values can be
 `null` until measurable. `deadwaxProgress` reaches `1` at the end of the
 two-turn traversal; `deadwaxActive` stays true during the persistent lock.
+
+`audioPlaybackStats` has `supported`, `api`, `underrunEvents`,
+`underrunDurationMs`, `totalDurationMs`, `averageLatencyMs`, `minimumLatencyMs`
+and `maximumLatencyMs`. It normalizes Chromium's current `playbackStats` and
+legacy `playoutStats` units. When `supported` is false, all measurements are
+`null`; unavailable statistics never masquerade as zero underruns.
 
 ## Cache handler
 
@@ -689,34 +696,35 @@ module and passes that compiled module into the worklet.
 All per-sample DSP and the state-critical transport, scratch, gate, final
 packet/mixer gain, replay-fader and acoustic models are inside `record-player` Rust/WASM. The
 AudioWorklet JavaScript owns output-frame scheduling, bounded-window
-coordination and the required interleaved-WASM-to-planar-Web-Audio copy.
-Gesture/UI code stays in JavaScript for direct browser pointer access; the
-off-thread PCM worker retains signed-16-bit source data and repairs and assembles
-banks there to avoid whole-record WASM crossings. Engine policy defaults to Rust
-unless measurement shows that crossing the browser boundary would add work or
-latency.
+coordination, direct bank-to-prepared-Rust copies and the required
+interleaved-WASM-to-planar-Web-Audio output copy. Gesture/UI code stays in
+JavaScript for direct browser pointer access; the off-thread PCM worker retains
+signed-16-bit source data and repairs and assembles banks there to avoid
+whole-record WASM crossings. Engine policy defaults to Rust unless measurement
+shows that crossing the browser boundary would add work or latency.
 
 The decoder and tape/cache paths use `player-wasm` for record/ECDC parsing and
 the required cache encryption helpers; the real-time AudioWorklet does not
 import that crate.
 
-The current real-WASM timing smoke measured p95 render calls of `0.0387 ms`
-(`1.45%` of budget) for normal playback and `0.2104 ms` (`7.89%`) for
+The current real-WASM timing smoke measured p95 render calls of `0.0389 ms`
+(`1.46%` of budget) for normal playback and `0.2100 ms` (`7.87%`) for
 alternating `±8×` `crab`/8-click scratching. Applying a fresh six-second stereo
-PCM window measured p95 `0.5260 ms` (`19.73%`) and maximum `1.0373 ms`
-(`38.90%`). For comparison, a 128-frame quantum at 48 kHz lasts `2.667 ms`.
+PCM window measured p95 `0.0740 ms` (`2.77%`) and maximum `0.2569 ms`
+(`9.63%`). For comparison, a 128-frame quantum at 48 kHz lasts `2.667 ms`.
 Those measurements cover engine timing, not subjective feel or sound quality.
 
 Run `npm run bench:worklet` to rebuild release WASM before timing it. The figures
 above are a representative 2026-07-20 Apple Silicon macOS 26.5 / Node 26.3.0
 run. This is a deterministic Node harness with real release WASM and a mocked
-`AudioWorkletProcessor`, with render p95 guarded below 50% and PCM-window p95
-and maximum guarded below one full quantum; it is not a browser audio-thread
-deadline measurement.
+`AudioWorkletProcessor`, with render p95 guarded below 50%, PCM-window p95 below
+25%, and PCM-window maximum below 50% of one quantum. It is not a browser
+audio-thread deadline measurement.
 
 Run `npm run test:browser` for the real Chrome AudioWorklet smoke. It loads a
 synthetic source, exercises all presets in both directions, captures output,
-replays and restores a take, and injects independent record and XFADE touches.
+replays and restores a take, injects independent record and XFADE touches, and
+fails on any browser-reported audio underrun.
 
 ## Progressive startup
 

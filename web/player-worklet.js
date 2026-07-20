@@ -818,7 +818,13 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
         ? message.sampleRate
         : this.sourceSampleRate;
 
-      this.dsp.setWindow(channels, sourceRate, start, totalFrames, resetPosition);
+      this.dsp.prepareWindow(channels.length, length);
+      for (let channelIndex = 0; channelIndex < channels.length; channelIndex += 1) {
+        const pointer = this.dsp.windowChannelPtr(channelIndex);
+        if (!pointer) throw new Error(`Rust PCM window channel ${channelIndex} has no storage`);
+        new Float32Array(wasm.memory.buffer, pointer, length).set(channels[channelIndex]);
+      }
+      this.dsp.commitWindow(sourceRate, start, totalFrames, resetPosition);
       this.dsp.setNeedleLifted(this.needleLifted);
       this.sourceSampleRate = sourceRate;
       this.streamLength = totalFrames;

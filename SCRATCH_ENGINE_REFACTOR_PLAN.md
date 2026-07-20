@@ -8,13 +8,13 @@ is made.
 
 Current automated evidence:
 
-- `cargo test --workspace`: 80 tests (75 `record-player`, 5 `player-wasm`).
-- `node --test test/*.test.mjs`: 22 tests.
+- `cargo test --workspace`: 81 tests (76 `record-player`, 5 `player-wasm`).
+- `node --test test/*.test.mjs`: 26 tests.
 - `npm run build`: both browser WASM packages build in release mode.
 - `npm run bench:worklet`: real release WASM in the deterministic worklet harness;
-  p95 `0.0387 ms` (`1.45%`) normal and `0.2102 ms` (`7.88%`) alternating
-  `±8×` crab/8. A fresh six-second stereo PCM window measured p95 `0.6670 ms`
-  (`25.01%`) and maximum `1.4212 ms` (`53.30%`) against a `2.667 ms` quantum.
+  p95 `0.0389 ms` (`1.46%`) normal and `0.2100 ms` (`7.87%`) alternating
+  `±8×` crab/8. A fresh six-second stereo PCM window measured p95 `0.0740 ms`
+  (`2.77%`) and maximum `0.2569 ms` (`9.63%`) against a `2.667 ms` quantum.
 - `npm run test:browser`: Chrome 150 loaded real release WASM at 44.1 kHz.
   It exercised all eight gates in both directions and captured rendered audio.
   It recorded, replayed and restored a take with more than 400 events.
@@ -29,6 +29,10 @@ Current automated evidence:
   below `50%` and every sampled callback below `100%`. Capture timestamps stayed
   monotonic, cumulative timeline error stayed within `3.18 ms` over about
   `12.7 s`, and steady playback had no silent packet.
+- The public state normalizes current `AudioContext.playbackStats` and legacy
+  `playoutStats`. Three current Chrome runs observed `12.05–13.05 s` with zero
+  underrun events and zero underrun duration. Target hardware must repeat this
+  result.
 - Physical output-device xrun measurements, physical controller runs and the
   human protocol in `DJ_VALIDATION_PROTOCOL.md` remain outstanding.
 
