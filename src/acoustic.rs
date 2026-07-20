@@ -714,7 +714,17 @@ impl ScratchAcousticDsp {
         self.total_frames = 0;
         self.window_start = 0;
         self.window_end = 0;
-        self.reset_position(0.0);
+        // Loading a new groove clears the read head, not the physical platter.
+        // Keep motor velocity and absolute phase continuous while the next PCM
+        // window becomes available.
+        self.position = 0.0;
+        self.target_position = 0.0;
+        self.target_rate = 0.0;
+        self.frames_since_motion = 0;
+        self.last_output_samples.clear();
+        self.high_frequency_acceleration_limiter.reset();
+        self.window_miss_frames = 0;
+        self.ended = false;
     }
 
     #[wasm_bindgen(js_name = start)]
@@ -1788,9 +1798,12 @@ impl ScratchAcousticDsp {
         }
     }
 
-    /// Replay-only deck fader. The live host keeps its normal manual fader in
-    /// WebAudio; this post-gate gain exists for sample-accurate event replay.
+    /// The manual deck fader is authoritative only in the `baby` mode. Every
+    /// automatic technique owns the audible fader through its audio-rate gate.
     fn apply_manual_fader_gain(&mut self) {
+        if self.scratch_gate.preset() != ScratchPreset::Baby {
+            return;
+        }
         if self.manual_fader_gain == 1.0 {
             return;
         }
@@ -2844,6 +2857,44 @@ mod tests {
             crate::PlayerConfig::default().sharp_crossfader_width,
             DEFAULT_SHARP_CROSSFADER_WIDTH,
         );
+    }
+
+    #[test]
+    fn automatic_preset_owns_the_real_fader_while_baby_uses_manual_control() {
+        let mut baby = simulation_dsp();
+        baby.output = vec![0.8, -0.4];
+        baby.set_manual_fader_gain(0.0).unwrap();
+        baby.apply_manual_fader_gain();
+        assert_eq!(baby.output, vec![0.0, -0.0]);
+
+        let mut automatic = simulation_dsp();
+        automatic.set_scratch_preset("stab").unwrap();
+        automatic.output = vec![0.8, -0.4];
+        automatic.scratch_gate_trace = vec![0.25];
+        automatic.apply_scratch_gate_trace(1, 2);
+        automatic.set_manual_fader_gain(0.0).unwrap();
+        automatic.apply_manual_fader_gain();
+        assert_eq!(automatic.output, vec![0.2, -0.1]);
+    }
+
+    #[test]
+    fn clearing_media_preserves_live_platter_velocity_and_phase() {
+        let mut dsp = simulation_dsp();
+        dsp.motor_delivered_rate = 0.82;
+        dsp.rate = 0.79;
+        dsp.rate_velocity = 0.03;
+        dsp.last_effective_rate = 0.8;
+        dsp.platter_rotation_turns = 17.25;
+
+        dsp.clear_window();
+
+        assert_eq!(dsp.motor_delivered_rate, 0.82);
+        assert_eq!(dsp.rate, 0.79);
+        assert_eq!(dsp.rate_velocity, 0.03);
+        assert_eq!(dsp.last_effective_rate, 0.8);
+        assert_eq!(dsp.platter_rotation_turns, 17.25);
+        assert_eq!(dsp.position, 0.0);
+        assert_eq!(dsp.target_position, 0.0);
     }
 
     #[test]

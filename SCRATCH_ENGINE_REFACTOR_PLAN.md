@@ -8,8 +8,8 @@ is made.
 
 Current automated evidence:
 
-- `cargo test --workspace`: 92 tests (87 `record-player`, 5 `player-wasm`).
-- `node --test test/*.test.mjs`: 79 tests. Canvas tests check audio-owned phase
+- `cargo test --workspace`: 95 tests (90 `record-player`, 5 `player-wasm`).
+- `node --test test/*.test.mjs`: 80 tests. Canvas tests check audio-owned phase
   at half-speed forward, full-speed reverse and rest, plus all eight preset and
   click-count selections through independent mouse and touch gestures.
 - The default tonearm now consumes decoded programme-gap anchors through the
@@ -20,9 +20,16 @@ Current automated evidence:
   platter and its separate single-turn, event-rate-dependent differentiator
   were removed, so every bundled gesture uses the canonical tracker.
 - `npm run build`: both browser WASM packages build in release mode.
+- The 2026-07-20 browser integration rerun reached empty-deck motor phase,
+  automatic needle drop, all direct preset controls and every radial click
+  value. The strict run then reported one Chrome underrun under heavy unrelated
+  host load, so it is not a new release pass. The unchanged zero-underrun gate
+  still requires a clean-host rerun.
 - `npm run bench:worklet`: three release-WASM runs measured p95 at `1.47%`
   normal and `8.10–8.14%` for alternating `±8×` crab/8. Fresh six-second
   stereo PCM window p95 was `2.90–3.08%` against a `2.667 ms` quantum.
+- Two current high-contention benchmark attempts exceeded the fresh-window
+  threshold. The threshold was not relaxed; a clean-host rerun remains due.
 - The post-calibration release run measured p95 `1.49%` normal, `8.70%` for
   alternating `±8×` crab/8 and `2.90%` for a fresh six-second window. Replay
   hashes remained unchanged, confirming that presentation calibration does not
@@ -135,11 +142,14 @@ latency.
 3. Pointer geometry and coalesced event collection live in the UI layer. Physical
    rate mapping, platter mechanics, de-clicking and assisted gate generation live
    in the audio engine.
-4. The manual crossfader and assisted technique gate are independent:
+4. Crossfader ownership follows the selected mode:
 
-   `deck gain = channel gain × manual crossfader curve × technique gate`.
+   - `baby`: `deck gain = channel gain × manual crossfader curve`.
+   - automatic presets: `deck gain = channel gain × technique gate`.
 
-   Selecting a preset must not move or overwrite the user's manual fader.
+   The Rust gate is the real audible XFADE in every automatic preset. Direct
+   manual XFADE input selects `baby` and transfers ownership to the manual
+   curve. Public state retains both the stored manual value and effective gate.
 5. Preset phase advances from rendered groove travel in the confirmed stroke
    direction. It freezes while held still and resets after a hysteretic reversal.
    Residual outgoing motion must not advance the new stroke. Phase must not depend
@@ -356,7 +366,8 @@ Acceptance evidence:
 Acceptance evidence:
 
 - Keyboard, pointer, touch and programmatic control paths select all presets and
-  click counts without moving the manual fader.
+  click counts without overwriting the stored manual-fader value. Automatic
+  presets drive the effective XFADE from the Rust gate.
 - API and README examples match runtime state and schema.
 - Headless browser smoke tests report no page/worklet errors and exercise synthetic
   audio loading, normal playback, window replacement, multi-pointer control,

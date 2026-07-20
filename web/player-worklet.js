@@ -131,7 +131,7 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
     switch (message.type) {
       case "window-transport-init": {
         this.streamGeneration = Math.max(0, Math.floor(Number(message.streamGeneration) || 0));
-        this.active = false;
+        this.active = this.motorRunning;
         this.playing = false;
         this.scratching = false;
         this.scratchGrip = 0;
@@ -160,8 +160,12 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
         this.ignoreResetThroughWindowRequestId = 0;
         this.replayRestoreWindowPosition = null;
         this.lastPosition = 0;
-        this.dsp.stop();
+        if (!this.motorRunning) this.dsp.stop();
         this.dsp.clearWindow();
+        if (this.motorRunning) {
+          this.dsp.setNeedleLifted(this.needleLifted);
+          this.applyTransport();
+        }
         this.send({ type: "window-transport-initialised", length: this.streamLength, shared: this.windowBanks.length > 0 });
         break;
       }
@@ -201,6 +205,11 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
         this.resetPcmWindowTransport();
         break;
       case "transport":
+        if (Boolean(message.running) && !this.active) {
+          this.active = true;
+          this.dsp.start();
+          this.dsp.setNeedleLifted(this.needleLifted);
+        }
         this.motorRunning = Boolean(message.running);
         if (!this.motorRunning) this.clearAutomaticSurfaceRegion("motor-off");
         this.applyTransport();
@@ -693,7 +702,7 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
 
   resetPcmWindowTransport() {
     if (this.replay) this.finishReplay(true, currentFrame, { requestWindow: false });
-    this.active = false;
+    this.active = this.motorRunning;
     this.playing = false;
     this.scratching = false;
     this.length = 0;
@@ -721,8 +730,12 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
     this.lastInputTiming = null;
     this.applyDspControl("reset-manual-fader", () => this.dsp.setManualFaderGain(1));
     this.dsp.stopSurfaceRegion();
-    this.dsp.stop();
+    if (!this.motorRunning) this.dsp.stop();
     this.dsp.clearWindow();
+    if (this.motorRunning) {
+      this.dsp.setNeedleLifted(this.needleLifted);
+      this.applyTransport();
+    }
   }
 
   windowContainsPosition(position, start = this.windowStart, end = this.windowEnd) {
@@ -1237,7 +1250,13 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
         this.prepareWindowForRender(1, outputFrame + frameCount);
       }
     } else {
-      this.dsp.renderWindowMissing(frameCount, outputs[0].length);
+      if (this.decodedLength < 2 && !this.scratching) {
+        // A powered platter remains a physical object before the first groove
+        // window exists. Advance its Rust-owned phase without reading PCM.
+        this.dsp.renderSurface(frameCount, outputs[0].length);
+      } else {
+        this.dsp.renderWindowMissing(frameCount, outputs[0].length);
+      }
     }
     this.copyOutput(outputs, outputOffset, frameCount);
   }

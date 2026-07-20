@@ -130,11 +130,23 @@ impl PlayerEngine {
                 if !duration_seconds.is_finite() {
                     return Err(PlayerError::InvalidNumber);
                 }
+                let was_playing = self.deck(deck).playback.playing;
                 {
                     let d = self.deck_mut(deck);
                     d.loaded = loaded;
                     d.playback.load_status = status;
                     d.playback.duration_seconds = duration_seconds.max(0.0);
+                    if !loaded {
+                        d.playback.playing = false;
+                        d.playback.pending_play_when_ready = d.transport.motor_on;
+                        d.playback.suspended_at_seconds = None;
+                    }
+                }
+                if !loaded && was_playing {
+                    self.commands.push(HostCommand::StopPacketPlayback {
+                        deck,
+                        platter_handoff: true,
+                    });
                 }
                 let should_start = status == LoadStatus::Ready
                     && self.deck(deck).transport.motor_on
@@ -929,6 +941,57 @@ mod tests {
         })
         .unwrap();
         assert!(e.drain_commands().iter().any(|c| matches!(c, HostCommand::StartPacketPlayback { offset_seconds, platter_handoff: true, .. } if (*offset_seconds-12.25).abs()<1e-9)));
+    }
+
+    #[test]
+    fn empty_deck_motor_survives_loading_until_the_needle_can_start_programme() {
+        let mut engine = PlayerEngine::default();
+        engine
+            .dispatch(PlayerEvent::SetTransport {
+                deck: DeckId::A,
+                running: true,
+            })
+            .unwrap();
+        assert!(engine.state().decks[0].transport.motor_on);
+        assert!(!engine.state().decks[0].playback.playing);
+        assert!(engine.drain_commands().iter().any(|command| matches!(
+            command,
+            HostCommand::SetMotor {
+                deck: DeckId::A,
+                running: true
+            }
+        )));
+
+        engine
+            .dispatch(PlayerEvent::SetLoadState {
+                deck: DeckId::A,
+                status: LoadStatus::Loading,
+                loaded: false,
+                duration_seconds: 0.0,
+            })
+            .unwrap();
+        assert!(engine.state().decks[0].transport.motor_on);
+        assert!(engine.state().decks[0].needle.lifted);
+
+        ready(&mut engine);
+        assert!(engine.state().decks[0].transport.motor_on);
+        assert!(!engine.state().decks[0].playback.playing);
+        engine
+            .dispatch(PlayerEvent::SetNeedle {
+                deck: DeckId::A,
+                lifted: false,
+                observed_playback_seconds: 0.0,
+            })
+            .unwrap();
+        assert!(engine.state().decks[0].playback.playing);
+        assert!(engine.drain_commands().iter().any(|command| matches!(
+            command,
+            HostCommand::StartPacketPlayback {
+                deck: DeckId::A,
+                offset_seconds,
+                ..
+            } if offset_seconds.abs() < f64::EPSILON
+        )));
     }
 
     #[test]

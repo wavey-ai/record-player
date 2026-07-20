@@ -16,8 +16,13 @@ const XFADE_CENTER_MINUTE = 26;
 const START_STOP_CENTER_MINUTE = 33;
 const NEEDLE_CENTER_MINUTE = 8;
 const LOAD_RECORD_MINUTE = 21;
-const SCRATCH_PRESET_CENTER_MINUTE = 52;
-const SCRATCH_CLICKS_CENTER_MINUTE = 58;
+const SCRATCH_PRESET_BUTTON_SPAN_DEG = 16;
+const SCRATCH_PRESET_BUTTON_ANGLES = Object.freeze([
+  -168, -150, -132, -114,
+  -66, -48, -30, -12,
+]);
+const SCRATCH_CLICKS_START_DEG = 0;
+const SCRATCH_CLICKS_END_DEG = 28;
 
 function drawCurvedTextSegments(ctx, geometry, segments, angleDeg, radius, size, flip = false) {
   const parts = [];
@@ -187,8 +192,8 @@ function drawEndLabels(ctx, geometry, segment, theme, inner, outer) {
 }
 
 function drawSlider(ctx, geometry, segment, theme, labels, hitRegions) {
-  const inner = geometry.controlBandInner;
-  const outer = geometry.controlBandOuter;
+  const inner = Number.isFinite(segment.inner) ? segment.inner : geometry.controlBandInner;
+  const outer = Number.isFinite(segment.outer) ? segment.outer : geometry.controlBandOuter;
   const mid = (inner + outer) / 2;
 
   strokeArcBand(
@@ -298,9 +303,10 @@ function drawSlider(ctx, geometry, segment, theme, labels, hitRegions) {
     kind: "arc-slider",
     startAngle: segment.startAngle,
     endAngle: segment.endAngle,
-    inner: inner - 12 * geometry.scale,
-    outer: outer + 18 * geometry.scale,
+    inner: Number.isFinite(segment.hitInner) ? segment.hitInner : inner - 12 * geometry.scale,
+    outer: Number.isFinite(segment.hitOuter) ? segment.hitOuter : outer + 18 * geometry.scale,
     reverse: segment.reverse,
+    hitTolerance: segment.hitTolerance,
     onInput: segment.onInput
   });
 }
@@ -359,13 +365,13 @@ function drawSectorButton(ctx, geometry, button, theme, labels, hitRegions) {
     geometry.controlBandOuter -
     geometry.controlBandInner;
 
-  const inner =
-    geometry.controlBandInner -
-    bandThickness / 6;
+  const inner = Number.isFinite(button.inner)
+    ? button.inner
+    : geometry.controlBandInner - bandThickness / 6;
 
-  const outer =
-    geometry.controlBandOuter +
-    bandThickness / 6;
+  const outer = Number.isFinite(button.outer)
+    ? button.outer
+    : geometry.controlBandOuter + bandThickness / 6;
 
   const start = degToRad(button.angle - button.span / 2);
   const end = degToRad(button.angle + button.span / 2);
@@ -431,7 +437,7 @@ function drawSectorButton(ctx, geometry, button, theme, labels, hitRegions) {
       button.active
         ? theme.controlActiveText
         : theme.controlText,
-      9 * geometry.scale,
+      Number(button.textSize) || 9 * geometry.scale,
       button.angle > 0 && button.angle < 180
     );
   }
@@ -444,6 +450,43 @@ function drawSectorButton(ctx, geometry, button, theme, labels, hitRegions) {
     inner,
     outer,
     onActivate: button.onActivate
+  });
+}
+
+export function scratchPresetControlGeometry(geometry, presetOrIndex) {
+  const index = typeof presetOrIndex === "string"
+    ? SCRATCH_PRESETS.indexOf(presetOrIndex.toLowerCase())
+    : Number(presetOrIndex);
+  if (!Number.isInteger(index) || index < 0 || index >= SCRATCH_PRESETS.length) {
+    throw new RangeError(`Unknown scratch preset: ${presetOrIndex}`);
+  }
+  const angle = SCRATCH_PRESET_BUTTON_ANGLES[index];
+  const inner = geometry.controlBandOuter + 20 * geometry.scale;
+  const outer = geometry.controlBandOuter + 48 * geometry.scale;
+  const radius = (inner + outer) / 2;
+  return Object.freeze({
+    angle,
+    span: SCRATCH_PRESET_BUTTON_SPAN_DEG,
+    inner,
+    outer,
+    x: geometry.cx + Math.cos(degToRad(angle)) * radius,
+    y: geometry.cy + Math.sin(degToRad(angle)) * radius,
+  });
+}
+
+export function scratchClicksControlGeometry(geometry, clicks) {
+  const value = clamp((Math.round(Number(clicks) || 1) - 1) / 7, 0, 1);
+  const inner = geometry.controlBandOuter + 20 * geometry.scale;
+  const outer = geometry.controlBandOuter + 48 * geometry.scale;
+  const angle = SCRATCH_CLICKS_START_DEG
+    + (SCRATCH_CLICKS_END_DEG - SCRATCH_CLICKS_START_DEG) * value;
+  const radius = (inner + outer) / 2;
+  return Object.freeze({
+    angle,
+    inner,
+    outer,
+    x: geometry.cx + Math.cos(degToRad(angle)) * radius,
+    y: geometry.cy + Math.sin(degToRad(angle)) * radius,
   });
 }
 
@@ -505,6 +548,8 @@ export function createControlSegments(player, state, components) {
   }
 
   if (components.crossfader) {
+    const scratchGate = Number(state.scratchGate);
+    const automatic = String(state.scratchPreset || "baby").toLowerCase() !== "baby";
     segments.push({
       key: "crossfader",
       label: "XFADE",
@@ -512,13 +557,18 @@ export function createControlSegments(player, state, components) {
       startAngle: xfadeCenter + 15,
       endAngle: xfadeCenter - 15,
       reverse: false,
-      value: Number(state.crossfader) || 0,
+      value: automatic
+        ? clamp(Number.isFinite(scratchGate) ? scratchGate : 1, 0, 1)
+        : Number(state.crossfader) || 0,
+      automatic,
       defaultValue: 0.5,
       valueLabel: "",
       endLabels: ["CUT", "OPEN"],
       flip: true,
-      onInput: value =>
-        player.setCrossfader(value)
+      onInput: value => {
+        if (automatic) player.setScratchPreset("baby");
+        return player.setCrossfader(value);
+      },
     });
   }
 
@@ -531,7 +581,8 @@ function drawPitchResetButton(
   player,
   state,
   theme,
-  hitRegions
+  hitRegions,
+  outsideOffset = 24,
 ) {
   const native = Number(state.nativeRpm) || 33.3333333333;
   const rpmCenter = minuteToDegrees(RPM_CENTER_MINUTE);
@@ -554,7 +605,7 @@ function drawPitchResetButton(
 
   const radius =
     geometry.controlBandOuter +
-    24 * geometry.scale;
+    outsideOffset * geometry.scale;
 
   const x =
     geometry.cx +
@@ -636,7 +687,8 @@ export function drawRadialControls(
       player,
       state,
       theme,
-      hitRegions
+      hitRegions,
+      components.scratchPreset ? 8 : 24,
     );
   }
 
@@ -716,10 +768,7 @@ export function drawRadialControls(
         active: false,
         angle: minuteToDegrees(LOAD_RECORD_MINUTE),
         span: loadRecordSpan,
-        onActivate: () =>
-          document
-            .querySelector("#file")
-            ?.click()
+        onActivate: () => player.openRecordPicker?.()
       },
       theme,
       components.labels,
@@ -729,46 +778,50 @@ export function drawRadialControls(
 
   if (components.scratchPreset) {
     const preset = String(state.scratchPreset || "baby").toLowerCase();
-    const presetIndex = Math.max(0, SCRATCH_PRESETS.indexOf(preset));
-    const label = `SCRATCH ${SCRATCH_PRESETS[presetIndex].toUpperCase()}`;
-
-    drawSectorButton(
-      ctx,
-      geometry,
-      {
-        key: "scratchPreset",
-        label,
-        active: false,
-        angle: minuteToDegrees(SCRATCH_PRESET_CENTER_MINUTE),
-        span: measureSpan(label),
-        onActivate: () => player.setScratchPreset(
-          SCRATCH_PRESETS[(presetIndex + 1) % SCRATCH_PRESETS.length]
-        )
-      },
-      theme,
-      components.labels,
-      hitRegions
-    );
+    for (const [index, choice] of SCRATCH_PRESETS.entries()) {
+      const button = scratchPresetControlGeometry(geometry, index);
+      drawSectorButton(
+        ctx,
+        geometry,
+        {
+          ...button,
+          key: `scratchPreset-${choice}`,
+          label: choice.toUpperCase(),
+          active: choice === preset,
+          textSize: 7.5 * geometry.scale,
+          onActivate: () => player.setScratchPreset(choice),
+        },
+        theme,
+        components.labels,
+        hitRegions,
+      );
+    }
   }
 
-  if (components.scratchClicks) {
+  if (components.scratchPreset && components.scratchClicks) {
     const clicks = clamp(Math.round(Number(state.scratchClicks) || 1), 1, 8);
-    const label = `CLICKS ${clicks}`;
-
-    drawSectorButton(
+    const ring = scratchClicksControlGeometry(geometry, clicks);
+    drawSlider(
       ctx,
       geometry,
       {
         key: "scratchClicks",
-        label,
-        active: false,
-        angle: minuteToDegrees(SCRATCH_CLICKS_CENTER_MINUTE),
-        span: measureSpan(label),
-        onActivate: () => player.setScratchClicks(clicks === 8 ? 1 : clicks + 1)
+        label: "CLICKS",
+        startAngle: SCRATCH_CLICKS_START_DEG,
+        endAngle: SCRATCH_CLICKS_END_DEG,
+        inner: ring.inner,
+        outer: ring.outer,
+        hitInner: ring.inner - 2 * geometry.scale,
+        hitOuter: ring.outer + 4 * geometry.scale,
+        value: (clicks - 1) / 7,
+        valueLabel: `CLICKS ${clicks}`,
+        endLabels: ["1", "8"],
+        hitTolerance: 0,
+        onInput: value => player.setScratchClicks(1 + Math.round(clamp(value, 0, 1) * 7)),
       },
       theme,
       components.labels,
-      hitRegions
+      hitRegions,
     );
   }
 
@@ -831,7 +884,7 @@ export function controlAt(
             ((angle - projected + 540) % 360) - 180
           );
 
-          return delta <= 16;
+          return delta <= (Number.isFinite(region.hitTolerance) ? region.hitTolerance : 16);
         }
 
         const delta = Math.abs(

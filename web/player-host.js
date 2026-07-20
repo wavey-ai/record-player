@@ -25,7 +25,7 @@ const playerRoot = HOST_CONFIG.root || document;
 const playerAssetBaseUrl = new URL(HOST_CONFIG.assetBaseUrl || "./", import.meta.url);
 const sharedWasmBaseUrl = String(HOST_CONFIG.sharedWasmBaseUrl || globalThis.VIN_YL_PLAYER_SHARED_WASM_BASE_URL || "").replace(/\/+$/, "");
 const initialLoggingParam = new URLSearchParams(globalThis.location?.search || "").get("player_log");
-setPlayerLoggingEnabled(initialLoggingParam === "1");
+if (initialLoggingParam !== null) setPlayerLoggingEnabled(initialLoggingParam === "1");
 const DEFAULT_TAPE_API_URL = "https://yl.vin/api/play/tape";
 const DEFAULT_TAPE_MASTER_API_URL = "https://yl.vin/api/bitneedle-source-audio";
 
@@ -872,6 +872,39 @@ function setStatus(message) {
   }
 }
 
+function openRecordPicker() {
+  if (!elements.file) throw new Error("The record file picker is not mounted");
+  elements.file.value = "";
+  setStatus("Choose a Bitneedle PNG record or audio file…");
+  if (isPlayerLoggingEnabled()) console.info("[vin.yl.player] record picker opened");
+  elements.file.click();
+  return true;
+}
+
+function isBitneedlePng(file) {
+  return file?.type === "image/png" || /\.png$/i.test(String(file?.name || ""));
+}
+
+function loadSelectedFile(file) {
+  if (isPlayerLoggingEnabled()) {
+    console.info("[vin.yl.player] file selected", {
+      name: file?.name || "",
+      type: file?.type || "",
+      size: file?.size || 0,
+      path: isBitneedlePng(file) ? "bitneedle-record" : "audio-preview",
+    });
+  }
+  return isBitneedlePng(file)
+    ? loadFile(file)
+    : loadAudioFile(file, { title: file?.name || "Audio preview", cleanEnd: true });
+}
+
+function reportRecordLoadError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error("[vin.yl.player] record load failed", error);
+  setStatus(`Record load failed: ${message}`);
+}
+
 
 function formatDecodeProgress(progress) {
   const message = String(progress?.msg || progress?.message || progress?.status || "Decoding groove audio").trim();
@@ -1406,7 +1439,7 @@ function failCurrentLoad(loadSequence, error, label = "Player load failed") {
     clearStylusCalibration();
     if (state.recordObjectUrl) URL.revokeObjectURL(state.recordObjectUrl);
     state.recordObjectUrl = "";
-    elements.play.disabled = true;
+    elements.play.disabled = false;
     elements.needle.disabled = true;
     elements.seek.disabled = true;
     await dispatch({
@@ -1456,6 +1489,39 @@ async function loadAudioFile(file, options = {}) {
   }
 }
 
+async function prepareTransportForMediaLoad(loadSequence) {
+  const motorWasRunning = Boolean(deckView()?.transport_on);
+  state.needleAutoBehaviorEnabled = false;
+  try {
+    await dispatch({ type: "stop_timed_region", region: "lead_in", completed: false }).catch(() => {});
+    await dispatch({ type: "stop_timed_region", region: "deadwax", completed: false }).catch(() => {});
+    await dispatch({
+      type: "set_load_state",
+      deck: "a",
+      status: "loading",
+      loaded: false,
+      duration_seconds: 0,
+    });
+    assertCurrentLoad(loadSequence);
+    const view = deckView();
+    if (view && !view.needle_lifted) {
+      await dispatch({
+        type: "set_needle",
+        deck: "a",
+        lifted: true,
+        observed_playback_seconds: framesToSeconds(state.positionFrames),
+      });
+      assertCurrentLoad(loadSequence);
+    }
+    state.node?.port.postMessage({ type: "needle", lifted: true });
+  } finally {
+    // Loading a record re-arms automatic cueing. A live motor causes the
+    // stylus to lower when the new programme becomes ready.
+    state.needleAutoBehaviorEnabled = true;
+  }
+  return motorWasRunning;
+}
+
 async function loadAudioFileForSequence(
   file,
   { artworkUrl = "", title = "", artist = "", cleanEnd = true } = {},
@@ -1465,13 +1531,7 @@ async function loadAudioFileForSequence(
   assertCurrentLoad(loadSequence);
   await state.context.resume();
   assertCurrentLoad(loadSequence);
-  const previousView = deckView();
-  if (previousView?.transport_on || previousView?.playing || state.view?.lead_in_active || state.view?.deadwax_active) {
-    await stopPlaybackTransport();
-    assertCurrentLoad(loadSequence);
-  }
-  await dispatch({ type: "set_load_state", deck: "a", status: "loading", loaded: false, duration_seconds: 0 });
-  assertCurrentLoad(loadSequence);
+  const motorWasRunning = await prepareTransportForMediaLoad(loadSequence);
   const sourceBytes = await file.arrayBuffer();
   assertCurrentLoad(loadSequence);
   const audioBuffer = await state.context.decodeAudioData(sourceBytes.slice(0));
@@ -1515,6 +1575,7 @@ async function loadAudioFileForSequence(
   resetTapeState();
   updateRpmButtons();
   state.node.port.postMessage({ type: "reset" });
+  state.node.port.postMessage({ type: "transport", running: motorWasRunning });
   state.node.port.postMessage({ type: "native-rpm", rpm: state.baseRpm });
 
   const channelCount = Math.min(2, audioBuffer.numberOfChannels);
@@ -2848,18 +2909,13 @@ async function loadFileForSequence(
     await state.context.resume();
     assertCurrentLoad(loadSequence);
   }
-  const previousView = deckView();
-  if (previousView?.transport_on || previousView?.playing || state.view?.lead_in_active || state.view?.deadwax_active) {
-    await stopPlaybackTransport();
-    assertCurrentLoad(loadSequence);
-  }
-  await dispatch({ type: "set_load_state", deck: "a", status: "loading", loaded: false, duration_seconds: 0 });
-  assertCurrentLoad(loadSequence);
+  const motorWasRunning = await prepareTransportForMediaLoad(loadSequence);
   if (cache !== undefined) state.cacheHandler = normalizeCacheHandler(cache);
   if (state.decoder) {
     state.decoder.close();
   }
   disposePcmWindowTransport();
+  state.node.port.postMessage({ type: "transport", running: motorWasRunning });
   const decoder = new RecordDecoderClient(versionedAssetUrl("./record-decoder-worker.js"), {
     loggingEnabled: isPlayerLoggingEnabled(),
     cache: state.cacheHandler,
@@ -3461,6 +3517,8 @@ function publicState() {
     playbackRate: state.baseRpm > 0 ? state.rpm / state.baseRpm : 1,
     volume: state.volume,
     crossfader: state.crossfader,
+    effectiveCrossfader: state.scratchPreset === "baby" ? state.crossfader : state.scratchGate,
+    crossfaderOwner: state.scratchPreset === "baby" ? "manual" : "scratch-preset",
     scratchPreset: state.scratchPreset,
     scratchClicks: state.scratchClicks,
     scratchGate: state.scratchGate,
@@ -3534,6 +3592,7 @@ async function setVolume(value) {
 
 async function setCrossfader(value, { record = true } = {}) {
   await interruptScratchReplay("Crossfader control");
+  if (state.scratchPreset !== "baby") setScratchPreset("baby", { record });
   state.crossfader = Math.max(0, Math.min(1, Number(value) || 0));
   if (elements.xfade) elements.xfade.value = String(state.crossfader);
   if (record) recordScratchEvent({ type: "manual-crossfader", value: state.crossfader });
@@ -3598,6 +3657,7 @@ const api = Object.freeze({
   createPcmChunkCacheHandler,
   createRemoteOpusChunkCacheHandler,
   createRemoteOpusPrecache,
+  openRecordPicker,
   loadRecord: loadFile,
   loadRecordFromUrl,
   loadAudioFile,
@@ -3750,6 +3810,11 @@ const api = Object.freeze({
   setCrossfader,
   setScratchPreset,
   setScratchClicks,
+  setScratchTechnique({ preset, clicks } = {}) {
+    if (preset !== undefined) setScratchPreset(preset);
+    if (clicks !== undefined) setScratchClicks(clicks);
+    return Object.freeze({ preset: state.scratchPreset, clicks: state.scratchClicks });
+  },
   setHighFrequencyAccelerationLimit,
   setStylusTracingLimit,
   setNeedleLifted: async lifted => {
@@ -3969,13 +4034,13 @@ async function initialise() {
   globalThis.dispatchEvent(new CustomEvent("vin.yl.player.ready", { detail: api }));
 }
 
-elements.load.addEventListener("click", () => elements.file.click());
+elements.load.addEventListener("click", openRecordPicker);
 elements.file.addEventListener("change", () => {
   const file = elements.file.files?.[0];
-  if (file) void loadFile(file).catch(error => setStatus(error.message));
+  if (file) void loadSelectedFile(file).catch(reportRecordLoadError);
 });
-elements.play.addEventListener("click", async () => {
-  await api.togglePlayback();
+elements.play.addEventListener("click", () => {
+  void api.toggleTransport().catch(error => setStatus(error?.message || String(error)));
 });
 elements.needle.addEventListener("click", () => {
   const view = deckView();

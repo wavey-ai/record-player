@@ -274,10 +274,28 @@ async function runBrowserScenario() {
   assert(initialAdvanced.contains(document.querySelector("#scratch-clicks")), "Scratch clicks are outside advanced controls");
   assert(document.querySelector("#hf-acceleration-limit")?.value === "0.35", "HF limiter UI default is not 0.35");
 
+  await player.startTransport();
+  const emptyMotor = player.getState();
+  assert(!emptyMotor.ready, "The empty deck unexpectedly reported ready");
+  assert(emptyMotor.motorRunning, "START did not run the empty platter motor");
+  assert(emptyMotor.needleLifted, "The empty deck lowered its needle before media was ready");
+  await waitUntil(
+    () => Math.abs(player.getState().rotationDegrees - emptyMotor.rotationDegrees) > 0.01,
+    2_000,
+    "The Rust platter phase did not advance before media was ready",
+  );
+  const emptyMotorAdvanced = player.getState();
+  assert(
+    Math.abs(emptyMotorAdvanced.rotationDegrees - emptyMotor.rotationDegrees) > 0.01,
+    "The Rust platter phase did not advance before media was ready",
+  );
+
   await player.loadAudioFile(createWaveFile(), { cleanEnd: true, title: "Browser smoke" });
-  await player.setNeedleLifted(false);
   const loaded = player.getState();
   assert(loaded.ready, "The synthetic browser source did not become ready");
+  assert(loaded.motorRunning, "Media loading stopped the live platter motor");
+  assert(!loaded.needleLifted, "The needle did not lower automatically when media became ready");
+  assert(loaded.playing, "Automatic needle drop did not start programme playback");
   assert(loaded.highFrequencyAccelerationLimit === 0.35, "HF limiter engine default is not 0.35");
   assert(loaded.stylusTracingLimit === 0.72, "Stylus tracing engine default is not 0.72");
   assert(loaded.acousticEffects === true, "Acoustic effects are not enabled in the rendered path");
@@ -567,11 +585,11 @@ async function runBrowserScenario() {
         grip: direction > 0 ? 0.35 : 0.85,
         inputTimeMs: performance.now(),
       });
-      if (step === 8) {
+      if (preset === "baby" && step === 8) {
         await player.setCrossfader(0.35);
         assert(player.getState().scratching, "A simultaneous fader move cancelled the record gesture");
       }
-      if (step === 10) await player.setCrossfader(0.5);
+      if (preset === "baby" && step === 10) await player.setCrossfader(0.5);
       await wait(8);
     }
   }
@@ -873,6 +891,7 @@ try {
   const pointResult = await session.send("Runtime.evaluate", {
     expression: `(async () => {
       const { buildCanvasGeometry, minuteToDegrees } = await import("./player-canvas-geometry.js");
+      const { scratchClicksControlGeometry, scratchPresetControlGeometry } = await import("./player-canvas-controls.js");
       const canvas = document.querySelector("#player-canvas");
       const rect = canvas.getBoundingClientRect();
       const geometry = buildCanvasGeometry(rect.width, rect.height);
@@ -882,14 +901,26 @@ try {
       });
       const recordRadius = geometry.recordRadius * 0.7;
       const faderRadius = (geometry.controlBandInner + geometry.controlBandOuter) / 2;
+      const scratchPresets = Object.fromEntries(
+        ["baby", "stab", "chirp", "transform", "flare", "crab", "orbit", "drum"].map(preset => {
+          const control = scratchPresetControlGeometry(geometry, preset);
+          return [preset, { x: rect.left + control.x, y: rect.top + control.y }];
+        }),
+      );
+      const scratchClicks = Object.fromEntries(
+        [1, 2, 3, 4, 5, 6, 7, 8].map(clicks => {
+          const control = scratchClicksControlGeometry(geometry, clicks);
+          return [clicks, { x: rect.left + control.x, y: rect.top + control.y }];
+        }),
+      );
       return {
         recordStart: point(0, recordRadius),
         recordMoveA: point(0.10, recordRadius),
         recordMoveB: point(0.18, recordRadius),
         faderStart: point(minuteToDegrees(26) * Math.PI / 180, faderRadius),
         faderMove: point(minuteToDegrees(24.3) * Math.PI / 180, faderRadius),
-        scratchPreset: point(minuteToDegrees(52) * Math.PI / 180, faderRadius),
-        scratchClicks: point(minuteToDegrees(58) * Math.PI / 180, faderRadius),
+        scratchPresets,
+        scratchClicks,
         crossfaderBefore: globalThis.vin.yl.player.getState().crossfader,
       };
     })()`,
@@ -1049,12 +1080,38 @@ try {
         const state = player.getState();
         clicks.push({ clicks: state.scratchClicks, crossfader: state.crossfader });
       }
-      return { presets, clicks };
+      const combined = player.setScratchTechnique({ preset: "crab", clicks: 7 });
+      return { presets, clicks, combined };
     })()`,
     returnByValue: true,
   });
   const programmatic = programmaticResult.result?.value;
   verifyTechniqueTrace("Programmatic controls", programmatic, allPresets, allClicks);
+  if (programmatic?.combined?.preset !== "crab" || programmatic?.combined?.clicks !== 7) {
+    throw new Error(`Combined scratch API returned ${JSON.stringify(programmatic?.combined)}`);
+  }
+  const manualOwnershipResult = await session.send("Runtime.evaluate", {
+    expression: `(async () => {
+      const player = globalThis.vin.yl.player;
+      player.setScratchPreset("stab");
+      const automatic = player.getState();
+      await player.setCrossfader(0.63);
+      return { automatic, manual: player.getState() };
+    })()`,
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  const ownership = manualOwnershipResult.result?.value;
+  if (ownership?.automatic?.crossfaderOwner !== "scratch-preset") {
+    throw new Error(`Automatic preset did not own XFADE: ${JSON.stringify(ownership?.automatic)}`);
+  }
+  if (
+    ownership?.manual?.scratchPreset !== "baby"
+    || ownership?.manual?.crossfaderOwner !== "manual"
+    || Math.abs(ownership?.manual?.crossfader - 0.63) > 0.000001
+  ) {
+    throw new Error(`Direct XFADE input did not transfer ownership to baby: ${JSON.stringify(ownership?.manual)}`);
+  }
 
   await resetTechniqueControls();
   const pointer = { presets: [], clicks: [] };
@@ -1085,15 +1142,15 @@ try {
     });
     await pause(25);
   };
-  for (let index = 0; index < 8; index += 1) {
-    await mouseTap(points.scratchPreset);
+  for (const preset of allPresets) {
+    await mouseTap(points.scratchPresets[preset]);
     pointer.presets.push(await readTechniqueControls());
   }
-  for (let index = 0; index < 8; index += 1) {
-    await mouseTap(points.scratchClicks);
+  for (const clicks of allClicks) {
+    await mouseTap(points.scratchClicks[clicks]);
     pointer.clicks.push(await readTechniqueControls());
   }
-  verifyTechniqueTrace("Pointer canvas controls", pointer, cycledPresets, cycledClicks);
+  verifyTechniqueTrace("Pointer canvas controls", pointer, allPresets, allClicks);
 
   await resetTechniqueControls();
   const touchControls = { presets: [], clicks: [] };
@@ -1111,15 +1168,15 @@ try {
     });
     await pause(25);
   };
-  for (let index = 0; index < 8; index += 1) {
-    await touchTap(points.scratchPreset);
+  for (const preset of allPresets) {
+    await touchTap(points.scratchPresets[preset]);
     touchControls.presets.push(await readTechniqueControls());
   }
-  for (let index = 0; index < 8; index += 1) {
-    await touchTap(points.scratchClicks);
+  for (const clicks of allClicks) {
+    await touchTap(points.scratchClicks[clicks]);
     touchControls.clicks.push(await readTechniqueControls());
   }
-  verifyTechniqueTrace("Touch canvas controls", touchControls, cycledPresets, cycledClicks);
+  verifyTechniqueTrace("Touch canvas controls", touchControls, allPresets, allClicks);
 
   await resetTechniqueControls();
   const focusSummary = await session.send("Runtime.evaluate", {
@@ -1301,6 +1358,51 @@ try {
     url: `http://127.0.0.1:${serverPort}/dj-validation.html`,
   });
   await pause(500);
+  const pointerProbeRectResult = await session.send("Runtime.evaluate", {
+    expression: `(async () => {
+      const deadline = performance.now() + 10000;
+      while (!globalThis.__VINYL_DJ_VALIDATION__?.getPlayer() && performance.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      const pad = document.querySelector("#pointer-probe-pad");
+      pad?.scrollIntoView({ block: "center" });
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const rect = pad?.getBoundingClientRect();
+      if (!rect?.width || !rect?.height) throw new Error("Pointer input probe is not visible");
+      return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+    })()`,
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  if (pointerProbeRectResult.exceptionDetails) {
+    throw new Error(pointerProbeRectResult.exceptionDetails.exception?.description || "Pointer probe failed");
+  }
+  const probeRect = pointerProbeRectResult.result.value;
+  const probePoint = (fractionX, fractionY) => ({
+    x: probeRect.left + probeRect.width * fractionX,
+    y: probeRect.top + probeRect.height * fractionY,
+  });
+  await session.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [touch(41, probePoint(0.2, 0.45))],
+  });
+  for (let index = 0; index < 18; index += 1) {
+    const progress = index / 17;
+    await session.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [
+        touch(41, probePoint(0.2 + progress * 0.55, 0.45)),
+        touch(42, probePoint(0.22 + progress * 0.5, 0.65)),
+      ],
+    });
+    await pause(8);
+  }
+  await session.send("Input.dispatchTouchEvent", {
+    type: "touchMove",
+    touchPoints: [touch(41, probePoint(0.78, 0.45))],
+  });
+  await session.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await pause(50);
   const validationConsoleResult = await session.send("Runtime.evaluate", {
     expression: `(async () => {
       const deadline = performance.now() + 10000;
@@ -1324,6 +1426,7 @@ try {
         summary: consoleApi.getSession().summary(),
         buildInfo: consoleApi.getBuildInfo(),
         playerApiPublished: typeof consoleApi.getPlayer().measureAcousticLoopbackLatency === "function",
+        pointerInputProfile: consoleApi.getPointerInputProfile(),
         status: document.querySelector("#console-status").textContent,
       };
     })()`,
@@ -1338,8 +1441,13 @@ try {
     );
   }
   const validationConsole = validationConsoleResult.result?.value;
-  if (validationConsole?.schemaVersion !== 3) throw new Error("Validation console did not use schema version 3");
+  if (validationConsole?.schemaVersion !== 4) throw new Error("Validation console did not use schema version 4");
   if (validationConsole?.summary?.participants !== 1) throw new Error("Validation console did not record a participant");
+  if (!validationConsole?.pointerInputProfile?.requirements?.pass
+    || validationConsole.pointerInputProfile.maximumConcurrentPointers < 2
+    || validationConsole.pointerInputProfile.types?.touch?.gripPolicy !== "full-contact") {
+    throw new Error(`Validation console did not capture touch input evidence: ${JSON.stringify(validationConsole?.pointerInputProfile)}`);
+  }
   if (!validationConsole?.playerApiPublished) throw new Error("Validation console did not expose the real player API");
   if (typeof validationConsole?.buildInfo?.worktreeDirty !== "boolean") {
     throw new Error("Validation console did not load Git build metadata");

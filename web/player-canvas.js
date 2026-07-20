@@ -427,7 +427,7 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
     }
     if (!snapshot.ready) {
       if (interaction.loadOnEmptyRecordTap) {
-        document.querySelector("#file")?.click();
+        player.openRecordPicker?.();
       }
       return;
     }

@@ -12,6 +12,7 @@ window.addEventListener("vin.yl.player.ready", event => {
 ## Record and transport
 
 ```js
+player.openRecordPicker(); // Call from a trusted click/tap handler.
 await player.loadRecord(file);
 await player.loadRecordFromUrl("./test.png");
 await player.play();
@@ -28,6 +29,10 @@ await player.setNeedleLifted(false);
 default to the published-record ending: two output-clock-timed deadwax turns,
 then a persistent run-out lock until the transport is stopped. Pass
 `cleanEnd: true` to stop at the programme boundary instead.
+
+`openRecordPicker()` opens the bundled Bitneedle PNG picker and returns `true`.
+Browsers require it to run synchronously inside a trusted user gesture. Direct
+integrations normally use `loadRecord(file)` instead.
 
 Authoring and presave surfaces can load a conventional audio file before a
 Bitneedle PNG exists. It is decoded to PCM and sent through the same Rust
@@ -120,6 +125,7 @@ await player.endScratch({ rotationDegrees, resumePlayback: true, cancelled: fals
 
 player.setScratchPreset("flare");
 player.setScratchClicks(2);
+player.setScratchTechnique({ preset: "flare", clicks: 2 });
 ```
 
 `inputTimeMs` uses the browser performance clock. The host projects it to an
@@ -134,16 +140,25 @@ The record still releases safely, and deterministic capture retains the
 cancellation marker so device-validation traces can distinguish pointer loss
 from an intentional release.
 
-The manual crossfader and the audio-rate technique gate are independent:
+Crossfader ownership follows the selected mode:
 
 ```text
-deck gain = channel gain × manual crossfader curve × scratch-technique gate
+baby preset:      deck gain = channel gain × manual crossfader curve
+automatic preset: deck gain = channel gain × Rust scratch-technique gate
 ```
+
+Every preset except `baby` drives the real audible XFADE from the audio-rate
+Rust gate. `state.effectiveCrossfader` reports that gate and
+`state.crossfaderOwner` is `scratch-preset`. The stored `state.crossfader`
+remains the last manual position. Direct `setCrossfader()` input selects
+`baby`, transfers ownership to the manual fader and applies the new position.
 
 `setScratchPreset(name)` returns the selected normalized name and resets its
 default click count. `setScratchClicks(n)` returns the rounded integer click
-count after clamping it to `1..8`; it never moves the manual crossfader. A new
-player starts on `baby`/1 click.
+count after clamping it to `1..8`; it never moves the manual crossfader.
+`setScratchTechnique({ preset, clicks })` applies the same two public controls
+in preset-then-click order and returns the effective pair. A new player starts
+on `baby`/1 click.
 
 | Preset | Default clicks | Gate behavior |
 | --- | ---: | --- |
@@ -219,6 +234,8 @@ const unsubscribe = player.subscribe(state => {
   state.playbackRate;
   state.volume;
   state.crossfader;
+  state.effectiveCrossfader;
+  state.crossfaderOwner;
   state.scratchPreset;
   state.scratchClicks;
   state.scratchGate;
@@ -617,9 +634,9 @@ acknowledges that Rust restoration. A live transport, seek, RPM, volume,
 crossfader, preset or advanced-limiter command interrupts replay first; replay
 telemetry is never fed back into the persistent player-core position.
 
-The worklet applies preset/click changes and converts the recorded sharp manual
-crossfader position at the scheduled frame; Rust applies the manual fader as a
-separate post-gate gain. The programme upper-band limiter is independent of the
+The worklet applies preset/click changes and converts recorded manual
+crossfader positions at the scheduled frame. Rust applies that manual curve in
+`baby`; an automatic preset owns the audible fader through its gate. The programme upper-band limiter is independent of the
 `acoustic`/`surface` flags and uses the stored initial strength, including exact
 bypass for migrated v1 takes.
 
@@ -698,7 +715,7 @@ The current configuration is available with:
 const config = player.canvas.getConfig();
 ```
 
-The canvas currently provides direct interaction for record scratching, start/stop, needle lift, RPM switching, position seek, volume, and crossfader. All actions call the same public player methods available to custom HTML, SVG, WebGL, or canvas interfaces. Pointer ownership is held in a pointer-ID map, so one pointer can keep control of the record while another adjusts XFADE, CH or PITCH; releasing the second pointer leaves the scratch gesture active.
+The canvas currently provides direct interaction for record scratching, start/stop, needle lift, RPM switching, position seek, volume, crossfader, all eight scratch presets and the radial `1..8` click slider. The click slider is only rendered when the preset controls are visible. All actions call the same public player methods available to custom HTML, SVG, WebGL, or canvas interfaces. Pointer ownership is held in a pointer-ID map, so one pointer can keep control of the record while another adjusts XFADE, CH or PITCH; releasing the second pointer leaves the scratch gesture active.
 
 ## Radial canvas controls
 
@@ -858,7 +875,11 @@ await player.stopTransport();
 await player.toggleTransport();
 ```
 
-`START - STOP` uses this motor API. With the needle raised, the record and strobe continue to rotate silently. Lowering the needle while the motor is running starts audio as soon as at least one decoded PCM chunk is available.
+`START - STOP` uses this motor API, including before a record is loaded. The
+Rust-owned platter phase advances while the deck is empty or loading. Loading
+does not stop a live motor. The needle stays raised until PCM is ready, then
+lowers automatically and starts programme playback. With the needle raised,
+the record and strobe continue to rotate silently.
 
 ## Logging
 

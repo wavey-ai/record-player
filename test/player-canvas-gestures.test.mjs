@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createVinylPlayerCanvas } from "../web/player-canvas.js";
+import {
+  createControlSegments,
+  scratchClicksControlGeometry,
+  scratchPresetControlGeometry,
+} from "../web/player-canvas-controls.js";
 import { buildCanvasGeometry, minuteToDegrees } from "../web/player-canvas-geometry.js";
 import { resolveStylusGeometry } from "../web/player-canvas-stylus.js";
 
@@ -469,7 +474,7 @@ test("tonearm drawing and needle cueing round-trip exact calibrated groove radiu
   mounted.destroy();
 });
 
-test("canvas mouse and touch controls cycle every scratch preset and click count without moving the fader", t => {
+test("canvas mouse and touch controls directly select every scratch preset and radial click count", t => {
   const animationFrames = new Map();
   let nextAnimationFrame = 1;
   const classList = { toggle() {}, remove() {} };
@@ -583,16 +588,12 @@ test("canvas mouse and touch controls cycle every scratch preset and click count
 
   renderNext();
   const geometry = buildCanvasGeometry(800, 840, { recordFill: false });
-  const controlRadius = (geometry.controlBandInner + geometry.controlBandOuter) / 2;
-  function controlPoint(minute) {
-    const angle = minuteToDegrees(minute) * Math.PI / 180;
-    return {
-      x: geometry.cx + Math.cos(angle) * controlRadius,
-      y: geometry.cy + Math.sin(angle) * controlRadius,
-    };
-  }
-  const presetPoint = controlPoint(52);
-  const clicksPoint = controlPoint(58);
+  const presetControls = presets.map(preset => scratchPresetControlGeometry(geometry, preset));
+  assert.ok(presetControls.slice(0, 4).every(control => control.x < geometry.cx && control.y < geometry.cy));
+  assert.ok(presetControls.slice(4).every(control => control.x > geometry.cx && control.y < geometry.cy));
+  assert.equal(new Set(presetControls.map(control => control.span)).size, 1);
+  const firstClickControl = scratchClicksControlGeometry(geometry, 1);
+  assert.ok(firstClickControl.angle > presetControls.at(-1).angle, "CLICKS did not follow the last preset");
   let pointerId = 100;
 
   function tap(point, pointerType) {
@@ -611,22 +612,57 @@ test("canvas mouse and touch controls cycle every scratch preset and click count
     const presetCallStart = calls.presets.length;
     const clicksCallStart = calls.clicks.length;
 
-    for (let index = 0; index < presets.length; index += 1) tap(presetPoint, pointerType);
-    for (let index = 0; index < 8; index += 1) tap(clicksPoint, pointerType);
+    for (const preset of presets) tap(scratchPresetControlGeometry(geometry, preset), pointerType);
+    for (let clicks = 1; clicks <= 8; clicks += 1) {
+      tap(scratchClicksControlGeometry(geometry, clicks), pointerType);
+    }
 
     assert.deepEqual(
       calls.presets.slice(presetCallStart),
-      ["stab", "chirp", "transform", "flare", "crab", "orbit", "drum", "baby"],
+      presets,
       `${pointerType} did not reach every scratch preset`,
     );
     assert.deepEqual(
       calls.clicks.slice(clicksCallStart),
-      [2, 3, 4, 5, 6, 7, 8, 1],
+      [1, 2, 3, 4, 5, 6, 7, 8],
       `${pointerType} did not reach every scratch click count`,
     );
     assert.equal(state.crossfader, 0.37);
   }
 
   assert.deepEqual(calls.crossfader, [], "Technique controls moved the manual crossfader");
+  mounted.configure({ components: { scratchPreset: false, scratchClicks: true } });
+  renderNext();
+  const hiddenClickCalls = calls.clicks.length;
+  const hiddenClickPoint = scratchClicksControlGeometry(geometry, 4);
+  canvas.emit("pointerdown", pointer(pointerId, hiddenClickPoint.x, hiddenClickPoint.y, performance.now()));
+  canvas.emit("pointerup", pointer(pointerId, hiddenClickPoint.x, hiddenClickPoint.y, performance.now()));
+  assert.equal(calls.clicks.length, hiddenClickCalls, "CLICKS remained interactive without scratch presets");
   mounted.destroy();
+});
+
+test("crossfader follows the real automatic gate until direct input selects baby", () => {
+  const calls = [];
+  const player = {
+    setScratchPreset(value) { calls.push(["preset", value]); },
+    setCrossfader(value) { calls.push(["crossfader", value]); },
+  };
+  const components = { rpm: false, volume: false, crossfader: true };
+  const assisted = createControlSegments(player, {
+    crossfader: 0.37,
+    scratchPreset: "stab",
+    scratchGate: 0.24,
+  }, components)[0];
+  assert.equal(assisted.value, 0.24);
+  assert.equal(assisted.automatic, true);
+  assisted.onInput(0.61);
+  assert.deepEqual(calls, [["preset", "baby"], ["crossfader", 0.61]]);
+
+  const manual = createControlSegments(player, {
+    crossfader: 0.37,
+    scratchPreset: "baby",
+    scratchGate: 0.24,
+  }, components)[0];
+  assert.equal(manual.value, 0.37);
+  assert.equal(manual.automatic, false);
 });

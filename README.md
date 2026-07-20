@@ -361,14 +361,13 @@ The canvas presents pitch as a Technics-style ±8% control around the record's n
 
 Scratch presets are `baby`, `stab`, `chirp`, `transform`, `flare`, `crab`,
 `orbit` and `drum`. Selecting one restores its preset-specific default click
-count; `setScratchClicks(n)` can then override that count without moving the
-manual crossfader. A new player starts on `baby`/1 click. The full defaults
+count; `setScratchClicks(n)` can then override that count. A new player starts
+on `baby`/1 click. The full defaults
 table appears under
-[Manual crossfader and scratch gate](#manual-crossfader-and-scratch-gate).
+[Crossfader ownership](#crossfader-ownership).
 
 The same controls are available on the canvas and under **ADVANCED CONTROLS**;
-keyboard, pointer, touch and API paths all preserve the independent manual
-fader value.
+keyboard, pointer, touch and API paths use the same preset and click state.
 
 ### Programmatic scratching
 
@@ -434,6 +433,8 @@ const unsubscribe = player.subscribe(state => {
     playbackRate: state.playbackRate,
     volume: state.volume,
     crossfader: state.crossfader,
+    effectiveCrossfader: state.effectiveCrossfader,
+    crossfaderOwner: state.crossfaderOwner,
     scratchPreset: state.scratchPreset,
     scratchClicks: state.scratchClicks,
     scratchGate: state.scratchGate,
@@ -630,8 +631,10 @@ const controller = player.canvas.mount(canvas, {
 });
 ```
 
-The bundled page mounts its canvas automatically. Radial `SCRATCH` and `CLICKS`
-buttons cycle through every preset and click count with pointer or touch input.
+The bundled page mounts its canvas automatically. Eight compact, equal preset
+sectors sit at the upper left and right of the platter, so pointer and touch
+users can select a technique without cycling. A radial `CLICKS` slider follows
+`DRUM` as the final technique control and directly selects `1..8`.
 The advanced dropdown contains the equivalent native HTML controls plus
 keyboard-operable `NEXT` and `+1` buttons. It starts collapsed and remains in
 the initial viewport in the default embed.
@@ -669,6 +672,16 @@ Or individually:
 player.canvas.setComponentVisible("crossfader", false);
 player.canvas.setComponentVisible("tonearmGuide", false);
 player.canvas.setStrobeLight(true);
+```
+
+Scratch UI is optional. The click slider only exists when both
+`scratchPreset` and `scratchClicks` are visible. Hide both without changing the
+engine or API:
+
+```js
+player.canvas.configure({
+  components: { scratchPreset: false, scratchClicks: false }
+});
 ```
 
 ### Theme
@@ -820,16 +833,23 @@ acoustic/surface effect groups, `stylusTracingLimit` and
 The browser host publishes runtime setters for the two strengths and switches
 effect groups during scratch replay through `setEffects`.
 
-### Manual crossfader and scratch gate
+### Crossfader ownership
 
-The manual crossfader and assisted scratch gate are independent gain stages:
+The selected scratch mode owns the real audible crossfader:
 
 ```text
-deck gain = channel gain × manual crossfader curve × scratch-technique gate
+baby preset:      deck gain = channel gain × manual crossfader curve
+automatic preset: deck gain = channel gain × Rust scratch-technique gate
 ```
 
-Changing a technique does not move or overwrite the manual XFADE value. The
-gate runs once per output frame inside `ScratchAcousticDsp`; it uses filtered
+`baby` is the manual opt-out. Every other preset drives XFADE from the Rust gate
+once per output frame. The visible XFADE follows that same gate. Directly moving
+XFADE selects `baby` and transfers ownership to the manual fader. The stored
+manual position remains available as `state.crossfader`; the audible position
+is `state.effectiveCrossfader`, and `state.crossfaderOwner` reports `manual` or
+`scratch-preset`.
+
+The gate runs inside `ScratchAcousticDsp`; it uses filtered
 hand intent for responsive direction changes. Confirmed-direction rendered
 travel controls pattern phase. Residual outgoing motion cannot spend the new
 stroke pattern before the audible groove reverses. Phase freezes at rest and
@@ -837,9 +857,8 @@ resets on a confirmed reversal. It does not use `requestAnimationFrame` or wall
 clock time.
 Its short speed-adaptive envelope removes discontinuities at gate edges. The
 gate is applied after programme and foley are mixed. During performance replay,
-frame-timed manual-fader events are converted through the recorded sharp curve
-and applied as a separate post-gate Rust gain, rather than being folded into the
-technique state.
+frame-timed manual-fader events are converted through the recorded sharp curve.
+They affect audio in `baby`; automatic presets retain gate ownership.
 
 The eight profiles and their click defaults are:
 
@@ -855,8 +874,7 @@ The eight profiles and their click defaults are:
 | `drum` | 1 | Short velocity-qualified onset, reversal and high-acceleration attacks. |
 
 Click counts are integer-clamped to `1..8`. Selecting a preset restores that
-preset's default click count; a later click-count change adjusts the pattern
-without moving the manual crossfader.
+preset's default click count; a later click-count change adjusts the pattern.
 
 ### Surface and handling layers
 
@@ -1009,13 +1027,18 @@ http://localhost:5193/dj-validation.html
 The console embeds the real player. It records the hardware chain, physical
 loopback, participant blocks, browser playback statistics, pointer-command
 latency, ABX trials, live routines, preflight declarations and artifact hashes.
-It saves a local draft and exports schema-version-3 JSON. It also exports the
+Its pointer pad measures the actual controller's pointer type, cadence,
+coalesced samples, pressure range, contact geometry, simultaneous touches and
+cancellation state. Touch sessions require a two-finger sample. Mouse,
+trackpad and finger touch remain full-contact grip; only pen pressure supplies
+variable grip. It saves a local draft and exports schema-version-4 JSON. It also exports the
 captured movement trace with a browser-computed SHA-256 hash.
 
 The console refuses release measurements and audio blocks if the build came
 from a dirty worktree, if the draft commit differs from the running build, or
 if a shipped acoustic, surface, limiter, or fader setting has changed. The
-console invalidates a block if these settings change during collection.
+console invalidates a block if these settings change during collection. It also
+refuses a block until the measured pointer-input profile passes.
 
 Blind listening uses a separate coordinator/operator workflow. The coordinator
 prepares one package per participant from fresh, matched physical and player WAV
@@ -1160,7 +1183,12 @@ Publishing `record-player` does not package or publish `player-wasm`. It is not 
 
 ## Motor and needle behavior
 
-The platter motor is independent from program playback. `START - STOP` can always start or stop the turntable, including before a record finishes decoding and while the needle is raised. The canvas record and strobe rings follow motor state rather than the audio readhead. Once the first decoded PCM chunk is available, lowering the needle onto a running platter begins playback. Lifting it silences/freezes the groove position without stopping the visible platter.
+The platter motor is independent from program playback. `START - STOP` can
+always start or stop the turntable, including before a record is loaded or
+while it decodes. The canvas record and strobe rings follow the Rust-owned
+physical platter phase. Loading preserves a live motor. The needle remains up
+until PCM is ready, then lowers automatically and starts the program. Lifting
+it silences and freezes the groove position without stopping the platter.
 
 ## Message tracing
 
