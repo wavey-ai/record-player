@@ -1,7 +1,22 @@
 # Playback and Scratch Engine Refactor Plan
 
-Status: implementation plan approved by repository audit; work starts from checkpoint
-`5eccda9` (`Checkpoint audio preview and capture support`).
+Status: automated implementation complete as of 2026-07-20. The original phases
+below are retained as the implementation record from checkpoint `5eccda9`
+(`Checkpoint audio preview and capture support`). Full browser/hardware runs and
+the blind DJ protocol remain outstanding, so no perceptual-indistinguishability
+claim is made.
+
+Current automated evidence:
+
+- `cargo test --workspace`: 78 tests (73 `record-player`, 5 `player-wasm`).
+- `node --test test/*.test.mjs`: 22 tests.
+- `npm run build`: both browser WASM packages build in release mode.
+- `npm run bench:worklet`: real release WASM in the deterministic worklet harness;
+  p95 `0.0389 ms` (`1.46%`) normal and `0.2135 ms` (`8.01%`) alternating
+  `±8×` crab/8. A fresh six-second stereo PCM window measured p95 `0.5699 ms`
+  (`21.37%`) and maximum `1.1154 ms` (`41.83%`) against a `2.667 ms` quantum.
+- A real browser audio-thread deadline run, the multi-pointer browser smoke and
+  the human protocol in `DJ_VALIDATION_PROTOCOL.md` are explicitly outstanding.
 
 ## Objective and proof standard
 
@@ -30,8 +45,14 @@ latency.
 
 ## Architectural decisions
 
-1. The Rust `ScratchAcousticDsp` remains the only programme-audio renderer. There
+1. The Rust `ScratchAcousticDsp` remains the only programme-audio renderer and
+   owns the final per-sample packet/mixer output gain. The browser `GainNode`
+   remains unity and exists only for routing and capture. There
    will be no second scratch buffer-source path.
+   More generally, per-sample and state-critical engine behavior belongs in Rust
+   by default. JavaScript retains browser scheduling, pointer input and bounded
+   buffer coordination only where moving the boundary would add measured work or
+   latency; performance measurements, not language preference, decide exceptions.
 2. Source positions use source frames. Performance timing uses AudioContext/output
    frames. Names and schemas must say which clock they use.
 3. Pointer geometry and coalesced event collection live in the UI layer. Physical
@@ -50,10 +71,10 @@ latency.
    bounded window, but may not restore full-record worklet allocations.
 7. Published records enter a physical run-out/deadwax by default. Conventional
    authoring-preview audio may opt into a clean end explicitly.
-8. The existing sharp `0.08` standalone fader cut remains the pro-DJ default, while
-   the curve becomes explicit/configurable and is regression-tested. The reference
-   app's current `0.22` width is documented as a different tuning, not silently
-   treated as parity.
+8. The sharp `0.08` fader cut is shared by the Rust mixer and replay DSP, named in
+   schema metadata and regression-tested. A public curve-tuning API is deferred
+   until blind DJ evidence justifies the extra variability; the reference app's
+   `0.22` width remains a documented different tuning, not silent parity.
 
 ## Phase 1 — clocks, ownership and state transitions
 
@@ -81,7 +102,7 @@ Acceptance evidence:
 
 ## Phase 2 — bounded, continuous PCM delivery
 
-- Reconnect `pcm-window-worker.js` and the two shared 12-second banks.
+- Reconnect `pcm-window-worker.js` and the two shared 6-second banks.
 - Keep full Int16 programme storage outside the AudioWorklet; keep only the active
   Float32 window in Rust.
 - Route progressive segments through the worker, merge written ranges, and expose
@@ -213,8 +234,9 @@ Acceptance evidence:
 - Record preset, click and manual fader changes as output-frame-timestamped events.
 - Scale schema-v1 timestamps during import/replay and default them to Baby/manual.
 - Apply replay events inside the worklet at exact sub-quantum frame offsets.
-- Snapshot and restore motor, playing, needle, effects, preset/gate and host/core
-  public state on completion and cancellation.
+- Snapshot and restore motor, playing, needle, effects, preset/gate and final
+  output-gain state in Rust on completion and cancellation; keep host/core
+  public state untouched throughout replay.
 - Validate/migrate IndexedDB records instead of blindly accepting arbitrary shapes.
 
 Acceptance evidence:
@@ -226,9 +248,10 @@ Acceptance evidence:
 
 ## Phase 7 — public controls, UI, documentation and measurement
 
-- Add public preset/click/fader-curve APIs, distinct stylus-tracing and programme
-  acceleration-limit controls, state subscription fields and postMessage bridge
-  messages.
+- Add public preset/click APIs, fixed fader-curve metadata, distinct stylus-tracing
+  and programme acceleration-limit controls, state subscription fields and
+  postMessage bridge messages. Public fader-curve tuning remains deliberately
+  deferred pending human validation.
 - Add real preset and click controls to the canvas plus accessible fallback HTML;
   reflect (but do not drive) audio-owned gate/direction telemetry.
 - Publish AudioContext `baseLatency`/`outputLatency` and measured pointer-command-
@@ -249,9 +272,12 @@ Acceptance evidence:
 - The final audit maps every item above to a passing command, trace, browser result
   or explicitly outstanding human validation result.
 
-## Commit strategy
+## Completion boundary
 
-The checkpoint commit already preserves the pre-refactor work. Implementation will
-be committed in reviewable slices (clock/state, windows, gestures, gate, fidelity,
-replay/UI/docs) after each slice's focused tests pass. Unrelated user changes will
-not be rewritten.
+The checkpoint preserves the pre-refactor work, and implementation was committed
+in reviewable clock/state, mechanics, limiter, replay and formatting slices before
+the integrated browser-host/worklet pass. Automated acceptance is complete for the
+native, pure-JavaScript and real-release-WASM harnesses listed above. The remaining
+deployment claim requires a real browser audio-thread run, the multi-pointer browser
+smoke and the pre-registered DJ protocol; those results must be attached here rather
+than inferred from unit tests.

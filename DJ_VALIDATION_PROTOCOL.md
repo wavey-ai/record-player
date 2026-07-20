@@ -19,7 +19,10 @@ been completed and its raw results retained.
   exact digital master loaded into the player.
 - Capture the physical reference and browser output through the same interface,
   clock, channel count and sample rate. Bypass loudness normalization, limiters,
-  enhancement and operating-system spatial audio.
+  enhancement and operating-system spatial audio everywhere outside the player.
+  Do not add an external HF limiter to make either condition resemble the other;
+  document the physical cutting/mastering chain separately from the player's
+  internal programme limiter.
 - Calibrate 1 kHz programme RMS to within 0.1 dB and align fixed path delay before
   randomization. Do not normalize individual scratch excerpts after capture.
 - Record browser, OS, input device, display sampling rate, AudioContext sample
@@ -27,6 +30,25 @@ been completed and its raw results retained.
   measured pointer-to-output latency distribution.
 - Keep an unprocessed master, the physical capture, the player capture, movement
   traces and randomized trial manifest under content hashes.
+- Pin every candidate manifest to the shipped Rust settings: programme HF
+  acceleration limit `0.35`, stylus-tracing limit `0.72`, sharp fader curve
+  `0.08`, selected acoustic/surface flags, native RPM and end policy. Silent
+  setting changes invalidate the block.
+
+The primary blind condition uses the shipped `0.35`/`0.72` pair. Run a separate
+diagnostic block from the same source and gestures with these four cells:
+
+| HF acceleration | Stylus tracing | Purpose |
+| ---: | ---: | --- |
+| `0.35` | `0.72` | Shipped candidate and primary acceptance condition. |
+| `0` | `0.72` | Exact programme-limiter bypass; isolates its contribution. |
+| `0.35` | `0` | Added stylus-tracing-limit bypass; isolates that model. |
+| `0` | `0` | Joint diagnostic control. |
+
+Include clean sibilants, cymbal attacks and deliberately harsh upper-band
+transients as well as benign bright material. The diagnostic cells explain cues;
+they do not replace the pre-registered primary condition or permit choosing the
+best-sounding settings after results are known.
 
 ## Mechanical and signal preflight
 
@@ -41,6 +63,8 @@ measurement capture covering:
 4. 33⅓ and 45 RPM, 44.1/48/96 kHz source clocks, seam crossings and progressive
    window boundaries;
 5. manual-fader operation while a separate pointer owns the record.
+6. the four pinned HF/tracing cells above, including exact-bypass checks and
+   confirmation that programme limiting does not duck lows/mids or surface foley.
 
 Reject the candidate before listening if it clips unexpectedly, reads undecoded
 zeros, loses a pointer, changes timing with pointer event rate, leaves the gate

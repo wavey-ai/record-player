@@ -24,6 +24,11 @@ player.seekRatio(0.5);
 await player.setNeedleLifted(false);
 ```
 
+`loadRecord(file, { cleanEnd: false })` and `loadRecordFromUrl(url, options)`
+default to the published-record ending: two output-clock-timed deadwax turns,
+then a persistent run-out lock until the transport is stopped. Pass
+`cleanEnd: true` to stop at the programme boundary instead.
+
 Authoring and presave surfaces can load a conventional audio file before a
 Bitneedle PNG exists. It is decoded to PCM and sent through the same Rust
 transport, AudioWorklet and acoustic scratch renderer as a published record:
@@ -33,8 +38,18 @@ await player.loadAudioFile(audioFile, {
   artworkUrl: URL.createObjectURL(artworkFile),
   title: "Afterglow",
   artist: "Mara Vela",
+  cleanEnd: true,
 });
 ```
+
+`loadAudioFile` defaults `cleanEnd` to `true`; pass `false` to preview the
+published deadwax behavior. Lead-in and deadwax use the surface-only Rust render
+path: their boundaries are scheduled in output frames, platter motion continues,
+and the programme readhead is neither advanced nor sampled under the foley.
+At programme EOF the worklet splits the final quantum at the terminal frame;
+deadwax fills the published-record suffix without resetting platter inertia,
+while `cleanEnd` fills the suffix with zeroes. Starting either kind of loaded
+record runs two lead-in turns.
 
 To combine the rendered player audio with a canvas or camera track, request the
 player's capture stream. This is the post-gain output from the existing player
@@ -64,9 +79,64 @@ RPM accepts a continuous value from 16 through 90. Volume and crossfader accept 
 await player.beginScratch({ pointerId, rotationDegrees });
 await player.updateScratch({ positionFrames, rate, rotationDegrees, impulse });
 await player.endScratch({ rotationDegrees, resumePlayback: true });
+
+player.setScratchPreset("flare");
+player.setScratchClicks(2);
 ```
 
+The manual crossfader and the audio-rate technique gate are independent:
+
+```text
+deck gain = channel gain × manual crossfader curve × scratch-technique gate
+```
+
+`setScratchPreset(name)` returns the selected normalized name and resets its
+default click count. `setScratchClicks(n)` returns the rounded integer click
+count after clamping it to `1..8`; it never moves the manual crossfader. A new
+player starts on `baby`/1 click.
+
+| Preset | Default clicks | Gate behavior |
+| --- | ---: | --- |
+| `baby` | 1 | Open gate; manual fader remains authoritative. |
+| `stab` | 1 | Forward travel opens; reverse/hold cuts. |
+| `chirp` | 1 | Direction-aware opening/closing within a stroke. |
+| `transform` | 2 | Repeated travel-locked chops. |
+| `flare` | 1 | Open phrase with short closed notches. |
+| `crab` | 4 | Rapid travel-locked open pulses. |
+| `orbit` | 2 | Symmetric flare-style notches in both directions. |
+| `drum` | 1 | Short onset, reversal and acceleration attacks. |
+
+The gate is evaluated for every output frame in Rust. Filtered hand intent
+drives responsive direction decisions, while audible rendered travel drives
+phase; phase freezes at rest and resets only on a confirmed reversal.
+
+Two independent advanced controls expose different HF processes:
+
+```js
+player.setHighFrequencyAccelerationLimit(0.35); // default
+player.setStylusTracingLimit(0.72);              // default
+```
+
+Both accept finite strengths clamped to `0..1`; a non-finite value throws. The
+first is a stereo-linked,
+`5.2 kHz` complementary programme upper-band acceleration limiter: it reacts to
+rapid upper-band second differences and reversals of the upper signal's
+sample-to-sample velocity, and attenuates only the upper residual through a
+soft knee with a `0.12 ms` attack and `32 ms` release. It is an exact bypass at
+`0` and is not driven by playback speed; lows/mids, source texture, foley and
+surface-only renders remain outside it. The second controls the
+separate source-curvature × travel-velocity stylus-tracing model. The bundled
+page puts both sliders under **ADVANCED CONTROLS**.
+
 Canvas code should derive pointer geometry only. It must not access the AudioWorklet, WASM instances, PCM windows, or transport clock directly.
+
+The bundled canvas feeds `getCoalescedEvents()` samples to the canonical
+`web/scratch-gesture.js` tracker in timestamp order. The tracker performs
+incremental multi-turn angle unwrap, a 4 ms differentiation floor, adaptive
+35 ms/fast-reversal smoothing, direction hysteresis, source-position clamping
+and lifted-needle visual-only motion. Pressure and grip are additive telemetry;
+callers using the programmatic methods remain responsible for deriving their own
+pointer geometry.
 
 ## State
 
@@ -74,8 +144,14 @@ Canvas code should derive pointer geometry only. It must not access the AudioWor
 const unsubscribe = player.subscribe(state => {
   state.ready;
   state.playing;
+  state.motorRunning;
+  state.leadInActive;
+  state.deadwaxActive;
+  state.deadwaxProgress;
   state.needleLifted;
   state.scratching;
+  state.scratchReplayActive;
+  state.buffering;
   state.positionSeconds;
   state.durationSeconds;
   state.positionRatio;
@@ -84,6 +160,23 @@ const unsubscribe = player.subscribe(state => {
   state.playbackRate;
   state.volume;
   state.crossfader;
+  state.scratchPreset;
+  state.scratchClicks;
+  state.scratchGate;
+  state.scratchGateTarget;
+  state.scratchDirection;
+  state.scratchMoving;
+  state.scratchGatePhase;
+  state.scratchStrokeProgress;
+  state.effectiveRate;
+  state.highFrequencyAccelerationLimit;
+  state.stylusTracingLimit;
+  state.pointerToAudioLatencyMs;
+  state.audioBaseLatencyMs;
+  state.audioOutputLatencyMs;
+  state.sampleRate;
+  state.outputSampleRate;
+  state.cleanEnd;
   state.recordProfile;
   state.payloadContainer;
   state.releaseId;
@@ -92,6 +185,19 @@ const unsubscribe = player.subscribe(state => {
   state.trackCount;
 });
 ```
+
+`sampleRate` is the source-PCM clock and `outputSampleRate` is the AudioContext
+clock (or `null` before audio initialization). `effectiveRate` is signed (`1`
+is nominal; negative is reverse).
+`scratchReplayActive` remains true through replay setup, playback and the
+worklet's Rust-state restoration acknowledgement, so live scratch input and
+overlapping replays cannot race it.
+`scratchGate` is the de-clicked applied gain, `scratchGateTarget` is its current
+target, and `scratchDirection` is `-1`, `0` or `1`. Gate phase and stroke
+progress are travel-derived values; the worklet publishes snapshots rather than
+calling JavaScript once per audio frame. Browser/command latency values can be
+`null` until measurable. `deadwaxProgress` reaches `1` at the end of the
+two-turn traversal; `deadwaxActive` stays true during the persistent lock.
 
 ## Cache handler
 
@@ -241,6 +347,15 @@ iframe.contentWindow.postMessage({ type: "bitneedle-set-crossfader", crossfader:
 iframe.contentWindow.postMessage({ type: "bitneedle-set-needle-lifted", lifted: true }, "*");
 ```
 
+Set scratch technique and the two independent HF strengths:
+
+```js
+iframe.contentWindow.postMessage({ type: "bitneedle-set-scratch-preset", preset: "crab" }, "*");
+iframe.contentWindow.postMessage({ type: "bitneedle-set-scratch-clicks", clicks: 8 }, "*");
+iframe.contentWindow.postMessage({ type: "bitneedle-set-hf-acceleration-limit", strength: 0.35 }, "*");
+iframe.contentWindow.postMessage({ type: "bitneedle-set-stylus-tracing-limit", strength: 0.72 }, "*");
+```
+
 Change embed options live — any of the `bg`/`tone`/`turntable`/`controls`/`status`/`light`/`strobe`/`dots`/`arm`/`arc`/`load` query params supported by `/embed.html` (see "Embed URL parameters" below) can also be changed after the iframe has already loaded, without reloading it:
 
 ```js
@@ -322,14 +437,56 @@ Example:
 
 ## Scratch performance recording and replay
 
-Scratch performances are stored as normalized engine motion events with audio-frame offsets. Pointer coordinates and rendered audio are not stored.
+Scratch performances are stored as normalized engine commands. Pointer
+coordinates and rendered audio are not stored. Schema v2 separates its clocks:
+
+- `sourceSampleRate` defines every `positionFrames` value.
+- `outputSampleRate` defines event `frameOffset` and `durationFrames`.
+- `engine.gateAlgorithmVersion` identifies the gate behavior.
+- `initialState` captures preset, clicks, manual crossfader/fader curve, and the
+  programme-HF and stylus-tracing strengths.
+- `scratch-preset`, `scratch-clicks` and `manual-crossfader` changes are stored
+  as output-frame-timed events alongside scratch start/motion/end.
+
+```js
+{
+  schemaVersion: 2,
+  sourceSampleRate: 48000,
+  outputSampleRate: 48000,
+  durationFrames,
+  engine: { gateAlgorithmVersion: 1 },
+  initialState: {
+    positionFrames,
+    preset: "flare",
+    clicks: 1,
+    manualCrossfader: 0.5,
+    faderCurve: "sharp-0.08",
+    highFrequencyAccelerationLimit: 0.35,
+    stylusTracingLimit: 0.72
+  },
+  events: [
+    { type: "scratch-motion", frameOffset, positionFrames, rate, impulse },
+    { type: "manual-crossfader", frameOffset, value }
+  ]
+}
+```
+
+Schema v1 is migrated when normalized, saved, loaded, imported or replayed.
+Its single `sampleRate` is interpreted as both legacy clocks; source positions
+and output offsets/duration are then rescaled independently to the current
+record and AudioContext. Missing technique data defaults to `baby`, one click
+and the sharp fader curve. Both newer limit strengths migrate to `0` (exact
+bypass), preserving the sound of takes recorded before those controls existed.
+Normalization also caps a take at 65,536 events and at 128 events in any
+128-frame output window; denser imports are rejected before they reach the
+AudioWorklet.
 
 ```js
 const player = globalThis.vin.yl.player;
 
 player.startScratchRecording({ name: "flare take 1" });
 
-await player.beginScratch({ positionFrames: player.getState().positionSeconds * 48000 });
+await player.beginScratch({ positionFrames: player.getState().positionFrames });
 await player.updateScratch({ positionFrames: 120000, rate: -0.8, impulse: 0.2 });
 await player.endScratch({ resumePlayback: true });
 
@@ -357,7 +514,8 @@ Replay through the original acoustic model:
 await player.replayScratch(performances[0], { effects: "original" });
 ```
 
-Replay the same mechanical trajectory without surface or acoustic coloration:
+Replay the same mechanical trajectory without the selectable surface or
+acoustic effect groups:
 
 ```js
 await player.replayScratch(performances[0], { effects: "dry" });
@@ -372,6 +530,20 @@ await player.replayScratch(performances[0], {
 ```
 
 Replay events are scheduled inside the AudioWorklet using audio-frame offsets. Events can be applied within a render quantum rather than being delayed to animation frames or main-thread timers.
+
+Replay duration is also an exact output-frame boundary. Rust keeps a lightweight
+snapshot of the pre-replay dynamic DSP state (not PCM), allowing platter inertia,
+filters, gate, fader and final output-gain state to resume for the suffix of the
+same render quantum. The public replay promise remains active until the worklet
+acknowledges that Rust restoration. A live transport, seek, RPM, volume,
+crossfader, preset or advanced-limiter command interrupts replay first; replay
+telemetry is never fed back into the persistent player-core position.
+
+The worklet applies preset/click changes and converts the recorded sharp manual
+crossfader position at the scheduled frame; Rust applies the manual fader as a
+separate post-gate gain. The programme upper-band limiter is independent of the
+`acoustic`/`surface` flags and uses the stored initial strength, including exact
+bypass for migrated v1 takes.
 
 ## Canvas renderer
 
@@ -430,14 +602,14 @@ player.canvas.setTheme({
   background: "transparent",
   line: "#050505",
   mutedLine: "rgba(5,5,5,0.28)",
-  button: "rgba(255,255,255,0.08)",
-  buttonActive: "#050505",
-  buttonText: "#050505",
-  buttonActiveText: "#f00020",
+  controlFill: "rgba(255,255,255,0.08)",
+  controlActive: "#050505",
+  controlText: "#050505",
+  controlActiveText: "#f00020",
   accent: "#00bfd3",
-  recordFallback: "#111111",
-  label: "#f6d800",
-  syncDot: "#050505",
+  recordFallback: "transparent",
+  label: "transparent",
+  syncDot: "rgba(0,0,0,0.23)",
   syncLit: "#00bfd3"
 });
 ```
@@ -448,7 +620,7 @@ The current configuration is available with:
 const config = player.canvas.getConfig();
 ```
 
-The canvas currently provides direct interaction for record scratching, start/stop, needle lift, RPM switching, position seek, volume, and crossfader. All actions call the same public player methods available to custom HTML, SVG, WebGL, or canvas interfaces.
+The canvas currently provides direct interaction for record scratching, start/stop, needle lift, RPM switching, position seek, volume, and crossfader. All actions call the same public player methods available to custom HTML, SVG, WebGL, or canvas interfaces. Pointer ownership is held in a pointer-ID map, so one pointer can keep control of the record while another adjusts XFADE, CH or PITCH; releasing the second pointer leaves the scratch gesture active.
 
 ## Radial canvas controls
 
@@ -507,24 +679,76 @@ Dragging the record scratches. Dragging either the subtle stylus point or its do
 
 The workspace contains two browser-facing Rust crates:
 
-- `record-player`: real-time transport, mixer, scratch and acoustic rendering.
-- `player-wasm`: PNG decoding, descriptor/header validation, payload extraction, sidecars, ECDC parsing, LM decoding, cache identities and playback metadata.
-
-The decoder worker imports only `./wasm/player-wasm/player_wasm.js`. The AudioWorklet imports only `./wasm/record-player/record_player.js`.
-
-
-## Rust workspace boundary
-
-The workspace contains two browser-facing Rust crates:
-
 - `record-player`: the real-time transport, mixer, scratch and acoustic engine loaded by the AudioWorklet.
 - `player-wasm`: the player-only record reader and ECDC decoder loaded by the decoder worker.
 
-`player-wasm` deliberately exports only the functions used by `web/record-decoder-worker.js`. It does not expose record authoring, rendering, sidecar inspection, cache encryption, remote-scratch identity or wallet helpers. Its generated browser package is `dist/wasm/player-wasm/player_wasm.js`.
+The decoder worker imports `./player-wasm/player_wasm.js`. The AudioWorklet
+imports `./record-player/record_player.js`; the host compiles its matching WASM
+module and passes that compiled module into the worklet.
+
+All per-sample DSP and the state-critical transport, scratch, gate, final
+packet/mixer gain, replay-fader and acoustic models are inside `record-player` Rust/WASM. The
+AudioWorklet JavaScript owns output-frame scheduling, bounded-window
+coordination and the required interleaved-WASM-to-planar-Web-Audio copy.
+Gesture/UI code stays in JavaScript for direct browser pointer access; the
+off-thread PCM worker retains signed-16-bit source data and repairs and assembles
+banks there to avoid whole-record WASM crossings. Engine policy defaults to Rust
+unless measurement shows that crossing the browser boundary would add work or
+latency.
+
+The decoder and tape/cache paths use `player-wasm` for record/ECDC parsing and
+the required cache encryption helpers; the real-time AudioWorklet does not
+import that crate.
+
+The current real-WASM timing smoke measured p95 render calls of `0.0389 ms`
+(`1.46%` of budget) for normal playback and `0.2135 ms` (`8.01%`) for
+alternating `±8×` `crab`/8-click scratching. Applying a fresh six-second stereo
+PCM window measured p95 `0.5699 ms` (`21.37%`) and maximum `1.1154 ms`
+(`41.83%`). For comparison, a 128-frame quantum at 48 kHz lasts `2.667 ms`.
+Those measurements cover engine timing, not subjective feel or sound quality.
+
+Run `npm run bench:worklet` to rebuild release WASM before timing it. The figures
+above are a representative 2026-07-20 Apple Silicon macOS 26.5 / Node 26.3.0
+run. This is a deterministic Node harness with real release WASM and a mocked
+`AudioWorkletProcessor`, with render p95 guarded below 50% and PCM-window p95
+and maximum guarded below one full quantum; it is not a browser audio-thread
+deadline measurement.
 
 ## Progressive startup
 
-Record decoding begins playback-capable windowing after the first completed PCM segment. `loadRecord()` still resolves after the full decode and cache write, but subscribers may observe `loaded: true` and start playback earlier while the remainder continues decoding.
+Record decoding begins playback-capable windowing after the first completed PCM
+segments. `loadRecord()` resolves once the first contiguous playback window
+(currently up to three seconds) is ready; the remaining decode and cache work
+continues in the background. Subscribers observe `ready: true` at that same
+playback-ready boundary.
+
+The PCM worker retains signed 16-bit source storage and publishes bounded
+Float32 regions rather than transferring a full floating-point record into the
+AudioWorklet. On a cross-origin-isolated page, two six-second
+`SharedArrayBuffer` banks alternate between fill and render use. The worklet
+applies only completed bank generations, Rust copies only the active source
+window, and replacement requests are coalesced while a fill or apply is in
+flight. A transferable bounded-window fallback exists when shared memory is not
+available.
+
+Progressive availability covers only the contiguous decoded prefix. Seeking or
+scratching cannot expose an undecoded zero-filled tail as valid PCM. The worker
+also performs the authoritative 24-sample Hermite repair at contiguous chunk
+joins before a window is copied.
+
+## Audio rendering and validation
+
+Fractional sampling uses four-point Catmull-Rom near normal speed. From a
+`1.05×` source-frame step it blends toward a 24-tap Blackman-windowed sinc, and
+uses the band-limited path fully from `1.5×`. The cutoff follows the absolute
+source step, so the same anti-alias behavior applies to fast forward and reverse
+motion.
+
+Automated checks do not establish subjective vinyl similarity or tactile
+quality. The outstanding blind listening, control-task and free-performance
+procedure is specified in
+[`DJ_VALIDATION_PROTOCOL.md`](./DJ_VALIDATION_PROTOCOL.md); this API reference
+does not claim results from that human validation.
 
 
 ## Transport motor
