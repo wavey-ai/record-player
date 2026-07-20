@@ -55,6 +55,7 @@ The audit compared those files with:
 | True-speed lock | Gaussian pull near `1×` | Same in Rust command path | Covered |
 | Wow | Motion-locked, `1.8 s` basis | Native-RPM revolution lock | Beyond reference |
 | Flutter | `6.4 Hz`, speed-aware | Same | Covered |
+| Visible platter phase | Programme-time and pointer-derived | Rust-rendered phase plus rate extrapolation | Beyond reference |
 | Basic interpolation | Four-point cubic | Same below the high-rate blend | Covered |
 | High-rate interpolation | Cubic at all rates | Adaptive 24-tap band-limited path | Beyond reference |
 | Stylus drag | Speed-aware low-pass | Same base model | Covered |
@@ -138,7 +139,10 @@ measured audio-thread reason to make either change.
 ## Automated evidence
 
 - `cargo test --workspace`: 86 tests.
-- `node --test test/*.test.mjs`: 63 tests.
+- `node --test test/*.test.mjs`: 64 tests.
+- The canvas regression anchors the visible platter to audio-owned phase and
+  covers half-speed forward motion, full-speed reverse motion and zero-rate
+  hold. It rejects nominal-RPM animation.
 - Two current worklet runs measured normal p95 at `1.44–1.45%` of a quantum.
 - They measured `7.80–7.86%` for alternating `±8×` Crab/8.
 - Direct copy into prepared Rust window storage reduced fresh six-second window

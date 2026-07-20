@@ -44,8 +44,8 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
   let destroyed = false;
   const activeGestures = new Map();
   let hitRegions = [];
-  let lastTimestamp = performance.now();
   let visualRotation = Number(snapshot.rotationDegrees) || 0;
+  let rotationClockAtMs = performance.now();
   let strobeLightOn = true;
   let latestGeometry = null;
   let latestStylus = null;
@@ -69,6 +69,7 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
       snapshot.playing ||
       snapshot.motorRunning ||
       snapshot.scratching ||
+      Math.abs(Number(snapshot.effectiveRate) || 0) > 0.0001 ||
       snapshot.loading ||
       snapshot.decoding ||
       Math.abs(uiOpacity - uiFadeTo) > 0.001
@@ -243,20 +244,24 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
     ctx.fill();
   }
 
+  function advanceAudioOwnedRotation(timestamp) {
+    if (hasRecordGesture()) return;
+    const dt = Math.min(0.1, Math.max(0, (timestamp - rotationClockAtMs) / 1000));
+    rotationClockAtMs = timestamp;
+    const effectiveRate = Number(snapshot.effectiveRate) || 0;
+    const nativeRpm = Math.max(0, Number(snapshot.nativeRpm) || Number(snapshot.rpm) || 0);
+    visualRotation = (visualRotation + effectiveRate * nativeRpm * 6 * dt) % 360;
+  }
+
   function render(timestamp) {
     frame = 0;
     if (destroyed) return;
     const { width, height } = resize();
     updateUiFade(timestamp);
-    const dt = Math.min(0.1, Math.max(0, (timestamp - lastTimestamp) / 1000));
-    lastTimestamp = timestamp;
-    // Playback can be audible while the deck's transport flag is false (for
-    // example during the lead-in/deadwax handoff). Keep the platter moving
-    // for the actual playback state as well, otherwise audio plays while the
-    // record appears frozen.
-    if ((snapshot.motorRunning || snapshot.playing) && !snapshot.scratching) {
-      visualRotation = (visualRotation + (Number(snapshot.rpm) || 0) * 6 * dt) % 360;
-    }
+    // Rust publishes the rate that actually rendered. Extrapolate from the
+    // latest audio-owned phase so spin-up, braking, reverse motion, pitch slew
+    // and wow remain smooth between worklet telemetry messages.
+    advanceAudioOwnedRotation(timestamp);
     loadImage(snapshot.recordImageUrl);
     ctx.clearRect(0, 0, width, height);
     if (theme.background !== "transparent") {
@@ -516,6 +521,7 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
           pointerType: event.pointerType,
         });
       visualRotation = motion.rotationDegrees;
+      rotationClockAtMs = performance.now();
       player.endScratch({
         rotationDegrees: motion.rotationDegrees,
         resumePlayback: true,
@@ -537,11 +543,15 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
   }
 
   const unsubscribe = player.subscribe(next => {
-    const wasScratching = snapshot.scratching;
     const couldAutoFade = canAutoFadeUi(snapshot);
+    const rotationNow = performance.now();
+    advanceAudioOwnedRotation(rotationNow);
     snapshot = next;
-    if (!hasRecordGesture() && (next.scratching || wasScratching) && Number.isFinite(next.rotationDegrees)) {
-      visualRotation = next.rotationDegrees;
+    if (!hasRecordGesture()) {
+      if (!next.scratchReplayActive && Number.isFinite(next.rotationDegrees)) {
+        visualRotation = next.rotationDegrees;
+      }
+      rotationClockAtMs = rotationNow;
     }
     if (!canAutoFadeUi(next)) {
       clearIdleTimer();

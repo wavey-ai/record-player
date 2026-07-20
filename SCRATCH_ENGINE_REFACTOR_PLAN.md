@@ -9,7 +9,8 @@ is made.
 Current automated evidence:
 
 - `cargo test --workspace`: 86 tests (81 `record-player`, 5 `player-wasm`).
-- `node --test test/*.test.mjs`: 63 tests.
+- `node --test test/*.test.mjs`: 64 tests. The canvas test checks audio-owned
+  phase at half-speed forward, full-speed reverse and rest.
 - `npm run build`: both browser WASM packages build in release mode.
 - `npm run bench:worklet`: two release-WASM runs measured p95 at `1.44–1.45%`
   normal and `7.80–7.86%` for alternating `±8×` crab/8. Fresh six-second

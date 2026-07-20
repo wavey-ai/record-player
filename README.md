@@ -913,7 +913,14 @@ This is at least as precise as the legacy telemetry format, which intentionally 
 
 ### Motion and canvas sync
 
-The canvas advances the visible record from the published RPM during ordinary motor playback and follows explicit rotation state during scratching. Audio remains authoritative. The canvas never writes directly to DSP memory. The strobe renderer is visual calibration rather than an audio clock:
+Rust integrates platter phase from the rate that actually rendered. The host
+publishes that phase and effective rate. The canvas anchors to the phase and
+uses the effective rate only to draw smoothly between worklet messages. It
+therefore follows spin-up, braking, pitch slew, reverse motion, release and wow
+instead of advancing at an assumed nominal RPM. A live pointer remains the
+immediate visual authority while a hand owns the record. The canvas never
+writes directly to DSP memory. The strobe renderer is visual calibration rather
+than an audio clock:
 
 - physical rows rotate continuously
 - only the dots under the lamp receive the calibrated stroboscopic sample
