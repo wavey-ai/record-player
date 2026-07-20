@@ -703,6 +703,11 @@ pressure supplies it when available. Mouse and finger touch, including iPhone
 Haptic Touch, default to full grip because generic touch pressure is not a
 reliable force signal.
 
+The canvas is the only bundled record-gesture surface. The pages do not retain
+a hidden alternate platter or a second rate differentiator, so multi-turn
+unwrap, impulse qualification, pressure policy and cancellation cannot diverge
+between bundled input paths.
+
 Canvas pointer ownership is keyed by pointer ID rather than a single global
 gesture. One pointer can therefore hold the record while another adjusts XFADE,
 CH or PITCH; releasing the control pointer does not release the record pointer.

@@ -147,6 +147,9 @@ measured audio-thread reason to make either change.
 - The canvas regression anchors the visible platter to audio-owned phase and
   covers half-speed forward motion, full-speed reverse motion and zero-rate
   hold. It rejects nominal-RPM animation.
+- Both pages now expose only the canonical canvas record gesture. The
+  permanently hidden legacy platter and its single-turn, event-rate-dependent
+  differentiator were removed; no `abs(rate) / 3` move-impulse path remains.
 - Three current worklet runs measured normal p95 at `1.47%` of a quantum.
 - They measured `8.10–8.14%` for alternating `±8×` Crab/8.
 - Direct copy into prepared Rust window storage reduced fresh six-second window

@@ -12,6 +12,9 @@ Current automated evidence:
 - `node --test test/*.test.mjs`: 67 tests. Canvas tests check audio-owned phase
   at half-speed forward, full-speed reverse and rest, plus all eight preset and
   click-count selections through independent mouse and touch gestures.
+- The canvas is the only bundled scratch surface. The permanently hidden legacy
+  platter and its separate single-turn, event-rate-dependent differentiator
+  were removed, so every bundled gesture uses the canonical tracker.
 - `npm run build`: both browser WASM packages build in release mode.
 - `npm run bench:worklet`: three release-WASM runs measured p95 at `1.47%`
   normal and `8.10–8.14%` for alternating `±8×` crab/8. Fresh six-second

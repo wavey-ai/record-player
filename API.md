@@ -181,6 +181,9 @@ pressure values do not reliably represent force. This includes iPhone Haptic
 Touch, which is not used as a force input. Callers using the programmatic
 methods remain responsible for deriving their own pointer geometry.
 
+The bundled pages expose one record-gesture surface: the canvas. There is no
+hidden legacy platter with separate angle, velocity or impulse logic.
+
 ## State
 
 ```js

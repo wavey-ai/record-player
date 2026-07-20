@@ -358,10 +358,8 @@ const elements = {
   play: playerRoot.querySelector("#play"),
   needle: playerRoot.querySelector("#needle"),
   tape: playerRoot.querySelector("#tape"),
-  platter: playerRoot.querySelector("#platter"),
   seek: playerRoot.querySelector("#seek"),
   status: playerRoot.querySelector("#status"),
-  recordImage: playerRoot.querySelector("#record-image"),
   metadata: playerRoot.querySelector("#record-metadata"),
   metaProfile: playerRoot.querySelector("#meta-profile"),
   metaContainer: playerRoot.querySelector("#meta-container"),
@@ -401,11 +399,6 @@ const state = {
   draggingSeek: false,
   scratching: false,
   scratchGrip: 0,
-  scratchPointerId: null,
-  scratchStartAngle: 0,
-  scratchStartPosition: 0,
-  scratchLastAngle: 0,
-  scratchLastTime: 0,
   rotation: 0,
   rpm: 33.3333333333,
   lastReportedPosition: 0,
@@ -544,16 +537,8 @@ function seekInteractionReady() {
 }
 
 function clearLiveScratchInteraction() {
-  const pointerId = state.scratchPointerId;
   state.scratching = false;
-  state.scratchPointerId = null;
   state.replayScratching = false;
-  if (
-    pointerId != null
-    && elements.platter?.hasPointerCapture?.(pointerId)
-  ) {
-    elements.platter.releasePointerCapture(pointerId);
-  }
 }
 
 async function interruptScratchReplay(action = "Live control") {
@@ -1364,7 +1349,6 @@ function failCurrentLoad(loadSequence, error, label = "Player load failed") {
     state.pendingAutomaticDeadwax = null;
     if (state.recordObjectUrl) URL.revokeObjectURL(state.recordObjectUrl);
     state.recordObjectUrl = "";
-    if (elements.recordImage) elements.recordImage.removeAttribute("src");
     elements.play.disabled = true;
     elements.needle.disabled = true;
     elements.seek.disabled = true;
@@ -1497,10 +1481,6 @@ async function loadAudioFileForSequence(
   state.streamReadyResolve = null;
 
   state.recordObjectUrl = String(artworkUrl || "");
-  if (elements.recordImage) {
-    elements.recordImage.src = state.recordObjectUrl;
-    elements.recordImage.alt = String(title || file.name || "Audio preview");
-  }
   if (elements.metadata) elements.metadata.hidden = true;
   if (elements.metaProfile) elements.metaProfile.textContent = "audio-preview";
   if (elements.metaContainer) elements.metaContainer.textContent = file.type || "audio";
@@ -2624,7 +2604,6 @@ function handleWorkletMessage(event) {
     if (!replayActive && Number.isFinite(rotationTurns)) {
       if (state.lastDspRotationTurns != null && !state.scratching) {
         state.rotation = (state.rotation + (rotationTurns - state.lastDspRotationTurns) * 360) % 360;
-        elements.platter.style.setProperty("--rotation", `${state.rotation}deg`);
       }
       state.lastDspRotationTurns = rotationTurns;
     }
@@ -2849,7 +2828,6 @@ async function loadFileForSequence(
   updateTapeButton();
   if (state.recordObjectUrl) URL.revokeObjectURL(state.recordObjectUrl);
   state.recordObjectUrl = URL.createObjectURL(file);
-  elements.recordImage.src = state.recordObjectUrl;
   setStatus(`Inspecting ${file.name}…`);
   const sourceBytes = await file.arrayBuffer();
   assertCurrentLoad(loadSequence);
@@ -3104,17 +3082,6 @@ function render() {
   publishState();
 }
 
-function angleForPointer(event) {
-  const rect = elements.platter.getBoundingClientRect();
-  return Math.atan2(event.clientY - (rect.top + rect.height / 2), event.clientX - (rect.left + rect.width / 2));
-}
-
-function unwrapAngle(delta) {
-  if (delta > Math.PI) return delta - Math.PI * 2;
-  if (delta < -Math.PI) return delta + Math.PI * 2;
-  return delta;
-}
-
 function audioFrameNow() {
   const outputSampleRate = state.context?.sampleRate || state.sampleRate;
   return Math.max(0, Math.round((state.context?.currentTime || 0) * outputSampleRate));
@@ -3365,74 +3332,6 @@ async function cancelScratchReplays(error = new Error("Scratch replay cancelled"
 function cancelScratchReplay() {
   return cancelScratchReplays();
 }
-
-async function beginScratch(event) {
-  if (!grooveInteractionReady() || state.scratching || state.scratchReplayRequests.size) return;
-  const loadSequence = state.loadSequence;
-  invalidateEndTransition();
-  elements.platter.setPointerCapture(event.pointerId);
-  const angle = angleForPointer(event);
-  state.scratching = true;
-  state.scratchPointerId = event.pointerId;
-  state.scratchStartAngle = angle;
-  state.scratchLastAngle = angle;
-  state.scratchLastTime = event.timeStamp;
-  state.scratchStartPosition = state.positionFrames;
-  state.scratchGrip = resolveScratchGrip(event);
-  recordScratchEvent({ type: "scratch-start", positionFrames: state.positionFrames, rate: 0, impulse: 0.22, grip: state.scratchGrip });
-  await dispatch(
-    {
-      type: "begin_scratch",
-      deck: "a",
-      pointer_id: event.pointerId,
-      playback_seconds: framesToSeconds(state.positionFrames),
-      rotation_degrees: state.rotation,
-      rate: 0,
-      impulse: 0.22,
-      grip: state.scratchGrip,
-    },
-    { loadSequence },
-  );
-}
-
-function moveScratch(event) {
-  if (state.scratchReplayRequests.size || !state.scratching || event.pointerId !== state.scratchPointerId) return;
-  const angle = angleForPointer(event);
-  const totalDelta = unwrapAngle(angle - state.scratchStartAngle);
-  const localDelta = unwrapAngle(angle - state.scratchLastAngle);
-  const elapsedSeconds = Math.max(0.001, (event.timeStamp - state.scratchLastTime) / 1000);
-  const framesPerTurn = state.sampleRate * 60 / state.baseRpm;
-  const position = Math.max(0, Math.min(secondsToFrames(state.duration), state.scratchStartPosition + (totalDelta / (Math.PI * 2)) * framesPerTurn));
-  const rate = (localDelta / (Math.PI * 2)) * framesPerTurn / state.sampleRate / elapsedSeconds;
-  state.positionFrames = position;
-  state.rotation += localDelta * 180 / Math.PI;
-  elements.platter.style.setProperty("--rotation", `${state.rotation}deg`);
-  const impulse = Math.min(1, Math.abs(rate) / 3);
-  state.scratchGrip = resolveScratchGrip(event, state.scratchGrip);
-  recordScratchEvent({ type: "scratch-motion", positionFrames: position, rate, impulse, grip: state.scratchGrip });
-  state.node.port.postMessage({ type: "scratch", active: true, position, rate, impulse, grip: state.scratchGrip });
-  publishState();
-  state.scratchLastAngle = angle;
-  state.scratchLastTime = event.timeStamp;
-}
-
-async function endScratch(event) {
-  if (state.scratchReplayRequests.size || !state.scratching || event.pointerId !== state.scratchPointerId) return;
-  state.scratching = false;
-  state.scratchGrip = 0;
-  recordScratchEvent({ type: "scratch-end", positionFrames: state.positionFrames, rate: 0, impulse: 0, grip: 0, resumePlayback: true });
-  await dispatch({
-    type: "end_scratch",
-    deck: "a",
-    rendered_position_frames: state.positionFrames,
-    rotation_degrees: state.rotation,
-    resume_playback: true,
-    save_sample: false,
-    can_platter_handoff: true
-  });
-  state.scratchPointerId = null;
-}
-
 
 function updateOutputGain(rampMs = 12) {
   const gain = Math.max(0, Math.min(4, state.packetGain * state.mixerGain));
@@ -4029,11 +3928,6 @@ elements.highFrequencyAccelerationLimit?.addEventListener("input", () => {
 elements.stylusTracingLimit?.addEventListener("input", () => {
   setStylusTracingLimit(elements.stylusTracingLimit.value);
 });
-elements.platter.addEventListener("pointerdown", event => void beginScratch(event));
-elements.platter.addEventListener("pointermove", moveScratch);
-elements.platter.addEventListener("pointerup", event => void endScratch(event));
-elements.platter.addEventListener("pointercancel", event => void endScratch(event));
-
 updateTapeButton();
 updateScratchTechniqueControls();
 if (elements.highFrequencyAccelerationLimit) {

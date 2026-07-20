@@ -285,10 +285,6 @@ output {
   filter: drop-shadow(0 14px 28px rgba(0, 0, 0, 0.38)) drop-shadow(0 4px 10px rgba(0, 0, 0, 0.24));
 }
 
-.legacy-platter[hidden] {
-  display: none;
-}
-
 .fallback-controls {
   max-width: 720px;
 }
