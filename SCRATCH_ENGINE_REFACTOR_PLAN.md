@@ -1,0 +1,243 @@
+# Playback and Scratch Engine Refactor Plan
+
+Status: implementation plan approved by repository audit; work starts from checkpoint
+`5eccda9` (`Checkpoint audio preview and capture support`).
+
+## Objective and proof standard
+
+The player must use one continuous, audio-authoritative vinyl transport for normal
+playback, braking, hand grabs, reverse motion, cue holds, releases, lead-in and
+run-out. Scratch assistance must infer the user's motion rather than replaying a
+wall-clock animation, and it must never prevent a DJ from operating the physical
+record and manual crossfader with separate pointers.
+
+"A DJ cannot tell" is a human perceptual claim, so automated checks alone cannot
+prove it. This implementation will provide deterministic mechanical, spectral,
+latency and browser evidence plus a repeatable blind comparison protocol. The
+claim remains unproven until that protocol is run with experienced DJs.
+
+## Audit baseline
+
+Before implementation, the following checks pass:
+
+- `cargo test --workspace`: 19 tests (14 player, 5 decoder facade).
+- `node --test test/*.test.mjs`: 1 test.
+- `npm run build`: both browser WASM packages build.
+
+The passing suite does not cover production gesture handling, audio-thread
+windowing, seam continuity, presets, replay clocks, multiple pointers or browser
+latency.
+
+## Architectural decisions
+
+1. The Rust `ScratchAcousticDsp` remains the only programme-audio renderer. There
+   will be no second scratch buffer-source path.
+2. Source positions use source frames. Performance timing uses AudioContext/output
+   frames. Names and schemas must say which clock they use.
+3. Pointer geometry and coalesced event collection live in the UI layer. Physical
+   rate mapping, platter mechanics, de-clicking and assisted gate generation live
+   in the audio engine.
+4. The manual crossfader and assisted technique gate are independent:
+
+   `deck gain = channel gain × manual crossfader curve × technique gate`.
+
+   Selecting a preset must not move or overwrite the user's manual fader.
+5. Preset phase advances from rendered/commanded groove travel on the audio clock,
+   freezes while held still, and resets only after a hysteretic reversal. It must
+   not depend on `requestAnimationFrame`, pointer frequency or main-thread load.
+6. Worklet memory is bounded by double-buffered PCM windows. Decoding and Int16 to
+   Float32 conversion stay off the audio thread. A non-shared fallback may copy a
+   bounded window, but may not restore full-record worklet allocations.
+7. Published records enter a physical run-out/deadwax by default. Conventional
+   authoring-preview audio may opt into a clean end explicitly.
+8. The existing sharp `0.08` standalone fader cut remains the pro-DJ default, while
+   the curve becomes explicit/configurable and is regression-tested. The reference
+   app's current `0.22` width is documented as a different tuning, not silently
+   treated as parity.
+
+## Phase 1 — clocks, ownership and state transitions
+
+- Add an explicit source sample-rate update to the Rust player engine when a source
+  is initialised; remove the fixed-48 kHz assumption from begin/end conversions.
+- Track pointer target position and audio-rendered position separately in the host.
+  Never overwrite one with the other.
+- Make scratch begin/move/end/cancel an ordered protocol with explicit:
+  `sourcePositionFrames`, `outputFrame`, `handContact`, `resumePlayback`, needle
+  state, grip strength and release/handoff policy.
+- Preserve a lifted needle during a hand grab. The record may turn visually, but
+  the cartridge remains muted and the groove readhead does not falsely advance.
+- Make `resumePlayback: false` stop programme playback in both core and worklet.
+- Carry contact impulses through `HostCommand` translation instead of dropping
+  them, and use rendered position for release/capture.
+- Update the motor target whenever RPM changes while the motor is on, including
+  run-out and non-programme states.
+
+Acceptance evidence:
+
+- Transition-table tests cover motor on/off × playing/paused × needle up/down ×
+  scratch begin/end/cancel.
+- 44.1, 48 and 96 kHz sources release to the same source frame (within one frame).
+- `resumePlayback: false` produces silence and a stopped state in the next quantum.
+
+## Phase 2 — bounded, continuous PCM delivery
+
+- Reconnect `pcm-window-worker.js` and the two shared 12-second banks.
+- Keep full Int16 programme storage outside the AudioWorklet; keep only the active
+  Float32 window in Rust.
+- Route progressive segments through the worker, merge written ranges, and expose
+  contiguous availability to the worklet.
+- Repair every contiguous chunk seam in the authoritative worker/source copy before
+  a window becomes visible to Rust. Do not repair an unused JavaScript mirror.
+- Consume `ScratchAcousticDsp.takeWindowRequest()` and project refills in both
+  directions at high speed.
+- Clamp seeking/scratching to decoded coverage, enter an explicit bounded buffering
+  state at the frontier, and resume without resetting motor or spring state.
+- Remove allocation/conversion loops from the render quantum.
+
+Acceptance evidence:
+
+- A five-minute stereo source keeps worklet + Rust PCM below the configured window
+  budget rather than allocating full-record Float32 copies.
+- A deliberately discontinuous chunk fixture crosses the repaired seam with a
+  bounded first difference in forward and reverse playback.
+- Slow progressive decode pauses at the availability frontier and resumes from the
+  same rendered frame without a zero-filled excursion.
+- High-speed forward/reverse traces request and activate the correct projected bank.
+
+## Phase 3 — canonical high-resolution gesture input
+
+- Replace both raw DOM/canvas differentiators with one pure gesture tracker.
+- Consume `getCoalescedEvents()` sequentially and use incremental unwrapped angles,
+  a 4 ms differentiation floor, multi-turn accumulation and a time-aware adaptive
+  velocity filter (fast reversal response, approximately 35 ms steady smoothing).
+- Apply a Schmitt direction state so sub-deadzone jitter cannot flip preset intent.
+- Emit contact impulse only for a real grab, reversal or high acceleration; remove
+  the current event-rate-dependent `abs(rate)/3` impulse on every move.
+- Treat stylus-up motion and pointer cancellation explicitly.
+- Replace the canvas's one global gesture slot with a pointer map, allowing one hand
+  on the record while another moves XFADE/CH/PITCH.
+- Wire programme-gap stylus calibration into the default canvas tonearm mapping.
+
+Acceptance evidence:
+
+- Equivalent gestures sampled at 30/60/120/240 Hz and with coalesced samples produce
+  equivalent position/rate traces within declared tolerances.
+- Tests cover ±π wrap, multiple turns, duplicate timestamps, reversal, dwell,
+  cancellation, near-spindle movement and lifted-needle movement.
+- A browser test holds the record with pointer A and moves/releases the fader with
+  pointer B without losing either gesture.
+
+## Phase 4 — audio-rate intent-aware scratch presets
+
+- Add versioned presets: Baby, Stab, Chirp, Transform, Flare, Crab, Orbit and Drum.
+- Preserve the reference starting constants (5.2/9.5/6.4/18/7.2/12 Hz, transform
+  duty 0.48, crab duty 0.38, click range 1–8), but interpret them as initial groove-
+  travel spans rather than an unconditional wall-clock oscillator.
+- Implement the gate as a Rust audio-rate state machine using filtered target rate,
+  rendered rate, velocity confidence, acceleration, dwell, direction hysteresis,
+  distance since reversal and a learned stroke span.
+- Technique behavior:
+  - Baby: assisted gate open; manual fader only.
+  - Stab: forward stroke audible, return and hold cut.
+  - Chirp: open at forward onset, close by speed-adjusted travel, reopen on return.
+  - Transform: travel-locked repeated open/closed chops.
+  - Flare: open phrase with click-count closed notches.
+  - Crab: velocity-scaled rapid open pulses.
+  - Orbit: symmetric notches reset for each direction.
+  - Drum: acceleration/onset transient with travel/time close and retrigger guard.
+- Apply velocity-dependent 0.35–4 ms attack/release envelopes to prevent digital
+  discontinuities while retaining a sharp professional cut.
+- Return the technique gate to open on hand release so motor playback cannot remain
+  accidentally muted.
+- Expose effective gate, direction and rate telemetry without putting UI work on the
+  render thread.
+
+Acceptance evidence:
+
+- Truth-table and trace tests cover rest/forward/reverse/reversal for every preset.
+- Click values 1/4/8 create the expected pulses/notches over a learned stroke.
+- Doubling travel velocity doubles temporal chop frequency while identical travel
+  produces the same pattern; holding still freezes phase.
+- Gate timing is invariant at 44.1/48/96 kHz and across 128-frame boundaries.
+- Closed/open RMS and maximum adjacent-sample discontinuity are bounded on sine and
+  transient fixtures.
+
+## Phase 5 — platter and stylus fidelity beyond reference parity
+
+- Apply the reference deadzone and Gaussian ±1× lock in the actual DSP command path,
+  not in unused code.
+- Shorten/tune hand ownership for deliberate DJ grabs and cover it with quantitative
+  response tests; retain motor spin-up/brake constants unless evidence contradicts
+  them.
+- Model an unpowered hand throw separately from an explicit motor brake, preserving
+  signed platter momentum with bearing-friction decay.
+- Configure revolution-locked wow from native RPM (1.8 s at 33⅓, 1.333… s at 45).
+- Add a rate-adaptive band-limited interpolation/anti-alias path for high-speed
+  forward and reverse motion, with a smooth transition from the low-latency path.
+- Drive canvas rotation from worklet effective rate during spin-up, pitch slew,
+  braking and release rather than from an instantaneous nominal RPM flag.
+- Keep lead-in surface rendering isolated from programme sampling and complete its
+  timed transition on the audio clock. Restore record deadwax/locked-groove behavior;
+  make clean preview ending a load option.
+
+Acceptance evidence:
+
+- Quantitative traces cover grab latency, motor catch, powered brake and unpowered
+  throw in both directions.
+- 33⅓/45 wow completes one phase per physical revolution.
+- Spectral tests show bounded alias energy for representative 2×/4×/8× sweeps and
+  forward/reverse symmetry.
+- Visual rotation stays within a declared angular tolerance of integrated rendered
+  effective rate through start and stop.
+- Lead-in cannot advance/leak programme PCM; published records enter run-out while
+  preview sources can request a clean end.
+
+## Phase 6 — deterministic capture and replay
+
+- Introduce performance schema v2 with separate `sourceSampleRate` and
+  `outputSampleRate`, preset/gate algorithm version, preset/click state, manual
+  fader state, motor/needle state and canonical source-frame motion events.
+- Record preset, click and manual fader changes as output-frame-timestamped events.
+- Scale schema-v1 timestamps during import/replay and default them to Baby/manual.
+- Apply replay events inside the worklet at exact sub-quantum frame offsets.
+- Snapshot and restore motor, playing, needle, effects, preset/gate and host/core
+  public state on completion and cancellation.
+- Validate/migrate IndexedDB records instead of blindly accepting arbitrary shapes.
+
+Acceptance evidence:
+
+- Replaying the same performance twice yields the same gate trace and output hash.
+- Mid-gesture preset/click/fader events apply on their exact requested frame.
+- Schema-v1 import remains playable with documented defaults.
+- Completion and cancellation restore all pre-replay state.
+
+## Phase 7 — public controls, UI, documentation and measurement
+
+- Add public preset/click/fader-curve APIs, state subscription fields and postMessage
+  bridge messages.
+- Add real preset and click controls to the canvas plus accessible fallback HTML;
+  reflect (but do not drive) audio-owned gate/direction telemetry.
+- Publish AudioContext `baseLatency`/`outputLatency` and measured pointer-command-
+  apply latency so device-specific problems are observable.
+- Correct stale acoustic/windowing documentation and record each intentional
+  reference divergence.
+- Add a blind DJ validation protocol using matched source material, calibrated
+  output level, hidden real/digital conditions, baby/stab/chirp/flare/transform
+  tasks, latency ratings and ABX-style identification results.
+
+Acceptance evidence:
+
+- Keyboard, pointer, touch and programmatic control paths select all presets and
+  click counts without moving the manual fader.
+- API and README examples match runtime state and schema.
+- Headless browser smoke tests report no page/worklet errors and exercise synthetic
+  audio loading, multi-pointer control, every preset, capture and replay.
+- The final audit maps every item above to a passing command, trace, browser result
+  or explicitly outstanding human validation result.
+
+## Commit strategy
+
+The checkpoint commit already preserves the pre-refactor work. Implementation will
+be committed in reviewable slices (clock/state, windows, gestures, gate, fidelity,
+replay/UI/docs) after each slice's focused tests pass. Unrelated user changes will
+not be rewritten.

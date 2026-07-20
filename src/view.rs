@@ -12,6 +12,7 @@ pub struct DeckViewState {
     pub scratch_active: bool,
     pub playback_seconds: f64,
     pub duration_seconds: f64,
+    pub source_sample_rate: f64,
     pub playback_rate: f32,
     pub channel_gain: f32,
 }
@@ -41,6 +42,7 @@ impl PlayerViewState {
                 scratch_active: value.scratch.active,
                 playback_seconds: value.playback.current_seconds,
                 duration_seconds: value.playback.duration_seconds,
+                source_sample_rate: value.playback.source_sample_rate,
                 playback_rate: value.playback.playback_rate,
                 channel_gain: value.mixer.channel_gain,
             }
