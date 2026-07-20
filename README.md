@@ -1,6 +1,9 @@
 # vin.yl.player
 
-A standalone Bitneedle picture-record player with a Rust transport model, a Rust acoustic scratch engine, a player-only record decoder, shared-memory PCM windowing, frame-timed scratch-performance replay, and an optional canvas turntable UI.
+This standalone player plays Bitneedle picture records. It includes a Rust
+transport model, an acoustic scratch engine, and a player-only record decoder.
+It also includes shared-memory PCM windows and frame-timed scratch replay. An
+optional canvas UI shows the turntable.
 
 The repository deliberately separates the real-time renderer from record parsing:
 
@@ -20,24 +23,33 @@ resolver = "2"
 
 This is a focused standalone player rather than a copy of the legacy play application. It currently includes:
 
-- Bitneedle PNG inspection and ECDC decoding;
-- Rust/WASM transport and acoustic rendering;
-- motor playback, braking, pitch/RPM changes, scratching and needle lift;
-- double-buffered shared-memory PCM windows;
-- IndexedDB PCM caching;
-- frame-timed scratch-performance capture, persistence and replay;
+- Bitneedle PNG inspection and ECDC decoding
+- Rust/WASM transport and acoustic rendering
+- motor playback, braking, pitch/RPM changes, scratching and needle lift
+- double-buffered shared-memory PCM windows
+- IndexedDB PCM caching
+- frame-timed scratch-performance capture, persistence and replay
 - a configurable radial canvas UI with a stylus, concentric turntable, Technics-style pitch control, strobe rows and lamp.
 
-It does **not** currently include the legacy application's TAPE master monitor, remote scratch sessions, two-deck playback, lead-in/deadwax foley asset, HTML-audio fallback, waveform UI, sample library, or authoring tools.
+Program playback stops cleanly at the end of the decoded audio. The player
+does not automatically add a deadwax/lead-out surface-noise traversal.
+
+It does **not** currently include:
+
+- the legacy TAPE master monitor
+- remote scratch sessions or two-deck playback
+- a lead-in or deadwax foley asset
+- an HTML-audio fallback
+- a waveform UI, sample library, or authoring tools.
 
 ## Requirements
 
 Install:
 
-- Node.js 20 or newer;
-- Rust and Cargo;
-- the `wasm32-unknown-unknown` Rust target;
-- `wasm-pack`;
+- Node.js 20 or newer
+- Rust and Cargo
+- the `wasm32-unknown-unknown` Rust target
+- `wasm-pack`
 - a browser with AudioWorklet, WebAssembly, IndexedDB and `SharedArrayBuffer` support.
 
 ```bash
@@ -74,9 +86,20 @@ With this repository at `/path/to/vin.yl.player`, the expected sibling layout is
 └── bitneedle/
 ```
 
-The decoder helper scripts (`browser-formatting.js`, `encodec-bundle-names.js`, `onnx-runtime-session.js`, `onnx-worker-tensors.js`, `ecdc-pcm-layout.js`, `player-cache-config.js`, `player-cache.js`, `player-pcm-helpers.js`) live directly in `web` — this repo owns them, they are not vendored from elsewhere.
+The decoder helper scripts live directly in `web`:
 
-The browser build additionally needs ONNX Runtime Web assets and the EnCodec ONNX bundles. Their locations can be supplied with environment variables; by default they're read from `vendor/wasm/` in this repo.
+- `browser-formatting.js`
+- `encodec-bundle-names.js`
+- `onnx-runtime-session.js`
+- `onnx-worker-tensors.js`
+- `ecdc-pcm-layout.js`
+- `player-cache-config.js`
+- `player-cache.js`
+- `player-pcm-helpers.js`.
+
+This repo owns these scripts. They are not vendored from another source.
+
+The browser build additionally needs ONNX Runtime Web assets and the EnCodec ONNX bundles. Their locations can be supplied with environment variables. By default they are read from `vendor/wasm/` in this repo.
 
 ## Environment variables
 
@@ -102,11 +125,11 @@ http://localhost:5193
 
 The build:
 
-1. clears `dist`;
-2. copies `web` into `dist`;
-3. builds the root `record-player` crate into `dist/wasm/record-player`;
-4. builds `player-wasm` into `dist/wasm/player-wasm`;
-5. copies the shared decoder scripts;
+1. clears `dist`
+2. copies `web` into `dist`
+3. builds the root `record-player` crate into `dist/wasm/record-player`
+4. builds `player-wasm` into `dist/wasm/player-wasm`
+5. copies the shared decoder scripts
 6. copies ONNX Runtime Web and the EnCodec bundles.
 
 Generated browser modules:
@@ -165,9 +188,9 @@ The player uses separate browser contexts, so the runtime is split across a few 
 
 In practice:
 
-- the **main thread** coordinates UI, state, and startup;
-- the **decoder worker** loads `player-wasm`, `onnxruntime-web`, and the EnCodec bundles;
-- the **AudioWorklet** loads `record-player`;
+- the **main thread** coordinates UI, state, and startup
+- the **decoder worker** loads `player-wasm`, `onnxruntime-web`, and the EnCodec bundles
+- the **AudioWorklet** loads `record-player`
 - the **tape/cache helper path** loads `player-wasm`.
 
 ## Architecture
@@ -450,7 +473,9 @@ player.canvas.setTheme({
 
 The current canvas configuration is available through `player.canvas.getConfig()`. Call `player.canvas.destroy()` to unmount it.
 
-The physical strobe dots always rotate. Inside the diffuse lamp beam, a separately calibrated sample is drawn so the matching row appears stationary while the same dots remain visibly in motion outside the light.
+The physical strobe dots always rotate. A separate calibrated sample appears in
+the diffuse lamp beam. The matching row appears stationary in the beam. The same
+dots remain visibly in motion outside the beam.
 
 ## Acoustics
 
@@ -458,11 +483,11 @@ The acoustic engine is implemented in `src/acoustic.rs` and exported as `Scratch
 
 ### One transport and acoustic clock
 
-Normal playback and scratching use the same rendered groove position. Motor spin-up, braking, grabbing, reversing, releasing and seeking do not switch between unrelated audio engines. The Rust DSP position is the authoritative audio clock; the host mirrors it into public state and the canvas uses that state to move the record and stylus.
+Normal playback and scratching use the same rendered groove position. Motor spin-up, braking, grabbing, reversing, releasing and seeking do not switch between unrelated audio engines. The Rust DSP position is the authoritative audio clock. The host mirrors it into public state and the canvas uses that state to move the record and stylus.
 
 There are two control conditions:
 
-- **motor control**: the platter moves toward a motor-delivered target rate;
+- **motor control**: the platter moves toward a motor-delivered target rate
 - **hand control**: the target position and rate come from scratch events.
 
 Both feed the same damped rate spring:
@@ -487,9 +512,9 @@ Each output frame samples the source at a fractional groove position using four-
 
 A speed-dependent one-pole low-pass models tracing and drag:
 
-- maximum cutoff: `19 kHz`;
-- nominal-speed knee: `0.95×`;
-- slow movement becomes progressively duller;
+- maximum cutoff: `19 kHz`
+- nominal-speed knee: `0.95×`
+- slow movement becomes progressively duller
 - tracing loss starts above `2.5×` and reduces the high-frequency cutoff.
 
 Movement gain is zero inside the deadzone and otherwise remains bounded between `0.68` and `1.08`, with a small presence lift near true speed.
@@ -498,11 +523,11 @@ Movement gain is zero inside the deadzone and otherwise remains bounded between 
 
 Wow and flutter alter the sampled source position rather than running as a post-effect:
 
-- wow period defaults to `1.8 s`;
-- flutter defaults to `6.4 Hz`;
-- wow phase follows record motion, so it slows and reverses with the groove;
-- depth is `0.0012 × clamp(|rate|, 0, 1.2)`;
-- flutter depth is `0.22` of wow depth;
+- wow period defaults to `1.8 s`
+- flutter defaults to `6.4 Hz`
+- wow phase follows record motion, so it slows and reverses with the groove
+- depth is `0.0012 × clamp(|rate|, 0, 1.2)`
+- flutter depth is `0.22` of wow depth
 - modulation is disabled below `|rate| = 0.18`.
 
 `AcousticConfig` allows the maximum rate, wow period, flutter frequency, acoustic effects and surface effects to be configured when the DSP is constructed. The browser host currently uses the defaults and switches effect groups during scratch replay through `setEffects`.
@@ -526,14 +551,14 @@ Because groove grain and dust are keyed to source position, their texture is spa
 
 The DSP exposes two replay-selectable groups:
 
-- **acoustic**: wow/flutter, drag/tracing response, movement gain and program-correlated source texture;
+- **acoustic**: wow/flutter, drag/tracing response, movement gain and program-correlated source texture
 - **surface**: contact bed, deterministic groove grain, dust and contact impulses.
 
 Original replay enables both. Dry replay disables both while retaining mechanical motion and interpolation. A custom object can enable either group independently.
 
 ### Needle lift and needle point
 
-Needle lift mutes cartridge output without requiring the visual platter to stop. The canvas tonearm and stylus are presentation components driven from player state. Dragging the needle point seeks through `player.seekRatio`; it does not directly mutate the AudioWorklet or transport internals.
+Needle lift mutes cartridge output without requiring the visual platter to stop. The canvas tonearm and stylus are presentation components driven from player state. Dragging the needle point seeks through `player.seekRatio`. It does not directly mutate the AudioWorklet or transport internals.
 
 The standalone build does not currently synthesize the legacy needle-drop thump/crackle asset, lead-in static or deadwax loop described in the old application document.
 
@@ -551,21 +576,25 @@ Current tuning:
 | `WINDOW_REQUEST_PROJECT_SECONDS` | `0.18 s` |
 | `WINDOW_MISS_FADE_SECONDS` | `0.006 s` |
 
-At rates above `2×`, request checks are throttled to roughly `30 ms`; otherwise they run at roughly `80 ms`. The worklet fades through a short window miss instead of abruptly holding or zeroing a sample.
+At rates above `2×`, request checks are throttled to roughly `30 ms`. Otherwise they run at roughly `80 ms`. The worklet fades through a short window miss instead of abruptly holding or zeroing a sample.
 
 ### Scratch replay resolution
 
-Scratch events are captured against the AudioContext clock in source-sample frames. The worklet receives the complete performance and applies events at their declared frame offsets. If an event falls inside the current Web Audio render quantum, the worklet divides processing at that event boundary rather than waiting for a main-thread timer or animation frame.
+Scratch events use source-sample frames on the AudioContext clock. The worklet
+receives the complete performance and applies events at their frame offsets. If
+an event occurs in the current Web Audio render quantum, the worklet divides
+processing at that boundary. It does not wait for a main-thread timer or
+animation frame.
 
 This is at least as precise as the legacy telemetry format, which intentionally throttled pointer-derived events. The current format records the normalized commands actually sent to the engine and preserves their audio-frame timing.
 
 ### Motion and canvas sync
 
-The canvas advances the visible record from the published RPM during ordinary motor playback and follows explicit rotation state during scratching. Audio remains authoritative; the canvas never writes directly to DSP memory. The strobe renderer is visual calibration rather than an audio clock:
+The canvas advances the visible record from the published RPM during ordinary motor playback and follows explicit rotation state during scratching. Audio remains authoritative. The canvas never writes directly to DSP memory. The strobe renderer is visual calibration rather than an audio clock:
 
-- physical rows rotate continuously;
-- only the dots under the lamp receive the calibrated stroboscopic sample;
-- the row matching the current pitch appears steady under the lamp;
+- physical rows rotate continuously
+- only the dots under the lamp receive the calibrated stroboscopic sample
+- the row matching the current pitch appears steady under the lamp
 - the same dots remain visibly moving outside the beam.
 
 ## Rust API
@@ -586,21 +615,21 @@ The root crate can be tested natively:
 cargo test
 ```
 
-Build the complete browser application through `scripts/build.mjs`; it supplies the `wasm` feature and correct output names.
+Build the complete browser application through `scripts/build.mjs`. It supplies the `wasm` feature and correct output names.
 
 ## Deployment checklist
 
 A static deployment must preserve:
 
-- `application/wasm` for `.wasm` files;
-- JavaScript MIME types for `.js` and `.mjs`;
-- COOP `same-origin`;
-- COEP `require-corp`;
-- same-origin access to workers, WASM, ONNX models and `.data` files;
-- all files generated under `dist/wasm`;
+- `application/wasm` for `.wasm` files
+- JavaScript MIME types for `.js` and `.mjs`
+- COOP `same-origin`
+- COEP `require-corp`
+- same-origin access to workers, WASM, ONNX models and `.data` files
+- all files generated under `dist/wasm`
 - the copied decoder helper scripts at the root of `dist`.
 
-Do not open `dist/index.html` with `file://`; workers, modules, AudioWorklet and cross-origin isolation require an HTTP server.
+Do not open `dist/index.html` with `file://`. Workers, modules, AudioWorklet and cross-origin isolation require an HTTP server.
 
 ## Additional API reference
 
@@ -614,17 +643,19 @@ cargo package -p record-player
 cargo publish -p record-player
 ```
 
-Publishing `record-player` does not package or publish `player-wasm`; it is not a dependency of the root crate.
+Publishing `record-player` does not package or publish `player-wasm`. It is not a dependency of the root crate.
 
 
 
-### Motor and needle behaviour
+### Motor and needle behavior
 
-The platter motor is independent from programme playback. `START - STOP` can always start or stop the turntable, including before a record finishes decoding and while the needle is raised. The canvas record and strobe rings follow motor state rather than the audio readhead. Once the first decoded PCM chunk is available, lowering the needle onto a running platter begins playback; lifting it silences/freezes the groove position without stopping the visible platter.
+The platter motor is independent from program playback. `START - STOP` can always start or stop the turntable, including before a record finishes decoding and while the needle is raised. The canvas record and strobe rings follow motor state rather than the audio readhead. Once the first decoded PCM chunk is available, lowering the needle onto a running platter begins playback. Lifting it silences/freezes the groove position without stopping the visible platter.
 
 ## Message tracing
 
-Structured message tracing is enabled by default in this diagnostic build. Every host action and every message sent to or received from the core worker, decoder worker, and AudioWorklet is logged with a sequence number, subsystem, direction, type, elapsed time, and a compact payload summary.
+Structured message tracing is enabled by default in this diagnostic build. It
+logs each host action and worker message. Each entry contains a sequence number,
+subsystem, direction, type, elapsed time, and compact payload summary.
 
 Disable it before loading the player with:
 
@@ -645,8 +676,15 @@ The shared implementation is `web/player-message-logger.js`. Payload summaries r
 
 ## Shared message logger loading
 
-`player-message-logger-global.js` contains the export-free logger implementation used by classic workers. `player-message-logger.js` is the ES-module adapter used by the host, module workers, and AudioWorklet. Both share `globalThis.VinylPlayerMessageLogger`; do not load the ES-module adapter with `importScripts()`.
+`player-message-logger-global.js` contains the export-free logger implementation used by classic workers. `player-message-logger.js` is the ES-module adapter used by the host, module workers, and AudioWorklet. Both share `globalThis.VinylPlayerMessageLogger`. Do not load the ES-module adapter with `importScripts()`.
 
 ### EnCodec chunk seam repair
 
-`player-wasm` delivers decoded revolution chunks after the encoder-side ±10 ms context has already been cropped away. The AudioWorklet therefore places every owned chunk at its exact source timeline offset and applies a deterministic 24-sample (0.5 ms at 48 kHz) cubic Hermite repair centred on each contiguous chunk boundary. The repair replaces 12 samples on either side of the join, preserves total length and later-chunk offsets, estimates endpoint slopes from samples outside the repair span, and clamps interpolation overshoot to the PCM range.
+`player-wasm` delivers decoded revolution chunks without the cropped
+encoder-side ±10 ms context. The AudioWorklet places each owned chunk at its
+exact source timeline offset. It applies a deterministic 24-sample cubic Hermite
+repair at each contiguous chunk boundary. At 48 kHz, this repair is 0.5 ms.
+
+The repair replaces 12 samples on each side of the join. It preserves total
+length and later chunk offsets. It estimates endpoint slopes from samples
+outside the repair span. It clamps interpolation overshoot to the PCM range.
