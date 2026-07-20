@@ -8,7 +8,7 @@ is made.
 
 Current automated evidence:
 
-- `cargo test --workspace`: 107 tests (102 `record-player`, 5 `player-wasm`).
+- `cargo test --workspace`: 108 tests (103 `record-player`, 5 `player-wasm`).
 - Rust gate conformance traverses one learned stroke for Transform, Flare, Crab
   and Orbit. Click values 1, 4 and 8 produce exactly that many pulses or notches.
   At `8x`, the de-click envelope stays within its analytical fastest-attack
@@ -41,6 +41,12 @@ Current automated evidence:
   matches the direct sinc calculation within `1e-11` while avoiding per-tap
   trigonometry. Release WASM measured `1.52%` normal, `6.60%` reversing Crab/8
   and `3.28%` fresh-window p95 against the audio quantum.
+- Signed Rust mechanics traces apply identical limits in both directions. The
+  motor reaches `0.55..0.70×` after 300 ms and more than `0.94×` after one
+  second. A firm 50 ms grab reduces rate below 20% of steady speed. The motor
+  catches above `0.75×` within 100 ms of release. A free throw retains more
+  than `0.55×` after 200 ms, while a powered brake falls below `0.05×` after
+  400 ms. Forward and reverse results agree within `1e-10`.
 - Two current high-contention benchmark attempts exceeded the fresh-window
   threshold. The threshold was not relaxed. A later rerun passed with normal
   p95 `0.0573 ms`, reversing Crab/8 p95 `0.2599 ms`, and fresh-window maximum

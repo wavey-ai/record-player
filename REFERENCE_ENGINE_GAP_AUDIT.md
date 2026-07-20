@@ -145,7 +145,7 @@ measured audio-thread reason to make either change.
 
 ## Automated evidence
 
-- `cargo test --workspace`: 107 tests.
+- `cargo test --workspace`: 108 tests.
 - `node --test`: 80 tests.
 - The canvas regression anchors the visible platter to audio-owned phase and
   covers half-speed forward motion, full-speed reverse motion and zero-rate
@@ -153,6 +153,9 @@ measured audio-thread reason to make either change.
 - Both pages now expose only the canonical canvas record gesture. The
   permanently hidden legacy platter and its single-turn, event-rate-dependent
   differentiator were removed; no `abs(rate) / 3` move-impulse path remains.
+- Signed native traces cover spin-up, a firm grab, motor catch, free throw and
+  powered brake. Each trace uses the same quantitative limits in both
+  directions. Forward and reverse magnitudes agree within `1e-10`.
 - Rust programme-gap calibration tests pin both visible gap edges, reject
   overlapping or flat anchors and round-trip source samples through the
   monotone inverse. Canvas tests recover exact groove radius from the physical

@@ -781,6 +781,13 @@ Releasing a hand while the motor is off preserves the signed platter throw and
 lets it decay through the separate `0.85 s` bearing-friction model. It is not
 treated as an explicit powered brake.
 
+Native conformance traces apply the same limits in both directions. The motor
+reaches `0.55..0.70×` after 300 ms and more than `0.94×` after one second. A
+firm 50 ms grab reduces rate below 20% of steady speed. The motor catches above
+`0.75×` within 100 ms of release. A free throw retains more than `0.55×` after
+200 ms. A powered brake falls below `0.05×` after 400 ms. Forward and reverse
+results agree within `1e-10`.
+
 ### Stylus sampling
 
 At cueing and normal speeds, each output frame samples the fractional groove

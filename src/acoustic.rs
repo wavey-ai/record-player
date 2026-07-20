@@ -2386,6 +2386,66 @@ mod tests {
     }
 
     #[test]
+    fn motor_start_grab_and_release_are_directionally_symmetric() {
+        let mut traces = Vec::new();
+        for direction in [-1.0, 1.0] {
+            let mut dsp = simulation_dsp();
+            dsp.set_effects(false, false);
+            dsp.start();
+            dsp.set_position(2_400_000.0, 0.0);
+            let initial_turns = dsp.platter_rotation_turns;
+            dsp.set_transport(false, direction, 0.0, 0.0);
+            dsp.render(14_400, 1);
+            let spinup_rate = dsp.last_effective_rate;
+            let spinup_turns = dsp.platter_rotation_turns - initial_turns;
+            assert_eq!(spinup_rate.signum(), direction);
+            assert!((0.55..0.70).contains(&spinup_rate.abs()));
+            assert_eq!(spinup_turns.signum(), direction);
+
+            dsp.render(33_600, 1);
+            let steady_rate = dsp.last_effective_rate;
+            assert_eq!(steady_rate.signum(), direction);
+            assert!(steady_rate.abs() > 0.94);
+
+            let grab_position = dsp.position;
+            dsp.set_transport(true, direction, 0.0, 1.0);
+            dsp.set_motion(grab_position, 0.0, 0.0);
+            dsp.render(2_400, 1);
+            let grabbed_rate = dsp.last_effective_rate;
+            assert!(dsp.grip > 0.98);
+            assert!(grabbed_rate.abs() < steady_rate.abs() * 0.20);
+
+            dsp.set_transport(false, direction, 0.0, 0.0);
+            dsp.render(4_800, 1);
+            let caught_rate = dsp.last_effective_rate;
+            assert_eq!(caught_rate.signum(), direction);
+            assert!(caught_rate.abs() > 0.75);
+            traces.push((
+                spinup_rate,
+                spinup_turns,
+                steady_rate,
+                grabbed_rate,
+                caught_rate,
+            ));
+        }
+
+        let reverse = traces[0];
+        let forward = traces[1];
+        for (reverse_value, forward_value) in [
+            (reverse.0, forward.0),
+            (reverse.1, forward.1),
+            (reverse.2, forward.2),
+            (reverse.3, forward.3),
+            (reverse.4, forward.4),
+        ] {
+            assert!(
+                (reverse_value + forward_value).abs() < 1e-10,
+                "directional mechanics differed: reverse {reverse_value}, forward {forward_value}",
+            );
+        }
+    }
+
+    #[test]
     fn commanded_grip_controls_slipmat_coupling() {
         fn drag_with_grip(grip: f64) -> ScratchAcousticDsp {
             let mut dsp = simulation_dsp();
@@ -2431,35 +2491,58 @@ mod tests {
     }
 
     #[test]
-    fn unpowered_hand_throw_coasts_but_explicit_motor_stop_brakes() {
-        let mut thrown = simulation_dsp();
-        thrown.start();
-        thrown.set_position(2_400_000.0, 0.0);
-        thrown.set_transport(true, 0.0, 1.0, 1.0);
-        thrown.set_motion(thrown.position + 24_000.0, 1.0, 0.0);
-        thrown.grip = 1.0;
-        thrown.rate = 1.0;
-        thrown.last_effective_rate = 1.0;
-        thrown.set_transport(false, 0.0, 0.0, 0.0);
-        thrown.render(9_600, 1);
-        assert!(
-            thrown.last_effective_rate > 0.55,
-            "bearing throw lost momentum too quickly: {}",
-            thrown.last_effective_rate,
-        );
+    fn signed_unpowered_throw_coasts_while_explicit_motor_stop_brakes() {
+        let mut traces = Vec::new();
+        for direction in [-1.0, 1.0] {
+            let mut thrown = simulation_dsp();
+            thrown.set_effects(false, false);
+            thrown.start();
+            thrown.set_position(2_400_000.0, 0.0);
+            thrown.set_transport(true, 0.0, direction, 1.0);
+            thrown.set_motion(thrown.position + direction * 24_000.0, direction, 0.0);
+            thrown.grip = 1.0;
+            thrown.rate = direction;
+            thrown.last_effective_rate = direction;
+            let throw_turns = thrown.platter_rotation_turns;
+            thrown.set_transport(false, 0.0, 0.0, 0.0);
+            thrown.render(9_600, 1);
+            let coast_rate = thrown.last_effective_rate;
+            let coast_turns = thrown.platter_rotation_turns - throw_turns;
+            assert_eq!(coast_rate.signum(), direction);
+            assert!(
+                coast_rate.abs() > 0.55,
+                "{direction} bearing throw lost momentum too quickly: {coast_rate}",
+            );
+            assert_eq!(coast_turns.signum(), direction);
 
-        let mut braked = simulation_dsp();
-        braked.start();
-        braked.set_position(2_400_000.0, 0.0);
-        braked.set_transport(false, 1.0, 0.0, 0.0);
-        braked.render(48_000, 1);
-        braked.set_transport(false, 0.0, 0.0, 0.0);
-        braked.render(19_200, 1);
-        assert!(
-            braked.last_effective_rate.abs() < 0.05,
-            "powered brake retained rate {}",
-            braked.last_effective_rate,
-        );
+            let mut braked = simulation_dsp();
+            braked.set_effects(false, false);
+            braked.start();
+            braked.set_position(2_400_000.0, 0.0);
+            braked.set_transport(false, direction, 0.0, 0.0);
+            braked.render(48_000, 1);
+            braked.set_transport(false, 0.0, 0.0, 0.0);
+            braked.render(19_200, 1);
+            let brake_rate = braked.last_effective_rate;
+            assert!(
+                brake_rate.abs() < 0.05,
+                "{direction} powered brake retained rate {brake_rate}",
+            );
+            traces.push((coast_rate, coast_turns, brake_rate));
+        }
+
+        let reverse = traces[0];
+        let forward = traces[1];
+        for (reverse_value, forward_value) in [
+            (reverse.0, forward.0),
+            (reverse.1, forward.1),
+            (reverse.2, forward.2),
+        ] {
+            assert!(
+                (reverse_value + forward_value).abs() < 1e-10,
+                "directional mechanics differed: reverse {reverse_value}, forward {forward_value}",
+            );
+        }
     }
 
     #[test]
