@@ -316,6 +316,12 @@ player.seekRatio(0.5);
 await player.setNeedleLifted(false);
 ```
 
+During active programme playback, a seek lands `50–140 ms` before its visual
+aim and adds needle-drop foley. The host resolves one landing position and uses
+it for both the immediate worklet update and the core seek. This prevents a
+brief exact-target sound before the physical landing. A paused or lifted-needle
+seek remains exact.
+
 `loadRecord` expects a browser `File` containing a Bitneedle PNG. Its
 `cleanEnd` default is `false`, so published records play two deadwax turns and
 then hold the run-out lock. Conventional audio previews default the other way:
@@ -839,6 +845,11 @@ initial state; it is not switched by these two effect flags.
 ### Needle lift and needle point
 
 Needle lift mutes cartridge output without requiring the visual platter to stop. The canvas tonearm and stylus are presentation components driven from player state. Dragging the needle point seeks through `player.seekRatio`. It does not directly mutate the AudioWorklet or transport internals.
+
+During active programme playback, the cue resolves one randomized landing
+`50–140 ms` before the visual aim. The immediate worklet update and the queued
+core seek use that same immutable landing. Paused or lifted-needle seeks land
+exactly on the visual aim.
 
 The host decodes `web/assets/audio/needle-surface.opus` off the real-time thread
 and gives it to the Rust DSP. Needle placement adds a short synthesized thump

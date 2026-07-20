@@ -63,6 +63,7 @@ The audit compared those files with:
 | Groove and dust texture | Position-keyed | Same hashes and tuning | Covered |
 | Contact impulses | Grab, reversal and acceleration | Canonical gesture events into Rust | Covered |
 | Surface asset and foley | Lead-in, deadwax and drop | Same assets and Rust rendering | Covered |
+| Needle cue landing | `50–140 ms` early during playback | Same immutable landing for preview and commit | Covered |
 | Preset names and click defaults | Eight presets, `1..8` clicks | Same | Covered |
 | Preset phase | Wall-clock oscillator | Audible groove travel | Beyond reference |
 | Direction logic | Rate sign | Hysteretic intent plus rendered fallback | Beyond reference |
@@ -146,6 +147,9 @@ measured audio-thread reason to make either change.
   below `50%` of a quantum.
 - `npm run test:browser`: real Chrome 150 and real release WASM passed.
 - The Chrome run exercised every preset in both directions.
+- Chrome intercepted the actual worklet seek messages. It verified that active
+  playback used one `50–140 ms` early landing and never exposed the exact visual
+  aim before that landing.
 - It captured rendered output and replayed a take with more than 400 events.
 - It restored the pre-replay Rust state.
 - A second trusted touch moved and released XFADE.

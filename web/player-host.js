@@ -409,7 +409,7 @@ const state = {
   seekTimer: 0,
   seekInFlight: false,
   seekDispatchSerial: 0,
-  queuedSeekSeconds: null,
+  queuedSeek: null,
   gainNode: null,
   captureNode: null,
   packetGain: 1,
@@ -1290,7 +1290,7 @@ function invalidateEndTransition() {
 function clearPendingSeekTransaction() {
   clearTimeout(state.seekTimer);
   state.seekTimer = 0;
-  state.queuedSeekSeconds = null;
+  state.queuedSeek = null;
   state.seekInFlight = false;
   state.seekDispatchSerial += 1;
   state.acknowledgedSeekGeneration = state.pendingSeekGeneration;
@@ -1894,8 +1894,7 @@ async function replaceActivePcmSource(source, loadSequence = state.loadSequence)
   if (state.scratching || state.view?.lead_in_active || state.view?.deadwax_active) {
     throw new Error("TAPE switching is unavailable while scratching or cueing.");
   }
-  clearTimeout(state.seekTimer);
-  state.queuedSeekSeconds = null;
+  clearPendingSeekTransaction();
   const wasPlaying = Boolean(view?.playing);
   const motorRunning = Boolean(view?.transport_on);
   const needleLifted = Boolean(view?.needle_lifted);
@@ -2016,42 +2015,52 @@ async function maybeRefreshTapeAvailability() {
 }
 
 async function flushQueuedSeek() {
-  if (state.seekInFlight || state.queuedSeekSeconds == null) return;
-  let seconds = state.queuedSeekSeconds;
-  state.queuedSeekSeconds = null;
+  if (state.seekInFlight || !state.queuedSeek) return;
+  const seek = state.queuedSeek;
+  state.queuedSeek = null;
+  state.seekTimer = 0;
   state.seekInFlight = true;
   const loadSequence = state.loadSequence;
   const seekDispatchSerial = ++state.seekDispatchSerial;
-  // Original seekPlaybackToRatio: cueing a spinning record by eye lands
-  // 50–140 ms early (DJs aim ahead of the beat) and plays the needle-drop
-  // foley while the stylus settles.
-  const view = deckView();
-  const cueingAudibleGroove = Boolean(view?.transport_on && !view?.needle_lifted && view?.loaded);
-  if (cueingAudibleGroove) {
-    if (view?.playing) seconds = Math.max(0, seconds - (0.05 + Math.random() * 0.09));
+  if (seek.needleDrop) {
     state.node?.port.postMessage({ type: "needle-drop" });
   }
   try {
     await dispatch(
-      { type: "seek", deck: "a", seconds },
+      { type: "seek", deck: "a", seconds: seek.landingSeconds },
       { loadSequence },
     );
   } finally {
     if (seekDispatchSerial !== state.seekDispatchSerial) return;
     state.seekInFlight = false;
-    if (state.queuedSeekSeconds != null) void flushQueuedSeek();
+    if (state.queuedSeek) void flushQueuedSeek();
   }
 }
 
-function queueSeek(seconds) {
+function queueSeek(seconds, { flushImmediately = false } = {}) {
   if (!seekInteractionReady()) return false;
   interruptScratchReplayNow("Seek control");
   invalidateEndTransition();
-  state.positionFrames = secondsToFrames(seconds);
-  seekWorklet(state.positionFrames);
-  state.queuedSeekSeconds = seconds;
+  const aimedSeconds = Math.max(0, Math.min(state.duration, Number(seconds) || 0));
+  let seek = state.queuedSeek;
+  if (!seek || seek.aimedSeconds !== aimedSeconds) {
+    // Match the reference needle drop. A spinning audible groove lands
+    // 50–140 ms early because a DJ aims ahead of the beat. Resolve this once,
+    // then use the same physical landing for preview and core commit.
+    const view = deckView();
+    const needleDrop = Boolean(view?.transport_on && !view?.needle_lifted && view?.loaded);
+    const landingSeconds = needleDrop && view?.playing
+      ? Math.max(0, aimedSeconds - (0.05 + Math.random() * 0.09))
+      : aimedSeconds;
+    seek = { aimedSeconds, landingSeconds, needleDrop };
+    state.positionFrames = secondsToFrames(landingSeconds);
+    seekWorklet(state.positionFrames);
+  }
+  state.queuedSeek = seek;
   clearTimeout(state.seekTimer);
-  state.seekTimer = setTimeout(() => void flushQueuedSeek(), 35);
+  state.seekTimer = 0;
+  if (flushImmediately) void flushQueuedSeek();
+  else state.seekTimer = setTimeout(() => void flushQueuedSeek(), 35);
   return true;
 }
 
@@ -3192,7 +3201,7 @@ async function replayScratch(performance, { effects = "original" } = {}) {
   if (state.buffering || !state.streamReady) throw new Error("Scratch replay requires a ready, buffered record");
   if (
     state.seekInFlight
-    || state.queuedSeekSeconds != null
+    || state.queuedSeek
     || state.pendingSeekGeneration !== state.acknowledgedSeekGeneration
   ) {
     throw new Error("Scratch replay is unavailable while a seek is pending");
@@ -3944,10 +3953,7 @@ elements.seek.addEventListener("change", () => {
     return;
   }
   const seconds = Number(elements.seek.value) * state.duration;
-  state.queuedSeekSeconds = seconds;
-  clearTimeout(state.seekTimer);
-  state.seekTimer = 0;
-  void flushQueuedSeek();
+  queueSeek(seconds, { flushImmediately: true });
 });
 elements.seek.addEventListener("pointerup", () => { state.draggingSeek = false; });
 elements.rpm33?.addEventListener("click", () => void setRpm(33.3333333333));

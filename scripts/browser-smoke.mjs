@@ -409,8 +409,29 @@ async function runBrowserScenario() {
     "Steady browser playback did not advance on the Rust audio clock",
   );
   setPhase("window-swap");
-  await player.seekSeconds(9.25);
-  await wait(500);
+  const observedSeekPositions = [];
+  const originalMessagePortPost = MessagePort.prototype.postMessage;
+  const originalRandom = Math.random;
+  MessagePort.prototype.postMessage = function postMessage(message, ...transfer) {
+    if (message?.type === "seek" && Number.isFinite(message.position)) {
+      observedSeekPositions.push(message.position);
+    }
+    return originalMessagePortPost.call(this, message, ...transfer);
+  };
+  Math.random = () => 0.5;
+  try {
+    await player.seekSeconds(9.25);
+    await wait(500);
+  } finally {
+    Math.random = originalRandom;
+    MessagePort.prototype.postMessage = originalMessagePortPost;
+  }
+  const expectedCuePosition = (9.25 - 0.095) * loaded.sampleRate;
+  assert(observedSeekPositions.length > 0, "The browser seek did not reach the worklet");
+  assert(
+    observedSeekPositions.every(position => Math.abs(position - expectedCuePosition) <= 1),
+    `The browser seek exposed pre-landing positions: ${observedSeekPositions.join(", ")}`,
+  );
   assert(player.getState().positionSeconds > 8.5, "The browser window-swap seek did not apply");
 
   const presetNames = ["baby", "stab", "chirp", "transform", "flare", "crab", "orbit", "drum"];
@@ -570,6 +591,11 @@ async function runBrowserScenario() {
     audioOutputLatencyMs: player.getState().audioOutputLatencyMs,
     audioPlaybackStats,
     softwareLoopback,
+    needleCue: {
+      aimedPositionFrames: 9.25 * loaded.sampleRate,
+      expectedLandingFrames: expectedCuePosition,
+      workletSeekPositions: observedSeekPositions,
+    },
     maximumPointerToAudioLatencyMs: maximumLatencyMs,
     pointerAppliedCommandId,
     captureBytes,

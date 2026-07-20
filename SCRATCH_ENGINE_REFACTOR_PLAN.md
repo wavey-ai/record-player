@@ -246,6 +246,9 @@ Acceptance evidence:
 - Keep lead-in surface rendering isolated from programme sampling and complete its
   timed transition on the audio clock. Restore record deadwax/locked-groove behavior;
   make clean preview ending a load option.
+- Resolve one immutable needle-cue landing `50–140 ms` before the visual aim
+  during active programme playback. Use it for both the immediate worklet update
+  and the queued core seek. Keep paused and lifted-needle seeks exact.
 
 Acceptance evidence:
 
@@ -262,6 +265,8 @@ Acceptance evidence:
   effective rate through start and stop.
 - Lead-in cannot advance/leak programme PCM; published records enter run-out while
   preview sources can request a clean end.
+- Chrome observes no transient exact-target seek before an active-playback cue
+  reaches its physical landing.
 
 ## Phase 6 — deterministic capture and replay
 
