@@ -174,9 +174,15 @@ Acceptance evidence:
 - Configure revolution-locked wow from native RPM (1.8 s at 33⅓, 1.333… s at 45).
 - Add a rate-adaptive band-limited interpolation/anti-alias path for high-speed
   forward and reverse motion, with a smooth transition from the low-latency path.
-- Add a soft cartridge-tracing acceleration limit whose high-frequency attenuation
-  depends on groove curvature and squared travel velocity; keep it adjustable so
-  normal-speed transients are not flattened by a blanket low-pass.
+- Preserve the speed- and source-curvature cartridge model as the adjustable
+  `stylusTracingLimit` (default `0.72`). This is the physical stylus-tracing model,
+  not a programme mastering limiter, and must never be mislabeled as one.
+- Add a separate stereo-linked `highFrequencyAccelerationLimit` (conservative
+  default `0.35`, exact bypass at `0`) for mastering protection. Split programme
+  into a complementary base plus approximately 5.2 kHz upper residual, detect
+  discrete upper-band acceleration and rapid direction changes, and apply a soft
+  knee with very fast attack and transparent release to the upper residual only.
+  Do not attenuate lows/mids, foley, needle-surface audio or surface-only renders.
 - Drive canvas rotation from worklet effective rate during spin-up, pitch slew,
   braking and release rather than from an instantaneous nominal RPM flag.
 - Keep lead-in surface rendering isolated from programme sampling and complete its
@@ -190,6 +196,10 @@ Acceptance evidence:
 - 33⅓/45 wow completes one phase per physical revolution.
 - Spectral tests show bounded alias energy for representative 2×/4×/8× sweeps and
   forward/reverse symmetry.
+- Stylus-tracing tests retain curvature × squared-velocity behavior, while separate
+  programme-limiter tests prove exact bypass, low-frequency preservation, benign
+  high-frequency brightness, harsh/sibilant acceleration reduction without
+  full-band collapse, bounded stereo linking and transparent release.
 - Visual rotation stays within a declared angular tolerance of integrated rendered
   effective rate through start and stop.
 - Lead-in cannot advance/leak programme PCM; published records enter run-out while
@@ -216,8 +226,9 @@ Acceptance evidence:
 
 ## Phase 7 — public controls, UI, documentation and measurement
 
-- Add public preset/click/fader-curve APIs, state subscription fields and postMessage
-  bridge messages.
+- Add public preset/click/fader-curve APIs, distinct stylus-tracing and programme
+  acceleration-limit controls, state subscription fields and postMessage bridge
+  messages.
 - Add real preset and click controls to the canvas plus accessible fallback HTML;
   reflect (but do not drive) audio-owned gate/direction telemetry.
 - Publish AudioContext `baseLatency`/`outputLatency` and measured pointer-command-

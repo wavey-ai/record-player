@@ -27,8 +27,15 @@ const BEARING_THROW_DECAY_SECONDS: f64 = 0.85;
 const DRAG_LOWPASS_MAX_HZ: f64 = 19_000.0;
 const DRAG_LOWPASS_RATE_KNEE: f64 = 0.95;
 const TRACING_LOSS_START_RATE: f64 = 2.5;
-const HF_ACCELERATION_THRESHOLD: f64 = 0.65;
-const HF_ACCELERATION_FULL_SCALE: f64 = 3.0;
+const STYLUS_TRACING_CURVATURE_THRESHOLD: f64 = 0.65;
+const STYLUS_TRACING_CURVATURE_FULL_SCALE: f64 = 3.0;
+const PROGRAMME_UPPER_CROSSOVER_HZ: f64 = 5_200.0;
+const PROGRAMME_ACCELERATION_THRESHOLD: f64 = 0.18;
+const PROGRAMME_ACCELERATION_FULL_SCALE: f64 = 0.85;
+const PROGRAMME_DIRECTION_CHANGE_WEIGHT: f64 = 0.65;
+const PROGRAMME_LIMITER_MIN_UPPER_GAIN: f64 = 0.16;
+const PROGRAMME_LIMITER_ATTACK_SECONDS: f64 = 0.00012;
+const PROGRAMME_LIMITER_RELEASE_SECONDS: f64 = 0.032;
 const WOW_REV_SECONDS: f64 = 1.8;
 const FLUTTER_HZ: f64 = 6.4;
 const CONTACT_NOISE_GAIN: f64 = 0.00008;
@@ -95,6 +102,141 @@ impl BiquadLowpass {
     }
 }
 
+/// Stereo-linked limiter for physically demanding programme upper-band motion.
+///
+/// A one-pole low-pass and its exact residual form a complementary split. The
+/// shared envelope only scales that residual; the base band is never run
+/// through a blanket low-pass or full-band gain stage.
+#[derive(Clone, Debug, PartialEq)]
+struct HighFrequencyAccelerationLimiter {
+    lowpass: [f64; 2],
+    previous_upper: [f64; 2],
+    previous_velocity: [f64; 2],
+    initialized: [bool; 2],
+    linked_gain: f64,
+    coefficient_sample_rate: f64,
+    split_alpha: f64,
+    attack_alpha: f64,
+    release_alpha: f64,
+    first_derivative_scale: f64,
+    second_derivative_scale: f64,
+}
+
+impl Default for HighFrequencyAccelerationLimiter {
+    fn default() -> Self {
+        Self {
+            lowpass: [0.0; 2],
+            previous_upper: [0.0; 2],
+            previous_velocity: [0.0; 2],
+            initialized: [false; 2],
+            linked_gain: 1.0,
+            coefficient_sample_rate: 0.0,
+            split_alpha: 1.0,
+            attack_alpha: 1.0,
+            release_alpha: 1.0,
+            first_derivative_scale: 1.0,
+            second_derivative_scale: 1.0,
+        }
+    }
+}
+
+impl HighFrequencyAccelerationLimiter {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn process_frame(
+        &mut self,
+        samples: [f64; 2],
+        channel_count: usize,
+        sample_rate: f64,
+        strength: f64,
+    ) -> [f64; 2] {
+        let channel_count = channel_count.clamp(1, 2);
+        let sample_rate = if sample_rate.is_finite() && sample_rate > 0.0 {
+            sample_rate
+        } else {
+            48_000.0
+        };
+        self.prepare_sample_rate(sample_rate);
+        let strength = finite_or_zero(strength).clamp(0.0, 1.0);
+        let mut base = samples;
+        let mut upper = [0.0; 2];
+        let mut linked_demand = 0.0_f64;
+
+        for channel in 0..channel_count {
+            if !self.initialized[channel] {
+                self.lowpass[channel] = samples[channel];
+                self.previous_upper[channel] = 0.0;
+                self.previous_velocity[channel] = 0.0;
+                self.initialized[channel] = true;
+                continue;
+            }
+
+            self.lowpass[channel] += (samples[channel] - self.lowpass[channel]) * self.split_alpha;
+            base[channel] = self.lowpass[channel];
+            upper[channel] = samples[channel] - base[channel];
+            let velocity = upper[channel] - self.previous_upper[channel];
+            let acceleration = velocity - self.previous_velocity[channel];
+            let direction_change = if velocity * self.previous_velocity[channel] < 0.0 {
+                velocity.abs().min(self.previous_velocity[channel].abs())
+            } else {
+                0.0
+            };
+            let demand = acceleration.abs() * self.second_derivative_scale
+                + direction_change
+                    * self.first_derivative_scale
+                    * PROGRAMME_DIRECTION_CHANGE_WEIGHT;
+            linked_demand = linked_demand.max(demand);
+            self.previous_upper[channel] = upper[channel];
+            self.previous_velocity[channel] = velocity;
+        }
+        for channel in channel_count..2 {
+            self.initialized[channel] = false;
+            self.lowpass[channel] = 0.0;
+            self.previous_upper[channel] = 0.0;
+            self.previous_velocity[channel] = 0.0;
+        }
+
+        if strength <= 0.0 {
+            self.linked_gain = 1.0;
+            return samples;
+        }
+
+        let overload = smoothstep_unit(
+            (linked_demand - PROGRAMME_ACCELERATION_THRESHOLD)
+                / (PROGRAMME_ACCELERATION_FULL_SCALE - PROGRAMME_ACCELERATION_THRESHOLD),
+        );
+        let target_gain = 1.0 - strength * overload * (1.0 - PROGRAMME_LIMITER_MIN_UPPER_GAIN);
+        let envelope_alpha = if target_gain < self.linked_gain {
+            self.attack_alpha
+        } else {
+            self.release_alpha
+        };
+        self.linked_gain = (self.linked_gain + (target_gain - self.linked_gain) * envelope_alpha)
+            .clamp(PROGRAMME_LIMITER_MIN_UPPER_GAIN, 1.0);
+
+        let mut output = samples;
+        for channel in 0..channel_count {
+            output[channel] = base[channel] + upper[channel] * self.linked_gain;
+        }
+        output
+    }
+
+    fn prepare_sample_rate(&mut self, sample_rate: f64) {
+        if self.coefficient_sample_rate == sample_rate {
+            return;
+        }
+        self.coefficient_sample_rate = sample_rate;
+        self.split_alpha =
+            1.0 - (-std::f64::consts::TAU * PROGRAMME_UPPER_CROSSOVER_HZ / sample_rate).exp();
+        self.attack_alpha = 1.0 - (-1.0 / (sample_rate * PROGRAMME_LIMITER_ATTACK_SECONDS)).exp();
+        self.release_alpha = 1.0 - (-1.0 / (sample_rate * PROGRAMME_LIMITER_RELEASE_SECONDS)).exp();
+        self.first_derivative_scale = sample_rate / 48_000.0;
+        self.second_derivative_scale = self.first_derivative_scale * self.first_derivative_scale;
+    }
+}
+
 // Continuous needle-surface bed for lead-in / deadwax traversal.
 #[derive(Clone, Debug)]
 struct SurfaceBed {
@@ -137,9 +279,13 @@ pub struct AcousticConfig {
     pub acoustic_enabled: bool,
     #[serde(default = "default_true")]
     pub surface_enabled: bool,
-    /// Soft cartridge tracing limit. `0` disables it; `1` applies the full
-    /// signal- and velocity-dependent high-frequency acceleration model.
-    #[serde(default = "default_hf_acceleration_limit")]
+    /// Soft cartridge tracing limit derived from source curvature and travel
+    /// velocity. This preserves the existing speed-dependent stylus model.
+    #[serde(default = "default_stylus_tracing_limit")]
+    pub stylus_tracing_limit: f64,
+    /// Stereo-linked upper-band programme acceleration limiter. `0` bypasses
+    /// it exactly; `1` applies the full soft-knee reduction.
+    #[serde(default = "default_high_frequency_acceleration_limit")]
     pub high_frequency_acceleration_limit: f64,
 }
 
@@ -155,8 +301,11 @@ fn default_flutter_hz() -> f64 {
 fn default_true() -> bool {
     true
 }
-fn default_hf_acceleration_limit() -> f64 {
+fn default_stylus_tracing_limit() -> f64 {
     0.72
+}
+fn default_high_frequency_acceleration_limit() -> f64 {
+    0.35
 }
 
 impl Default for AcousticConfig {
@@ -167,7 +316,8 @@ impl Default for AcousticConfig {
             flutter_hz: default_flutter_hz(),
             acoustic_enabled: true,
             surface_enabled: true,
-            high_frequency_acceleration_limit: default_hf_acceleration_limit(),
+            stylus_tracing_limit: default_stylus_tracing_limit(),
+            high_frequency_acceleration_limit: default_high_frequency_acceleration_limit(),
         }
     }
 }
@@ -201,6 +351,7 @@ pub struct ScratchAcousticDsp {
     flutter_phase: f64,
     platter_rotation_turns: f64,
     drag_lowpass_state: Vec<f64>,
+    high_frequency_acceleration_limiter: HighFrequencyAccelerationLimiter,
     active: bool,
     needle_lifted: bool,
     hand_contact: bool,
@@ -250,6 +401,11 @@ impl ScratchAcousticDsp {
                 "highFrequencyAccelerationLimit must be between 0 and 1",
             ));
         }
+        if !valid_unit_interval(config.stylus_tracing_limit) {
+            return Err(JsValue::from_str(
+                "stylusTracingLimit must be between 0 and 1",
+            ));
+        }
         Ok(Self::new_internal(output_sample_rate, config))
     }
 
@@ -273,6 +429,7 @@ impl ScratchAcousticDsp {
             flutter_phase: 0.0,
             platter_rotation_turns: 0.0,
             drag_lowpass_state: Vec::new(),
+            high_frequency_acceleration_limiter: HighFrequencyAccelerationLimiter::default(),
             active: false,
             needle_lifted: false,
             hand_contact: false,
@@ -454,6 +611,7 @@ impl ScratchAcousticDsp {
         self.frames_since_motion = 0;
         self.contact_impulse = 0.0;
         self.last_output_samples.clear();
+        self.high_frequency_acceleration_limiter.reset();
         self.window_miss_frames = 0;
         self.ended = false;
     }
@@ -493,6 +651,22 @@ impl ScratchAcousticDsp {
     #[wasm_bindgen(getter, js_name = highFrequencyAccelerationLimit)]
     pub fn high_frequency_acceleration_limit(&self) -> f64 {
         self.config.high_frequency_acceleration_limit
+    }
+
+    #[wasm_bindgen(js_name = setStylusTracingLimit)]
+    pub fn set_stylus_tracing_limit(&mut self, strength: f64) -> Result<(), JsValue> {
+        if !valid_unit_interval(strength) {
+            return Err(JsValue::from_str(
+                "stylusTracingLimit must be between 0 and 1",
+            ));
+        }
+        self.config.stylus_tracing_limit = strength;
+        Ok(())
+    }
+
+    #[wasm_bindgen(getter, js_name = stylusTracingLimit)]
+    pub fn stylus_tracing_limit(&self) -> f64 {
+        self.config.stylus_tracing_limit
     }
 
     #[wasm_bindgen(js_name = setScratchPreset)]
@@ -617,6 +791,7 @@ impl ScratchAcousticDsp {
         self.position = self.clamp_source_position(position);
         self.target_position = self.position;
         self.last_output_samples.clear();
+        self.high_frequency_acceleration_limiter.reset();
         self.window_miss_frames = 0;
         self.ended = false;
         if impulse > 0.0 {
@@ -800,11 +975,11 @@ impl ScratchAcousticDsp {
                 1.0
             };
             let mut missed_window = false;
+            let mut programme = [0.0_f64; 2];
+            let mut source_textures = [0.0_f64; 2];
 
             for channel_index in 0..output_channel_count {
-                let output_index = frame * output_channel_count + channel_index;
                 if self.needle_lifted {
-                    self.output[output_index] = 0.0;
                     continue;
                 }
                 let source_index = channel_index.min(self.channels.len() - 1);
@@ -822,11 +997,11 @@ impl ScratchAcousticDsp {
                     }
                     Some((sampled, slope, curvature)) => {
                         let drag_state = self.drag_lowpass_state[channel_index];
-                        let tracing_alpha = tracing_acceleration_alpha(
+                        let tracing_alpha = stylus_tracing_alpha(
                             drag_alpha,
                             curvature,
                             abs_rate,
-                            self.config.high_frequency_acceleration_limit,
+                            self.config.stylus_tracing_limit,
                         );
                         let filtered = drag_state + (sampled - drag_state) * tracing_alpha;
                         self.drag_lowpass_state[channel_index] = filtered;
@@ -838,9 +1013,28 @@ impl ScratchAcousticDsp {
                         (music, texture)
                     }
                 };
-                self.output[output_index] =
-                    (music + source_texture + contact_texture + dust_fleck + impulse_noise)
-                        .clamp(-1.0, 1.0) as f32;
+                programme[channel_index] = music;
+                source_textures[channel_index] = source_texture;
+            }
+
+            let programme = self.high_frequency_acceleration_limiter.process_frame(
+                programme,
+                output_channel_count,
+                self.output_sample_rate,
+                self.config.high_frequency_acceleration_limit,
+            );
+            for channel_index in 0..output_channel_count {
+                let output_index = frame * output_channel_count + channel_index;
+                if self.needle_lifted {
+                    self.output[output_index] = 0.0;
+                    continue;
+                }
+                self.output[output_index] = (programme[channel_index]
+                    + source_textures[channel_index]
+                    + contact_texture
+                    + dust_fleck
+                    + impulse_noise)
+                    .clamp(-1.0, 1.0) as f32;
             }
 
             self.position = self.clamp_source_position(self.position + effective_rate * rate_scale);
@@ -1031,6 +1225,7 @@ impl ScratchAcousticDsp {
         if !(duration_seconds > 0.0) || self.needle_lifted {
             return;
         }
+        self.high_frequency_acceleration_limiter.reset();
         let (gain, filter_hz, filter_q) = if region == SURFACE_REGION_DEADWAX {
             (DEADWAX_STATIC_GAIN, 4600.0, 0.4)
         } else {
@@ -1300,6 +1495,7 @@ impl ScratchAcousticDsp {
         self.last_effective_rate = 0.0;
         self.frames_since_motion = 0;
         self.last_output_samples.clear();
+        self.high_frequency_acceleration_limiter.reset();
         self.window_miss_frames = 0;
     }
 
@@ -1516,12 +1712,7 @@ fn compute_movement_gain(abs_rate: f64) -> f64 {
 /// local second difference of groove displacement; traversing it faster raises
 /// acceleration with velocity squared. Instead of hard clipping that demand,
 /// reduce the existing tracing-filter cutoff through a smooth knee.
-fn tracing_acceleration_alpha(
-    base_alpha: f64,
-    curvature: f64,
-    abs_rate: f64,
-    strength: f64,
-) -> f64 {
+fn stylus_tracing_alpha(base_alpha: f64, curvature: f64, abs_rate: f64, strength: f64) -> f64 {
     let base_alpha = finite_or_zero(base_alpha).clamp(0.0, 1.0);
     let strength = finite_or_zero(strength).clamp(0.0, 1.0);
     if strength <= 0.0 || abs_rate <= 0.75 || curvature == 0.0 {
@@ -1529,8 +1720,8 @@ fn tracing_acceleration_alpha(
     }
     let demand = curvature.abs() * abs_rate * abs_rate;
     let overload = smoothstep_unit(
-        (demand - HF_ACCELERATION_THRESHOLD)
-            / (HF_ACCELERATION_FULL_SCALE - HF_ACCELERATION_THRESHOLD),
+        (demand - STYLUS_TRACING_CURVATURE_THRESHOLD)
+            / (STYLUS_TRACING_CURVATURE_FULL_SCALE - STYLUS_TRACING_CURVATURE_THRESHOLD),
     );
     let velocity_presence = smoothstep_unit((abs_rate - 0.75) / (4.0 - 0.75));
     let cutoff_scale = (1.0 - strength * overload * velocity_presence).clamp(0.16, 1.0);
@@ -1607,6 +1798,47 @@ mod tests {
             .sum::<f64>()
             / dsp.output.len().max(1) as f64)
             .sqrt()
+    }
+
+    fn rms(samples: &[f64]) -> f64 {
+        (samples.iter().map(|sample| sample * sample).sum::<f64>() / samples.len().max(1) as f64)
+            .sqrt()
+    }
+
+    fn second_difference_rms(samples: &[f64]) -> f64 {
+        let differences = samples
+            .windows(3)
+            .map(|window| window[2] - 2.0 * window[1] + window[0])
+            .collect::<Vec<_>>();
+        rms(&differences)
+    }
+
+    fn tone_amplitude(samples: &[f64], sample_rate: f64, frequency: f64) -> f64 {
+        let (sine, cosine) = samples.iter().enumerate().fold(
+            (0.0, 0.0),
+            |(sine_sum, cosine_sum), (index, sample)| {
+                let phase = std::f64::consts::TAU * frequency * index as f64 / sample_rate;
+                (
+                    sine_sum + sample * phase.sin(),
+                    cosine_sum + sample * phase.cos(),
+                )
+            },
+        );
+        2.0 * sine.hypot(cosine) / samples.len().max(1) as f64
+    }
+
+    fn limit_mono(samples: &[f64], strength: f64) -> (Vec<f64>, f64) {
+        let mut limiter = HighFrequencyAccelerationLimiter::default();
+        let mut minimum_gain = 1.0_f64;
+        let output = samples
+            .iter()
+            .map(|sample| {
+                let output = limiter.process_frame([*sample, 0.0], 1, 48_000.0, strength)[0];
+                minimum_gain = minimum_gain.min(limiter.linked_gain);
+                output
+            })
+            .collect();
+        (output, minimum_gain)
     }
 
     // Mirrors the worklet's exact message sequence for a canvas scratch:
@@ -1764,31 +1996,207 @@ mod tests {
     }
 
     #[test]
-    fn high_frequency_acceleration_limit_is_soft_velocity_aware_and_optional() {
+    fn stylus_tracing_limit_preserves_the_existing_curvature_velocity_model() {
         let base_alpha = 0.90;
-        assert_eq!(
-            tracing_acceleration_alpha(base_alpha, 3.0, 0.5, 1.0),
-            base_alpha,
-        );
-        assert_eq!(
-            tracing_acceleration_alpha(base_alpha, 3.0, 4.0, 0.0),
-            base_alpha,
-        );
-        let moderate = tracing_acceleration_alpha(base_alpha, 1.0, 2.0, 0.72);
-        let demanding = tracing_acceleration_alpha(base_alpha, 3.0, 4.0, 0.72);
+        assert_eq!(stylus_tracing_alpha(base_alpha, 3.0, 0.5, 1.0), base_alpha,);
+        assert_eq!(stylus_tracing_alpha(base_alpha, 3.0, 4.0, 0.0), base_alpha,);
+        let moderate = stylus_tracing_alpha(base_alpha, 1.0, 2.0, 0.72);
+        let demanding = stylus_tracing_alpha(base_alpha, 3.0, 4.0, 0.72);
         assert!((0.0..base_alpha).contains(&moderate));
         assert!((0.0..moderate).contains(&demanding));
     }
 
     #[test]
-    fn high_frequency_acceleration_limit_strength_is_validated() {
+    fn limiter_defaults_serde_names_and_strengths_are_distinct_and_validated() {
+        let defaults = AcousticConfig::default();
+        assert_eq!(defaults.stylus_tracing_limit, 0.72);
+        assert_eq!(defaults.high_frequency_acceleration_limit, 0.35);
+
+        let decoded: AcousticConfig = serde_json::from_value(serde_json::json!({
+            "stylusTracingLimit": 0.44,
+            "highFrequencyAccelerationLimit": 0.66
+        }))
+        .unwrap();
+        assert_eq!(decoded.stylus_tracing_limit, 0.44);
+        assert_eq!(decoded.high_frequency_acceleration_limit, 0.66);
+
         let mut dsp = simulation_dsp();
+        dsp.set_stylus_tracing_limit(0.25).unwrap();
+        assert_eq!(dsp.stylus_tracing_limit(), 0.25);
         dsp.set_high_frequency_acceleration_limit(0.0).unwrap();
         assert_eq!(dsp.high_frequency_acceleration_limit(), 0.0);
         dsp.set_high_frequency_acceleration_limit(1.0).unwrap();
         assert_eq!(dsp.high_frequency_acceleration_limit(), 1.0);
+        assert!(!valid_unit_interval(-0.01));
         assert!(!valid_unit_interval(f64::NAN));
         assert!(!valid_unit_interval(1.1));
+    }
+
+    #[test]
+    fn high_frequency_acceleration_limit_zero_is_an_exact_bypass() {
+        let samples = (0..8_192)
+            .map(|index| {
+                let time = index as f64 / 48_000.0;
+                0.31 * (std::f64::consts::TAU * 437.0 * time).sin()
+                    + 0.47 * (std::f64::consts::TAU * 11_300.0 * time).sin()
+            })
+            .collect::<Vec<_>>();
+        let (output, minimum_gain) = limit_mono(&samples, 0.0);
+        assert_eq!(output, samples);
+        assert_eq!(minimum_gain, 1.0);
+    }
+
+    #[test]
+    fn high_frequency_acceleration_limit_preserves_low_frequency_programme() {
+        let samples = (0..12_000)
+            .map(|index| 0.65 * (std::f64::consts::TAU * 440.0 * index as f64 / 48_000.0).sin())
+            .collect::<Vec<_>>();
+        let (output, minimum_gain) = limit_mono(&samples, 1.0);
+        let error = output
+            .iter()
+            .zip(samples.iter())
+            .map(|(output, input)| (output - input).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(error < 1e-10, "low-frequency peak error was {error}");
+        assert_eq!(minimum_gain, 1.0);
+    }
+
+    #[test]
+    fn high_frequency_acceleration_limit_keeps_benign_brightness() {
+        let samples = (0..12_000)
+            .map(|index| 0.12 * (std::f64::consts::TAU * 7_000.0 * index as f64 / 48_000.0).sin())
+            .collect::<Vec<_>>();
+        let (output, minimum_gain) = limit_mono(&samples, 1.0);
+        let input_rms = rms(&samples[1_024..]);
+        let output_rms = rms(&output[1_024..]);
+        assert!(
+            output_rms > input_rms * 0.96,
+            "benign HF changed from {input_rms} to {output_rms}"
+        );
+        assert!(minimum_gain > 0.94, "benign HF gain reached {minimum_gain}");
+    }
+
+    #[test]
+    fn high_frequency_acceleration_limit_reduces_harsh_burst_without_full_band_collapse() {
+        let samples = (0..9_600)
+            .map(|index| {
+                let time = index as f64 / 48_000.0;
+                let low = 0.34 * (std::f64::consts::TAU * 440.0 * time).sin();
+                let high = if (2_400..7_200).contains(&index) {
+                    0.50 * (std::f64::consts::TAU * 11_000.0 * time).sin()
+                } else {
+                    0.0
+                };
+                low + high
+            })
+            .collect::<Vec<_>>();
+        let (default_output, default_minimum_gain) = limit_mono(&samples, 0.35);
+        let (output, minimum_gain) = limit_mono(&samples, 1.0);
+        let analysis = 3_000..6_600;
+        let input_burst = &samples[analysis.clone()];
+        let default_burst = &default_output[analysis.clone()];
+        let output_burst = &output[analysis];
+        let input_acceleration = second_difference_rms(input_burst);
+        let default_acceleration = second_difference_rms(default_burst);
+        let output_acceleration = second_difference_rms(output_burst);
+        assert!(
+            default_acceleration < input_acceleration * 0.90,
+            "default burst acceleration {input_acceleration} -> {default_acceleration}"
+        );
+        assert!(
+            default_minimum_gain < 0.88,
+            "default harsh-burst gain only reached {default_minimum_gain}"
+        );
+        assert!(
+            output_acceleration < input_acceleration * 0.72,
+            "burst acceleration {input_acceleration} -> {output_acceleration}"
+        );
+        assert!(
+            rms(output_burst) > rms(input_burst) * 0.50,
+            "programme RMS collapsed from {} to {}",
+            rms(input_burst),
+            rms(output_burst),
+        );
+        let input_low = tone_amplitude(input_burst, 48_000.0, 440.0);
+        let output_low = tone_amplitude(output_burst, 48_000.0, 440.0);
+        assert!(
+            output_low > input_low * 0.97,
+            "440 Hz component collapsed from {input_low} to {output_low}"
+        );
+        assert!(
+            minimum_gain < 0.65,
+            "harsh burst only reached {minimum_gain}"
+        );
+    }
+
+    #[test]
+    fn high_frequency_acceleration_limit_is_bounded_and_stereo_linked() {
+        let mut stereo = HighFrequencyAccelerationLimiter::default();
+        let mut right_only = HighFrequencyAccelerationLimiter::default();
+        let mut stereo_right = Vec::new();
+        let mut solo_right = Vec::new();
+        let mut minimum_gain = 1.0_f64;
+        for index in 0..7_200 {
+            let time = index as f64 / 48_000.0;
+            let left = if index % 2 == 0 { 0.72 } else { -0.72 };
+            let right = 0.12 * (std::f64::consts::TAU * 7_000.0 * time).sin();
+            let linked = stereo.process_frame([left, right], 2, 48_000.0, 1.0);
+            let solo = right_only.process_frame([right, 0.0], 1, 48_000.0, 1.0);
+            minimum_gain = minimum_gain.min(stereo.linked_gain);
+            assert!((PROGRAMME_LIMITER_MIN_UPPER_GAIN..=1.0).contains(&stereo.linked_gain));
+            assert!(linked.into_iter().all(f64::is_finite));
+            stereo_right.push(linked[1]);
+            solo_right.push(solo[0]);
+        }
+        assert!(minimum_gain < 0.40);
+        assert!(
+            rms(&stereo_right[1_024..]) < rms(&solo_right[1_024..]) * 0.70,
+            "linked right RMS {} vs solo {}",
+            rms(&stereo_right[1_024..]),
+            rms(&solo_right[1_024..]),
+        );
+    }
+
+    #[test]
+    fn high_frequency_acceleration_limiter_releases_transparently() {
+        let mut limiter = HighFrequencyAccelerationLimiter::default();
+        for index in 0..2_400 {
+            let sample = if index % 2 == 0 { 0.8 } else { -0.8 };
+            limiter.process_frame([sample, 0.0], 1, 48_000.0, 1.0);
+        }
+        assert!(limiter.linked_gain < 0.40);
+        for _ in 0..9_600 {
+            limiter.process_frame([0.0, 0.0], 1, 48_000.0, 1.0);
+        }
+        assert!(
+            limiter.linked_gain > 0.99,
+            "release ended at {}",
+            limiter.linked_gain,
+        );
+    }
+
+    #[test]
+    fn surface_only_render_bypasses_programme_acceleration_limiter() {
+        let mut bypass = simulation_dsp();
+        let mut limited = simulation_dsp();
+        let surface = (0..48_000)
+            .map(|index| {
+                (0.2 * (std::f64::consts::TAU * 8_000.0 * index as f64 / 48_000.0).sin()) as f32
+            })
+            .collect::<Vec<_>>();
+        bypass.surface_asset = vec![surface.clone(), surface.clone()];
+        limited.surface_asset = vec![surface.clone(), surface];
+        bypass.set_high_frequency_acceleration_limit(0.0).unwrap();
+        limited.set_high_frequency_acceleration_limit(1.0).unwrap();
+        bypass.trigger_needle_drop();
+        limited.trigger_needle_drop();
+        bypass.render_surface(4_096, 2);
+        limited.render_surface(4_096, 2);
+        assert_eq!(bypass.output, limited.output);
+        assert_eq!(
+            bypass.high_frequency_acceleration_limiter,
+            limited.high_frequency_acceleration_limiter,
+        );
     }
 
     #[test]
