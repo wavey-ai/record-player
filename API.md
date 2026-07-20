@@ -801,9 +801,10 @@ procedure is specified in
 [`DJ_VALIDATION_PROTOCOL.md`](./DJ_VALIDATION_PROTOCOL.md); this API reference
 does not claim results from that human validation. The build includes
 `/dj-validation.html`, which binds a collection session to a clean candidate and
-records the public latency and playback-statistics APIs. Create an offline
-versioned results file with `npm run validation:template`. Apply the
-pre-registered acceptance rules with
+records the public latency and playback-statistics APIs. The separate
+`/dj-abx.html` runner verifies participant-bound opaque WAV packages and exports
+condition-free responses. Create an offline versioned results file with
+`npm run validation:template`. Apply the pre-registered acceptance rules with
 `npm run validation:analyze -- <file>`.
 
 

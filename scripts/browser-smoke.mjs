@@ -90,6 +90,7 @@ class CdpSession {
         const request = this.pending.get(message.id);
         if (!request) return;
         this.pending.delete(message.id);
+        clearTimeout(request.timeout);
         if (message.error) request.reject(new Error(message.error.message || "CDP command failed"));
         else request.resolve(message.result || {});
         return;
@@ -97,6 +98,13 @@ class CdpSession {
       for (const listener of this.listeners.get(message.method) || []) {
         listener(message.params || {});
       }
+    });
+    this.socket.addEventListener("close", () => {
+      for (const [id, request] of this.pending) {
+        clearTimeout(request.timeout);
+        request.reject(new Error(`CDP connection closed before command ${id} completed`));
+      }
+      this.pending.clear();
     });
   }
 
@@ -106,11 +114,15 @@ class CdpSession {
     this.listeners.set(method, listeners);
   }
 
-  async send(method, params = {}) {
-    await this.ready;
+  async send(method, params = {}, timeoutMs = 15_000) {
+    await withTimeout(this.ready, timeoutMs, "Chrome DevTools connection");
     const id = this.nextId++;
     const response = new Promise((resolveResponse, reject) => {
-      this.pending.set(id, { resolve: resolveResponse, reject });
+      const timeout = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`${method} timed out after ${timeoutMs} ms`));
+      }, timeoutMs);
+      this.pending.set(id, { resolve: resolveResponse, reject, timeout });
     });
     this.socket.send(JSON.stringify({ id, method, params }));
     return response;
@@ -649,7 +661,7 @@ try {
       awaitPromise: true,
       returnByValue: true,
       userGesture: true,
-    }),
+    }, 35_000),
     30_000,
     "Chrome AudioWorklet scenario",
   );
@@ -662,12 +674,12 @@ try {
     const phaseResult = await session.send("Runtime.evaluate", {
       expression: `String(globalThis.__VINYL_BROWSER_PHASE__ || "startup")`,
       returnByValue: true,
-    });
+    }, 5_000);
     const phase = String(phaseResult.result?.value || "startup");
     for (const [contextId, context] of audioContexts) {
       if (context.contextType !== "realtime" || context.contextState === "closed") continue;
       try {
-        const sample = await session.send("WebAudio.getRealtimeData", { contextId });
+        const sample = await session.send("WebAudio.getRealtimeData", { contextId }, 5_000);
         const realtimeData = sample.realtimeData || {};
         if (Number.isFinite(realtimeData.renderCapacity)) {
           realtimeSamples.push({ contextId, phase, ...realtimeData });
@@ -878,12 +890,150 @@ try {
   if (typeof validationConsole?.buildInfo?.worktreeDirty !== "boolean") {
     throw new Error("Validation console did not load Git build metadata");
   }
+  await session.send("Page.navigate", {
+    url: `http://127.0.0.1:${serverPort}/dj-abx.html`,
+  });
+  await pause(250);
+  const blindAbxResult = await session.send("Runtime.evaluate", {
+    expression: `(async () => {
+      const deadline = performance.now() + 10000;
+      while (!globalThis.__VINYL_DJ_ABX__ && performance.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      const runner = globalThis.__VINYL_DJ_ABX__;
+      if (!runner) throw new Error("Blind ABX runner did not start");
+      const paths = {
+        a: "audio/11111111111111111111111111111111.wav",
+        b: "audio/22222222222222222222222222222222.wav",
+        x: "audio/33333333333333333333333333333333.wav",
+      };
+      const packageFile = (content, name, path, type) => {
+        const file = new File([content], name, { type });
+        Object.defineProperty(file, "webkitRelativePath", { value: "operator-package/" + path });
+        return file;
+      };
+      const wav = (sample, tag) => {
+        const frames = 2400;
+        const channels = 2;
+        const blockAlign = channels * 2;
+        const dataBytes = frames * blockAlign;
+        const bytes = new ArrayBuffer(44 + dataBytes + 12);
+        const view = new DataView(bytes);
+        const text = (offset, value) => [...value].forEach((character, index) => view.setUint8(offset + index, character.charCodeAt(0)));
+        text(0, "RIFF");
+        view.setUint32(4, bytes.byteLength - 8, true);
+        text(8, "WAVE");
+        text(12, "fmt ");
+        view.setUint32(16, 16, true);
+        view.setUint16(20, 1, true);
+        view.setUint16(22, channels, true);
+        view.setUint32(24, 48000, true);
+        view.setUint32(28, 48000 * blockAlign, true);
+        view.setUint16(32, blockAlign, true);
+        view.setUint16(34, 16, true);
+        text(36, "data");
+        view.setUint32(40, dataBytes, true);
+        for (let offset = 44; offset < 44 + dataBytes; offset += 2) view.setInt16(offset, sample, true);
+        text(44 + dataBytes, "JUNK");
+        view.setUint32(48 + dataBytes, 4, true);
+        view.setUint32(52 + dataBytes, tag, true);
+        return bytes;
+      };
+      const audioBytes = { a: wav(700, 1), b: wav(-700, 2), x: wav(700, 3) };
+      const hexDigest = async bytes => {
+        const digest = await crypto.subtle.digest("SHA-256", bytes);
+        return [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, "0")).join("");
+      };
+      const audio = Object.fromEntries(await Promise.all(["a", "b", "x"].map(async role => [role, {
+        path: paths[role],
+        sha256: await hexDigest(audioBytes[role]),
+      }])));
+      const manifest = {
+        schemaVersion: 1,
+        studyId: "browser-abx-001",
+        participantId: "browser-dj-01",
+        generatedAt: "2026-07-20T12:00:00.000Z",
+        codebookSha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        trials: [{
+          id: "trial-1",
+          excerptId: "browser-excerpt-1",
+          gestureFamily: "chirp-flare",
+          audio,
+        }],
+      };
+      const manifestText = JSON.stringify(manifest);
+      await runner.loadPackageFiles([
+        packageFile(manifestText, "blind-manifest.json", "blind-manifest.json", "application/json"),
+        ...["a", "b", "x"].map(role => packageFile(
+          audioBytes[role],
+          paths[role].split("/").pop(),
+          paths[role],
+          "audio/wav",
+        )),
+      ]);
+      document.querySelector("#start-session").click();
+      for (const role of ["a", "b", "x"]) {
+        const button = document.querySelector("[data-role=" + role + "]");
+        button.click();
+        const playDeadline = performance.now() + 3000;
+        while (!button.classList.contains("heard") && performance.now() < playDeadline) {
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        if (!button.classList.contains("heard")) throw new Error("Blind runner did not play " + role.toUpperCase());
+      }
+      const form = document.querySelector("#response-form");
+      form.elements.responseLabel.value = "a";
+      form.elements.confidence.value = "4";
+      form.elements.realism.value = "6";
+      form.elements.transientSharpness.value = "6";
+      form.elements.timingNaturalness.value = "7";
+      form.requestSubmit();
+      await new Promise(resolve => setTimeout(resolve, 25));
+      const responses = runner.getSession().exportResponses();
+      return {
+        studyId: runner.getManifest().studyId,
+        manifestSha256: runner.getManifestSha256(),
+        codebookSha256: runner.getManifest().codebookSha256,
+        progress: runner.getSession().progress,
+        responses,
+        manifestConditionFree: !/physical|player/.test(manifestText),
+        completionVisible: !document.querySelector("#complete-panel").hidden,
+      };
+    })()`,
+    awaitPromise: true,
+    returnByValue: true,
+    userGesture: true,
+  });
+  if (blindAbxResult.exceptionDetails) {
+    throw new Error(
+      blindAbxResult.exceptionDetails.exception?.description
+        || blindAbxResult.exceptionDetails.text
+        || "Blind ABX runner failed",
+    );
+  }
+  const blindAbx = blindAbxResult.result?.value;
+  if (!blindAbx?.manifestConditionFree || !blindAbx?.completionVisible) {
+    throw new Error("Blind ABX runner exposed a condition or did not complete the trial");
+  }
+  if (blindAbx?.progress?.completed !== 1 || blindAbx?.responses?.responses?.length !== 1) {
+    throw new Error("Blind ABX runner did not freeze the browser response");
+  }
+  if (!/^[0-9a-f]{64}$/.test(blindAbx?.manifestSha256 || "")) {
+    throw new Error("Blind ABX runner did not bind responses to the manifest hash");
+  }
+  if (blindAbx?.responses?.codebookSha256 !== blindAbx?.codebookSha256) {
+    throw new Error("Blind ABX runner did not retain the private-codebook commitment");
+  }
+  if (/physical|player/.test(JSON.stringify(blindAbx.responses))) {
+    throw new Error("Blind ABX response leaked a condition label");
+  }
   if (pageErrors.length) throw new Error(`Browser page errors:\n${pageErrors.join("\n")}`);
   process.stdout.write(`Real Chrome AudioWorklet smoke passed:\n${JSON.stringify({
     ...result.result?.value,
     multiPointer,
     webAudioRealtime,
     validationConsole,
+    blindAbx,
   }, null, 2)}\n`);
 } finally {
   session?.close();

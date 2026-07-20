@@ -22,6 +22,7 @@ button,
   color: #f4f1e8;
   padding: 0.65rem 0.8rem;
   cursor: pointer;
+  text-decoration: none;
 }
 
 button:hover,

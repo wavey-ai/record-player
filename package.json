@@ -9,6 +9,9 @@
     "dev": "node scripts/dev-server.mjs",
     "test:browser": "npm run build && node scripts/browser-smoke.mjs",
     "validation:analyze": "node scripts/analyze-dj-validation.mjs",
+    "validation:cue-template": "node scripts/create-dj-cue-code-template.mjs",
+    "validation:decode-abx": "node scripts/decode-dj-abx.mjs",
+    "validation:prepare-abx": "node scripts/prepare-dj-abx.mjs",
     "validation:template": "node scripts/analyze-dj-validation.mjs --template"
   }
 }

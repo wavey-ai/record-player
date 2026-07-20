@@ -33,6 +33,7 @@ This is a focused standalone player rather than a copy of the legacy play applic
 - a default-on Rust HF acceleration limiter, kept distinct from stylus tracing,
   with both strengths in a collapsed Advanced Controls panel
 - a build-bound DJ validation console for hardware and blinded-study evidence
+- participant-bound, condition-free ABX packages and a blind listening runner
 - IndexedDB PCM caching
 - frame-timed scratch-performance capture, persistence and replay
 - a configurable radial canvas UI with a stylus, concentric turntable, Technics-style pitch control, strobe rows and lamp.
@@ -936,6 +937,38 @@ The console refuses release measurements and audio blocks if the build came
 from a dirty worktree, if the draft commit differs from the running build, or
 if the pinned HF, stylus or fader settings have changed. This prevents an
 unidentified candidate from contributing release evidence.
+
+Blind listening uses a separate coordinator/operator workflow. The coordinator
+prepares one package per participant from fresh, matched physical and player WAV
+captures:
+
+```sh
+npm run validation:prepare-abx -- dj-01-spec.json \
+  --out dj-01-blind-package \
+  --codebook private/dj-01-codebook.json
+```
+
+The operator opens `http://localhost:5193/dj-abx.html` and selects the blind
+package directory. The runner never loads the private codebook. It verifies all
+opaque audio-file hashes, requires A, B and X playback, saves a condition-free
+local draft and exports only frozen A/B responses and ratings.
+
+After responses, exclusions and cue coding are frozen, create the cue-code file
+and decode the participant into the main collection:
+
+```sh
+npm run validation:cue-template -- blind-abx-dj-01.json \
+  --out dj-01-cue-codes.json
+npm run validation:decode-abx -- private/dj-01-codebook.json \
+  blind-abx-dj-01.json \
+  --cue-codes dj-01-cue-codes.json \
+  --results dj-validation-results.json \
+  --out dj-validation-results.dj-01.json
+```
+
+Two blinded coders must complete any empty cue codes before the decode step.
+The detailed package schema and coordinator procedure are in
+[`DJ_VALIDATION_PROTOCOL.md`](./DJ_VALIDATION_PROTOCOL.md).
 
 The command-line template remains available for offline collection. Generate a
 template and analyze a frozen result file with:

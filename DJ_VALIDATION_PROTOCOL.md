@@ -167,14 +167,97 @@ match the running build, or the `0.35` HF, `0.72` stylus and `0.08` fader settin
 are not pinned.
 
 Use the console to record the hardware chain, participants, browser audio blocks,
-physical loopback, ABX trials, live routines, preflight results, study controls,
-exclusions and artifact metadata. It keeps a local draft. Export the results
-after each session. A live block also produces a separate movement-trace JSON
-file and records its browser-computed SHA-256 digest.
+physical loopback, live routines, preflight results, study controls, exclusions
+and artifact metadata. It keeps a local draft. Export the results after each
+session. A live block also produces a separate movement-trace JSON file and
+records its browser-computed SHA-256 digest.
 
-The console does not perform the randomization or reveal hidden condition labels.
-Follow the blinding procedure above. Enter decoded A/B/X conditions only after
-responses and exclusions are frozen.
+### Prepare one blind package per participant
+
+The study coordinator, who does not operate the listening session, prepares the
+ABX package. Use fresh physical and player WAV captures for every scored trial
+in the complete study. Do not reuse a capture path or `excerptId`. Both files in
+a pair must have the same uncompressed WAV format, sample rate, channel count,
+bit depth and frame count.
+
+Create a participant-specific preparation file. Include 24 or more trials with
+balanced gesture-family counts:
+
+```json
+{
+  "schemaVersion": 1,
+  "studyId": "vinyl-rc1",
+  "participantId": "dj-01",
+  "trials": [
+    {
+      "id": "dj-01-trial-01",
+      "excerptId": "dj-01-excerpt-01",
+      "gestureFamily": "baby-drag-cue",
+      "physicalPath": "captures/dj-01-physical-01.wav",
+      "playerPath": "captures/dj-01-player-01.wav"
+    }
+  ]
+}
+```
+
+Generate the operator package and private codebook:
+
+```sh
+npm run validation:prepare-abx -- dj-01-spec.json \
+  --out operator/dj-01-blind \
+  --codebook private/dj-01-codebook.json
+```
+
+The generator refuses reused capture paths or content, compressed inputs,
+mismatched WAV formats, mismatched frame counts and existing output targets. It
+balances A and X conditions inside each even gesture-family block. It gives A, B and X unique
+opaque filenames and adds a different ignored WAV metadata chunk to every copy.
+This keeps X from being exposed by filename or whole-file hash equality without
+changing decoded audio. The public manifest contains distinct integrity hashes.
+It also contains the SHA-256 commitment of the completed private codebook. The
+private codebook binds every opaque file to its condition and original capture
+hash. It must stay outside the operator package.
+
+### Run and freeze blind responses
+
+The operator opens `http://localhost:5193/dj-abx.html` and selects the complete
+participant package directory. The page loads no condition labels or private
+codebook. It verifies every WAV against the public manifest before the session.
+It also requires full A, B and X playback before it accepts a response.
+
+The participant-specific manifest supplies the anonymized ID. The runner stores
+an incomplete condition-free draft in local browser storage. It exports a blind
+response file only after all registered trials are complete. Freeze that file
+and all exclusions before anyone opens the private codebook.
+
+Create the cue-coding template from the blind response:
+
+```sh
+npm run validation:cue-template -- blind-abx-dj-01.json \
+  --out dj-01-cue-codes.json
+```
+
+Two analysts code the copied cue text while condition labels remain hidden. They
+must resolve every non-empty `cueCode` with the registered lower-case kebab-case
+codebook. Do not change the copied `audibleCue` text.
+
+After responses, exclusions and cue codes are frozen, decode one participant and
+merge the trials into the schema-version-2 console export:
+
+```sh
+npm run validation:decode-abx -- private/dj-01-codebook.json \
+  blind-abx-dj-01.json \
+  --cue-codes dj-01-cue-codes.json \
+  --results dj-validation-results.json \
+  --out dj-validation-results.dj-01.json
+```
+
+Use the prior output as `--results` for the next participant. The decoder will
+not overwrite a file. It rejects a wrong participant, manifest hash, trial,
+excerpt, cue text or codebook hash. This prevents a private mapping from being
+changed after responses exist. Bundle all completed private codebooks
+into the study's randomization-manifest artifact. Bundle the completed cue-code
+files into the cue-codebook artifact.
 
 The command-line template remains available for an offline workflow. Generate a
 version-2 JSON collection template:

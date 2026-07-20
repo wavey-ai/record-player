@@ -40,8 +40,8 @@ createServer((request, response) => {
       "Cross-Origin-Embedder-Policy": "require-corp"
     });
     createReadStream(path).pipe(response);
-  } catch (e) {
-    console.log(e)
+  } catch (error) {
+    if (error?.code !== "ENOENT") console.error(error);
     response.writeHead(404).end("Not found");
   }
 }).listen(port, () => {

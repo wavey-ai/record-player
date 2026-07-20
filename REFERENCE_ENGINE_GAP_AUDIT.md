@@ -80,6 +80,7 @@ The audit compared those files with:
 | Acoustic-loopback latency | Not present | Frame-tagged output-to-input correlation probe | Beyond reference |
 | DJ-study analysis | Not present | Versioned exact acceptance analyzer | Beyond reference |
 | DJ evidence collection | Not present | Build-bound browser session console | Beyond reference |
+| Blind ABX execution | Not present | Opaque participant packages and condition-free runner | Beyond reference |
 
 ## Important deliberate differences
 
@@ -135,11 +136,11 @@ measured audio-thread reason to make either change.
 ## Automated evidence
 
 - `cargo test --workspace`: 81 tests.
-- `node --test test/*.test.mjs`: 51 tests.
+- `node --test test/*.test.mjs`: 58 tests.
 - `npm run bench:worklet`: normal p95 `1.45%` of a quantum.
-- The same benchmark measured `7.97%` for alternating `±8×` Crab/8.
+- The same benchmark measured `7.94%` for alternating `±8×` Crab/8.
 - Direct copy into prepared Rust window storage reduced fresh six-second window
-  application to p95 `3.83%` and maximum `10.11%`.
+  application to p95 `2.50%` and maximum `7.36%`.
 - Regression gates now require window-application p95 below `25%` and maximum
   below `50%` of a quantum.
 - `npm run test:browser`: real Chrome 150 and real release WASM passed.
@@ -168,6 +169,9 @@ measured audio-thread reason to make either change.
 - Chrome opened the dedicated collection console, bound it to generated build
   metadata and added a participant through the real form. The console refuses
   release blocks from a dirty or mismatched candidate.
+- Chrome loaded an opaque ABX package, verified its manifest-bound WAV files,
+  played A, B and X, and froze a condition-free response. Package tests cover
+  participant binding, balanced conditions, private decoding and cue coding.
 - Chrome detected three software-loopback probes at `20.667 ms`. Minimum
   correlation was above `0.994`. This checks scheduling and correlation only;
   it is not a physical-path result.
@@ -180,8 +184,9 @@ measured audio-thread reason to make either change.
 2. Test actual touchscreens, pens, trackpads and mouse devices.
 3. Run the acoustic-loopback probe through each target interface and speaker or
    electrical-loopback path. Attach the result to the study file.
-4. Collect the frozen data in `/dj-validation.html` for the pre-registered blind
-   test. Analyze the exported data with `npm run validation:analyze -- <file>`.
+4. Collect the frozen live data in `/dj-validation.html` and blind responses in
+   `/dj-abx.html`. Decode each participant only after freeze. Analyze the merged
+   data with `npm run validation:analyze -- <file>`.
 5. Tune only the variables that fail those tests.
 
 An exact JavaScript-to-Rust output hash is not a useful release gate. The target
