@@ -371,6 +371,7 @@ pub struct ScratchAcousticDsp {
     output: Vec<f32>,
     scratch_gate: ScratchGate,
     scratch_gate_trace: Vec<f32>,
+    manual_fader_gain: f64,
     requested_window_position: Option<f64>,
     surface_asset: Vec<Vec<f32>>,
     surface_asset_rate: f64,
@@ -449,6 +450,7 @@ impl ScratchAcousticDsp {
             output: Vec::new(),
             scratch_gate: ScratchGate::default(),
             scratch_gate_trace: Vec::new(),
+            manual_fader_gain: 1.0,
             requested_window_position: None,
             surface_asset: Vec::new(),
             surface_asset_rate: 48_000.0,
@@ -634,7 +636,24 @@ impl ScratchAcousticDsp {
         if !surface_enabled {
             self.contact_impulse = 0.0;
             self.last_noise = 0.0;
+            self.surface_bed = None;
+            self.needle_thump = None;
+            self.needle_burst = None;
         }
+    }
+
+    #[wasm_bindgen(js_name = setManualFaderGain)]
+    pub fn set_manual_fader_gain(&mut self, gain: f64) -> Result<(), JsValue> {
+        if !valid_unit_interval(gain) {
+            return Err(JsValue::from_str("manualFaderGain must be between 0 and 1"));
+        }
+        self.manual_fader_gain = gain;
+        Ok(())
+    }
+
+    #[wasm_bindgen(getter, js_name = manualFaderGain)]
+    pub fn manual_fader_gain(&self) -> f64 {
+        self.manual_fader_gain
     }
 
     #[wasm_bindgen(js_name = setHighFrequencyAccelerationLimit)]
@@ -827,6 +846,7 @@ impl ScratchAcousticDsp {
             self.advance_scratch_gate_trace(frame_count, gate_contact, intent_rate, rendered_rate);
             self.mix_foley(frame_count, output_channel_count);
             self.apply_scratch_gate_trace(frame_count, output_channel_count);
+            self.apply_manual_fader_gain();
             return;
         }
         self.drag_lowpass_state.resize(output_channel_count, 0.0);
@@ -1060,6 +1080,7 @@ impl ScratchAcousticDsp {
         }
         self.mix_foley(frame_count, output_channel_count);
         self.apply_scratch_gate_trace(frame_count, output_channel_count);
+        self.apply_manual_fader_gain();
         self.maybe_request_window(frame_count);
     }
 
@@ -1092,6 +1113,7 @@ impl ScratchAcousticDsp {
         self.advance_scratch_gate_trace(frame_count, gate_contact, intent_rate, rendered_rate);
         self.mix_foley(frame_count, output_channel_count);
         self.apply_scratch_gate_trace(frame_count, output_channel_count);
+        self.apply_manual_fader_gain();
     }
 
     /// Render only cartridge/surface foley while keeping the programme readhead
@@ -1144,6 +1166,7 @@ impl ScratchAcousticDsp {
         }
         self.mix_foley(frame_count, output_channel_count);
         self.apply_scratch_gate_trace(frame_count, output_channel_count);
+        self.apply_manual_fader_gain();
     }
 
     #[wasm_bindgen(getter, js_name = outputPtr)]
@@ -1222,7 +1245,7 @@ impl ScratchAcousticDsp {
     /// Start the lead-in (region 0) or deadwax (region 1) surface bed.
     #[wasm_bindgen(js_name = startSurfaceRegion)]
     pub fn start_surface_region(&mut self, region: u8, duration_seconds: f64) {
-        if !(duration_seconds > 0.0) || self.needle_lifted {
+        if !(duration_seconds > 0.0) || self.needle_lifted || !self.config.surface_enabled {
             return;
         }
         self.high_frequency_acceleration_limiter.reset();
@@ -1263,7 +1286,7 @@ impl ScratchAcousticDsp {
     /// One-shot needle-drop foley: stylus thump plus a settling crackle burst.
     #[wasm_bindgen(js_name = triggerNeedleDrop)]
     pub fn trigger_needle_drop(&mut self) {
-        if self.needle_lifted {
+        if self.needle_lifted || !self.config.surface_enabled {
             return;
         }
         self.needle_thump = Some(NeedleThump {
@@ -1316,6 +1339,9 @@ impl ScratchAcousticDsp {
     }
 
     fn surface_asset_sample(&self, channel_index: usize, position: f64, looping: bool) -> f64 {
+        if self.surface_asset.is_empty() {
+            return 0.0;
+        }
         let channel = &self.surface_asset[channel_index.min(self.surface_asset.len() - 1)];
         let len = channel.len();
         if len == 0 {
@@ -1415,8 +1441,23 @@ impl ScratchAcousticDsp {
         }
     }
 
+    /// Replay-only deck fader. The live host keeps its normal manual fader in
+    /// WebAudio; this post-gate gain exists for sample-accurate event replay.
+    fn apply_manual_fader_gain(&mut self) {
+        if self.manual_fader_gain == 1.0 {
+            return;
+        }
+        let gain = self.manual_fader_gain as f32;
+        for sample in &mut self.output {
+            *sample *= gain;
+        }
+    }
+
     fn mix_foley(&mut self, frame_count: usize, output_channel_count: usize) {
-        if self.surface_bed.is_none() && self.needle_thump.is_none() && self.needle_burst.is_none()
+        if !self.config.surface_enabled
+            || (self.surface_bed.is_none()
+                && self.needle_thump.is_none()
+                && self.needle_burst.is_none())
         {
             return;
         }
@@ -1424,6 +1465,19 @@ impl ScratchAcousticDsp {
         let asset_step = self.surface_asset_rate / self.output_sample_rate;
         for frame in 0..frame_count {
             let mut per_channel = [0.0_f64; 2];
+            let synthetic_surface = self.surface_asset.is_empty();
+            let mut fallback_bed = [0.0_f64; 2];
+            let mut fallback_burst = [0.0_f64; 2];
+            if synthetic_surface && self.surface_bed.is_some() {
+                for sample in fallback_bed.iter_mut().take(output_channel_count.min(2)) {
+                    *sample = self.next_noise();
+                }
+            }
+            if synthetic_surface && self.needle_burst.is_some() {
+                for sample in fallback_burst.iter_mut().take(output_channel_count.min(2)) {
+                    *sample = self.next_noise();
+                }
+            }
             if let Some(bed) = self.surface_bed.clone() {
                 let elapsed_seconds = bed.elapsed_frames * dt;
                 let hold_deadwax_end =
@@ -1439,8 +1493,11 @@ impl ScratchAcousticDsp {
                         Self::surface_bed_envelope(elapsed_seconds, bed.duration_seconds, bed.gain)
                     };
                     for channel_index in 0..output_channel_count.min(2) {
-                        let raw =
-                            self.surface_asset_sample(channel_index, bed.position, bed.looping);
+                        let raw = if synthetic_surface {
+                            fallback_bed[channel_index]
+                        } else {
+                            self.surface_asset_sample(channel_index, bed.position, bed.looping)
+                        };
                         let bed = self.surface_bed.as_mut().unwrap();
                         per_channel[channel_index] +=
                             bed.filters[channel_index].process(raw) * envelope;
@@ -1465,7 +1522,11 @@ impl ScratchAcousticDsp {
                 } else {
                     let envelope = Self::burst_envelope(elapsed_seconds, burst.peak);
                     for channel_index in 0..output_channel_count.min(2) {
-                        let raw = self.surface_asset_sample(channel_index, burst.position, false);
+                        let raw = if synthetic_surface {
+                            fallback_burst[channel_index]
+                        } else {
+                            self.surface_asset_sample(channel_index, burst.position, false)
+                        };
                         let burst = self.needle_burst.as_mut().unwrap();
                         per_channel[channel_index] +=
                             burst.filters[channel_index].process(raw) * envelope;
@@ -2197,6 +2258,123 @@ mod tests {
             bypass.high_frequency_acceleration_limiter,
             limited.high_frequency_acceleration_limiter,
         );
+    }
+
+    #[test]
+    fn manual_fader_defaults_to_an_exact_post_gate_noop_and_validates_range() {
+        let mut dsp = simulation_dsp();
+        assert_eq!(dsp.manual_fader_gain(), 1.0);
+        dsp.output = vec![0.8, -0.4, 0.25, -1.0];
+        let unchanged = dsp.output.clone();
+        dsp.apply_manual_fader_gain();
+        assert_eq!(dsp.output, unchanged);
+
+        dsp.scratch_gate_trace = vec![0.25, 0.5];
+        dsp.apply_scratch_gate_trace(2, 2);
+        dsp.set_manual_fader_gain(0.4).unwrap();
+        dsp.apply_manual_fader_gain();
+        let mut expected = unchanged;
+        for frame in 0..2 {
+            for channel in 0..2 {
+                expected[frame * 2 + channel] *= dsp.scratch_gate_trace[frame];
+                expected[frame * 2 + channel] *= 0.4;
+            }
+        }
+        assert_eq!(dsp.output, expected);
+        assert_eq!(dsp.manual_fader_gain(), 0.4);
+        assert!(!valid_unit_interval(-0.01));
+        assert!(!valid_unit_interval(f64::INFINITY));
+        assert!(!valid_unit_interval(1.01));
+    }
+
+    #[test]
+    fn manual_fader_gain_one_preserves_normal_render_bit_for_bit() {
+        let mut default = scratch_signal_dsp(ScratchPreset::Baby, 1.0);
+        let mut explicit_unity = scratch_signal_dsp(ScratchPreset::Baby, 1.0);
+        explicit_unity.set_manual_fader_gain(1.0).unwrap();
+        default.render(2_048, 2);
+        explicit_unity.render(2_048, 2);
+        assert_eq!(default.output, explicit_unity.output);
+    }
+
+    #[test]
+    fn manual_fader_scales_window_miss_and_surface_outputs() {
+        let mut miss_unity = simulation_dsp();
+        let mut miss_scaled = simulation_dsp();
+        miss_unity.last_output_samples = vec![0.8, -0.4];
+        miss_scaled.last_output_samples = vec![0.8, -0.4];
+        miss_scaled.set_manual_fader_gain(0.5).unwrap();
+        miss_unity.render_window_missing(32, 2);
+        miss_scaled.render_window_missing(32, 2);
+        for (unity, scaled) in miss_unity.output.iter().zip(&miss_scaled.output) {
+            assert_eq!(*scaled, *unity * 0.5);
+        }
+
+        let mut surface_unity = simulation_dsp();
+        let mut surface_scaled = simulation_dsp();
+        surface_scaled.set_manual_fader_gain(0.25).unwrap();
+        surface_unity.trigger_needle_drop();
+        surface_scaled.trigger_needle_drop();
+        surface_unity.render_surface(4_096, 2);
+        surface_scaled.render_surface(4_096, 2);
+        assert!(surface_unity
+            .output
+            .iter()
+            .any(|sample| sample.abs() > 1e-6));
+        for (unity, scaled) in surface_unity.output.iter().zip(&surface_scaled.output) {
+            assert_eq!(*scaled, *unity * 0.25);
+        }
+    }
+
+    #[test]
+    fn missing_surface_asset_uses_bounded_synthetic_bed_and_burst_without_panicking() {
+        let mut bed = simulation_dsp();
+        assert!(bed.surface_asset.is_empty());
+        bed.start_surface_region(SURFACE_REGION_LEAD_IN, 0.20);
+        bed.render_surface(4_096, 2);
+        assert!(bed.output.iter().any(|sample| sample.abs() > 1e-7));
+        assert!(bed
+            .output
+            .iter()
+            .all(|sample| sample.is_finite() && (-1.0..=1.0).contains(sample)));
+
+        let mut drop = simulation_dsp();
+        assert!(drop.surface_asset.is_empty());
+        drop.trigger_needle_drop();
+        drop.render_surface(8_192, 2);
+        assert!(drop
+            .output
+            .iter()
+            .all(|sample| sample.is_finite() && (-1.0..=1.0).contains(sample)));
+        let after_thump = 5_280 * 2;
+        assert!(
+            drop.output[after_thump..]
+                .iter()
+                .any(|sample| sample.abs() > 1e-7),
+            "synthetic crackle burst should outlive the 100 ms thump"
+        );
+    }
+
+    #[test]
+    fn disabling_surface_effects_clears_and_suppresses_all_foley() {
+        let mut dsp = simulation_dsp();
+        dsp.start_surface_region(SURFACE_REGION_LEAD_IN, 0.20);
+        dsp.trigger_needle_drop();
+        assert!(dsp.surface_bed.is_some());
+        assert!(dsp.needle_thump.is_some());
+        assert!(dsp.needle_burst.is_some());
+
+        dsp.set_effects(true, false);
+        assert!(dsp.surface_bed.is_none());
+        assert!(dsp.needle_thump.is_none());
+        assert!(dsp.needle_burst.is_none());
+        dsp.start_surface_region(SURFACE_REGION_LEAD_IN, 0.20);
+        dsp.trigger_needle_drop();
+        assert!(dsp.surface_bed.is_none());
+        assert!(dsp.needle_thump.is_none());
+        assert!(dsp.needle_burst.is_none());
+        dsp.render_surface(4_096, 2);
+        assert!(dsp.output.iter().all(|sample| *sample == 0.0));
     }
 
     #[test]
