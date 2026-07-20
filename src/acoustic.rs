@@ -3015,6 +3015,29 @@ mod tests {
     }
 
     #[test]
+    fn scratch_gate_phase_waits_for_the_rendered_spring_to_reverse() {
+        let mut dsp = scratch_signal_dsp(ScratchPreset::Transform, 8.0);
+        dsp.render(512, 1);
+        assert_eq!(dsp.scratch_direction(), 1);
+
+        dsp.set_motion(dsp.position, -8.0, 0.0);
+        dsp.render(320, 1);
+        assert_eq!(dsp.scratch_direction(), -1);
+        assert!(dsp.last_effective_rate > 0.0);
+        assert_eq!(dsp.scratch_gate_phase(), 0.0);
+
+        let mut reversal_frames = 0;
+        while dsp.last_effective_rate > 0.0 && reversal_frames < 4_800 {
+            assert_eq!(dsp.scratch_gate_phase(), 0.0);
+            dsp.render(1, 1);
+            reversal_frames += 1;
+        }
+        assert!(dsp.last_effective_rate < 0.0);
+        assert!(dsp.scratch_gate_phase() > 0.0);
+        assert!(reversal_frames < 4_800);
+    }
+
+    #[test]
     fn releasing_the_record_reopens_gate_for_motor_handoff() {
         let mut dsp = scratch_signal_dsp(ScratchPreset::Stab, -1.0);
         dsp.render(1024, 1);

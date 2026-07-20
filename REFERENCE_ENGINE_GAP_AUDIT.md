@@ -91,11 +91,12 @@ through the first part of a scratch. Native tests cover this response.
 The automatic gate does not copy the reference time oscillator. Travel controls
 its phase. Faster hand motion creates faster cuts over the same groove distance.
 A held record freezes the pattern. A confirmed reversal starts a new stroke.
+Residual motion in the old direction cannot advance the new stroke phase.
 
 Drum intent uses an `8 ms` audio-rate one-pole model before differentiation.
 This removes sample-rate-dependent impulses from small browser target steps.
 Slow motion below `0.14×` cannot trigger a Drum onset or reversal attack.
-New recordings identify this behavior as gate algorithm version `2`.
+New recordings identify this behavior as gate algorithm version `3`.
 
 The sharp manual crossfader uses width `0.08`. The reference mixer uses a wider
 curve. Public curve adjustment stays deferred until DJ tests show a need.
@@ -135,12 +136,12 @@ measured audio-thread reason to make either change.
 
 ## Automated evidence
 
-- `cargo test --workspace`: 81 tests.
+- `cargo test --workspace`: 86 tests.
 - `node --test test/*.test.mjs`: 63 tests.
-- `npm run bench:worklet`: normal p95 `1.47%` of a quantum.
-- The same benchmark measured `7.95%` for alternating `±8×` Crab/8.
+- Two current worklet runs measured normal p95 at `1.44–1.45%` of a quantum.
+- They measured `7.80–7.86%` for alternating `±8×` Crab/8.
 - Direct copy into prepared Rust window storage reduced fresh six-second window
-  application to p95 `2.60%` and maximum `3.66%`.
+  application to p95 `2.55–3.52%` across the same runs.
 - Regression gates now require window-application p95 below `25%` and maximum
   below `50%` of a quantum.
 - `npm run test:browser`: real Chrome 150 and real release WASM passed.

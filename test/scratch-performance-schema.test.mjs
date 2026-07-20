@@ -66,8 +66,17 @@ test("schema v2 preserves equal-frame ordering and normalizes controls", () => {
   assert.equal(normalized.initialState.clicks, 8);
   assert.equal(normalized.initialState.highFrequencyAccelerationLimit, 1);
   assert.equal(normalized.initialState.stylusTracingLimit, 0);
-  assert.equal(SCRATCH_GATE_ALGORITHM_VERSION, 2);
-  assert.equal(normalized.engine.gateAlgorithmVersion, 2);
+  assert.equal(SCRATCH_GATE_ALGORITHM_VERSION, 3);
+  assert.equal(normalized.engine.gateAlgorithmVersion, 3);
+
+  const historical = normalizeScratchPerformance({
+    schemaVersion: 2,
+    sourceSampleRate: 48_000,
+    outputSampleRate: 48_000,
+    engine: { gateAlgorithmVersion: 2 },
+    events: [],
+  });
+  assert.equal(historical.engine.gateAlgorithmVersion, 2);
 });
 
 test("preset and click normalization is bounded", () => {

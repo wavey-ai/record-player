@@ -8,13 +8,12 @@ is made.
 
 Current automated evidence:
 
-- `cargo test --workspace`: 81 tests (76 `record-player`, 5 `player-wasm`).
+- `cargo test --workspace`: 86 tests (81 `record-player`, 5 `player-wasm`).
 - `node --test test/*.test.mjs`: 63 tests.
 - `npm run build`: both browser WASM packages build in release mode.
-- `npm run bench:worklet`: real release WASM in the deterministic worklet harness;
-  p95 `0.0391 ms` (`1.47%`) normal and `0.2120 ms` (`7.95%`) alternating
-  `±8×` crab/8. A fresh six-second stereo PCM window measured p95 `0.0693 ms`
-  (`2.60%`) and maximum `0.0975 ms` (`3.66%`) against a `2.667 ms` quantum.
+- `npm run bench:worklet`: two release-WASM runs measured p95 at `1.44–1.45%`
+  normal and `7.80–7.86%` for alternating `±8×` crab/8. Fresh six-second
+  stereo PCM window p95 was `2.55–3.52%` against a `2.667 ms` quantum.
 - `npm run test:browser`: Chrome 150 loaded real release WASM at 44.1 kHz.
   It exercised all eight gates in both directions and captured rendered audio.
   It recorded, replayed and restored a take with more than 400 events.
@@ -95,9 +94,10 @@ latency.
    `deck gain = channel gain × manual crossfader curve × technique gate`.
 
    Selecting a preset must not move or overwrite the user's manual fader.
-5. Preset phase advances from rendered/commanded groove travel on the audio clock,
-   freezes while held still, and resets only after a hysteretic reversal. It must
-   not depend on `requestAnimationFrame`, pointer frequency or main-thread load.
+5. Preset phase advances from rendered groove travel in the confirmed stroke
+   direction. It freezes while held still and resets after a hysteretic reversal.
+   Residual outgoing motion must not advance the new stroke. Phase must not depend
+   on `requestAnimationFrame`, pointer frequency or main-thread load.
 6. Worklet memory is bounded by double-buffered PCM windows. Decoding and Int16 to
    Float32 conversion stay off the audio thread. A non-shared fallback may copy a
    bounded window, but may not restore full-record worklet allocations.
@@ -214,6 +214,8 @@ Acceptance evidence:
 - Click values 1/4/8 create the expected pulses/notches over a learned stroke.
 - Doubling travel velocity doubles temporal chop frequency while identical travel
   produces the same pattern; holding still freezes phase.
+- A confirmed intent reversal resets phase before the rendered spring crosses
+  zero. The new phase waits for rendered motion in the confirmed direction.
 - Gate timing is invariant at 44.1/48/96 kHz and across 128-frame boundaries.
 - Closed/open RMS and maximum adjacent-sample discontinuity are bounded on sine and
   transient fixtures.

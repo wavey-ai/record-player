@@ -133,7 +133,8 @@ enum MotionEvent {
 /// `intent_rate` should be the filtered/target hand rate and
 /// `rendered_rate` should be the rate actually used to advance audible PCM.
 /// Direction changes use intent for responsiveness and rendered motion as a
-/// fallback, while pattern phase always follows audible travel.
+/// fallback, while pattern phase follows audible travel in the confirmed
+/// stroke direction.
 #[derive(Clone, Debug)]
 pub struct ScratchGate {
     preset: ScratchPreset,
@@ -282,14 +283,26 @@ impl ScratchGate {
             self.phase = 0.0;
         }
 
+        let rendered_stroke_speed = if self.moving && sign(rendered_rate) == self.direction {
+            rendered_rate.abs()
+        } else {
+            0.0
+        };
         if self.moving {
-            self.stroke_travel += rendered_rate.abs() * dt;
+            self.stroke_travel += rendered_stroke_speed * dt;
             self.update_phase();
         }
 
         if self.preset == ScratchPreset::Drum {
             let acceleration = self.filter_drum_acceleration(dt, intent_rate);
-            self.update_drum(event, dt, rendered_rate, intent_rate, acceleration);
+            self.update_drum(
+                event,
+                dt,
+                rendered_rate,
+                rendered_stroke_speed,
+                intent_rate,
+                acceleration,
+            );
         }
         self.target = self.compute_target(intent_rate, rendered_rate);
         self.advance_envelope(dt, intent_rate, rendered_rate);
@@ -407,6 +420,7 @@ impl ScratchGate {
         event: MotionEvent,
         dt: f64,
         rendered_rate: f64,
+        rendered_stroke_speed: f64,
         intent_rate: f64,
         acceleration: f64,
     ) {
@@ -423,7 +437,7 @@ impl ScratchGate {
 
         if self.drum_open {
             self.drum_elapsed += dt;
-            self.drum_travel += rendered_rate.abs() * dt;
+            self.drum_travel += rendered_stroke_speed * dt;
             if self.drum_elapsed >= DRUM_MAX_OPEN_SECONDS
                 || self.drum_travel >= self.learned_span * DRUM_OPEN_SPAN_FRACTION
             {
@@ -636,6 +650,23 @@ mod tests {
     }
 
     #[test]
+    fn reversed_stroke_waits_for_audible_motion_in_the_new_direction() {
+        let mut gate = ScratchGate::new(ScratchPreset::Transform);
+        settle_direction(&mut gate, 0.8);
+        run(&mut gate, 0.030, true, 0.8, 0.8);
+
+        run(&mut gate, 0.007, true, -0.8, 0.3);
+        assert_eq!(gate.direction(), -1);
+        assert_eq!(gate.phase(), 0.0);
+
+        run(&mut gate, 0.020, true, -0.8, 0.3);
+        assert_eq!(gate.phase(), 0.0);
+
+        run(&mut gate, 0.006, true, -0.8, -0.3);
+        assert!(gate.phase() > 0.0);
+    }
+
+    #[test]
     fn rendered_rate_is_a_direction_fallback() {
         let mut gate = ScratchGate::new(ScratchPreset::Transform);
         run(&mut gate, 0.006, true, 0.0, -0.7);
@@ -686,6 +717,45 @@ mod tests {
         let phase_before = one_click.phase();
         run(&mut one_click, 0.010, true, 2.0, 2.0);
         assert!(one_click.phase() - phase_before > 0.08);
+    }
+
+    #[test]
+    fn travel_patterns_keep_groove_landmarks_at_different_velocities() {
+        for preset in [
+            ScratchPreset::Transform,
+            ScratchPreset::Flare,
+            ScratchPreset::Crab,
+            ScratchPreset::Orbit,
+        ] {
+            let trace = |rate: f64| {
+                let mut gate = ScratchGate::new(preset);
+                gate.contact_active = true;
+                gate.direction = 1;
+                gate.moving = true;
+                run(&mut gate, 0.020 / rate, true, rate, rate);
+                (gate.phase(), gate.target())
+            };
+            let slow = trace(0.5);
+            let fast = trace(2.0);
+            assert!((slow.0 - fast.0).abs() < 1e-9, "{preset:?}");
+            assert_eq!(slow.1, fast.1, "{preset:?}");
+        }
+    }
+
+    #[test]
+    fn chirp_uses_velocity_and_direction_to_tighten_its_cut() {
+        let mut gate = ScratchGate::new(ScratchPreset::Chirp);
+        gate.contact_active = true;
+        gate.moving = true;
+        gate.phase = 0.24;
+
+        gate.direction = 1;
+        assert_eq!(gate.compute_target(0.04, 0.04), 1.0);
+        assert_eq!(gate.compute_target(2.0, 2.0), 0.0);
+
+        gate.direction = -1;
+        assert_eq!(gate.compute_target(-0.04, -0.04), 0.0);
+        assert_eq!(gate.compute_target(-2.0, -2.0), 1.0);
     }
 
     #[test]
@@ -741,6 +811,24 @@ mod tests {
         run(&mut gate, 0.003, true, 1.5, 0.5);
         gate.process(1.0 / SAMPLE_RATE, true, 0.5, 0.5);
         assert_eq!(gate.target(), 1.0);
+    }
+
+    #[test]
+    fn drum_reversal_does_not_spend_its_hit_on_outgoing_motion() {
+        let mut gate = ScratchGate::new(ScratchPreset::Drum);
+        settle_direction(&mut gate, 0.5);
+        run(&mut gate, 0.070, true, 0.5, 0.5);
+        assert_eq!(gate.target(), 0.0);
+
+        run(&mut gate, 0.007, true, -8.0, 8.0);
+        assert_eq!(gate.direction(), -1);
+        assert_eq!(gate.target(), 1.0);
+
+        run(&mut gate, 0.010, true, -8.0, 8.0);
+        assert_eq!(gate.target(), 1.0);
+
+        run(&mut gate, 0.004, true, -8.0, -8.0);
+        assert_eq!(gate.target(), 0.0);
     }
 
     #[test]

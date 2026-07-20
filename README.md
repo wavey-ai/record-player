@@ -494,7 +494,7 @@ The essential shape is:
   sourceSampleRate: 48000,
   outputSampleRate: 48000,
   durationFrames,
-  engine: { gateAlgorithmVersion: 2 },
+  engine: { gateAlgorithmVersion: 3 },
   initialState: {
     positionFrames,
     preset: "flare",
@@ -780,9 +780,11 @@ deck gain = channel gain × manual crossfader curve × scratch-technique gate
 
 Changing a technique does not move or overwrite the manual XFADE value. The
 gate runs once per output frame inside `ScratchAcousticDsp`; it uses filtered
-hand intent for responsive direction changes and rendered groove travel for
-pattern phase. Phase therefore freezes at rest and resets on a confirmed
-reversal instead of advancing from `requestAnimationFrame` or wall-clock time.
+hand intent for responsive direction changes. Confirmed-direction rendered
+travel controls pattern phase. Residual outgoing motion cannot spend the new
+stroke pattern before the audible groove reverses. Phase freezes at rest and
+resets on a confirmed reversal. It does not use `requestAnimationFrame` or wall
+clock time.
 Its short speed-adaptive envelope removes discontinuities at gate edges. The
 gate is applied after programme and foley are mixed. During performance replay,
 frame-timed manual-fader events are converted through the recorded sharp curve

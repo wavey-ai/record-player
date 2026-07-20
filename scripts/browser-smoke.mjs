@@ -476,6 +476,8 @@ async function runBrowserScenario() {
   unsubscribe();
   const recordedTake = await player.stopScratchRecording({ save: false });
   assert(recordedTake?.events?.length > 10, "The browser scratch take did not record engine events");
+  assert(recordedTake.schemaVersion === 2, "The browser scratch take did not use schema version 2");
+  assert(recordedTake.engine?.gateAlgorithmVersion === 3, "The browser scratch take did not identify gate algorithm version 3");
   let replayObserved = false;
   const unsubscribeReplay = player.subscribe(snapshot => {
     replayObserved ||= Boolean(snapshot.scratchReplayActive);

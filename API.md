@@ -145,8 +145,9 @@ player starts on `baby`/1 click.
 | `drum` | 1 | Short velocity-qualified onset, reversal and acceleration attacks. |
 
 The gate is evaluated for every output frame in Rust. Filtered hand intent
-drives responsive direction decisions, while audible rendered travel drives
-phase; phase freezes at rest and resets only on a confirmed reversal.
+drives responsive direction decisions. Rendered travel advances phase only
+when it matches the confirmed stroke direction. Phase freezes at rest and
+resets only on a confirmed reversal.
 
 Two independent advanced controls expose different HF processes:
 
@@ -502,7 +503,7 @@ coordinates and rendered audio are not stored. Schema v2 separates its clocks:
   sourceSampleRate: 48000,
   outputSampleRate: 48000,
   durationFrames,
-  engine: { gateAlgorithmVersion: 2 },
+  engine: { gateAlgorithmVersion: 3 },
   initialState: {
     positionFrames,
     preset: "flare",
