@@ -145,8 +145,8 @@ measured audio-thread reason to make either change.
 
 ## Automated evidence
 
-- `cargo test --workspace`: 92 tests.
-- `node --test test/*.test.mjs`: 75 tests.
+- `cargo test --workspace`: 107 tests.
+- `node --test`: 80 tests.
 - The canvas regression anchors the visible platter to audio-owned phase and
   covers half-speed forward motion, full-speed reverse motion and zero-rate
   hold. It rejects nominal-RPM animation.
@@ -167,6 +167,16 @@ measured audio-thread reason to make either change.
   application to p95 `2.90–3.08%` across the same runs.
 - Regression gates now require window-application p95 below `25%` and maximum
   below `50%` of a quantum.
+- A release-WASM fixture configures a five-minute stereo source. Two shared
+  six-second banks and the active Rust window retain 6.59 MiB of PCM. A full
+  stereo Float32 record would use 109.86 MiB. The first Rust window grows WASM
+  memory by 2.25 MiB. Distant replacements reuse that allocation. The worklet
+  rejects over-budget windows before Rust allocation. The generated API has no
+  legacy full-record set or append methods.
+- The same fixture sustains rendered rates above `4×` in both directions. Rust
+  projects each request 48,000 source frames in the travel direction. The
+  worklet activates each requested shared bank without buffering or resetting
+  the readhead.
 - Release WASM replays the same mixed preset/click/fader take twice with 2,176
   live playback frames between runs. It requires identical SHA-256 output and
   gate traces. It also verifies controls at frame offsets `83`, `91`, `155` and

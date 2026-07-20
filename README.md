@@ -277,6 +277,10 @@ available to the renderer. The worklet applies only completed generations, and
 Rust owns a copy of only the active source window rather than a full-record
 floating-point allocation.
 
+The worklet rejects a window that is larger than the configured bank before it
+can reach the Rust allocator. The Rust WASM interface does not export the old
+full-record set and append paths.
+
 Source chunks are normally one second. The Rust engine requests a replacement
 window before the stylus reaches a bank edge. It projects the request farther in
 the current direction of travel. A six-millisecond fade-out and fade-in mask a

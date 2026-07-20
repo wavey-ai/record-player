@@ -116,6 +116,10 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
     this.port.postMessage(payload);
   }
 
+  get wasmMemoryByteLength() {
+    return wasm?.memory?.buffer?.byteLength || 0;
+  }
+
   handleMessage(message) {
     if (message.type === "set-logging") { setPlayerLoggingEnabled(message.enabled); log.action("logging-changed", { enabled: message.enabled }); return; }
     // Replay is a sample-accurate transaction backed by a Rust DSP snapshot.
@@ -851,6 +855,7 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
     try {
       if (generation < this.activeWindowGeneration) throw new Error("stale PCM window generation");
       if (length <= 0 || start + length > totalFrames) throw new Error("invalid PCM window range");
+      if (length > this.windowFrames) throw new Error("PCM window exceeds configured frame budget");
 
       let channels;
       const bankIndex = Math.floor(Number(message.bankIndex));

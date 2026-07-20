@@ -1,4 +1,4 @@
-use js_sys::{Array, Float32Array, Int16Array};
+use js_sys::{Array, Float32Array};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
@@ -522,52 +522,6 @@ impl ScratchAcousticDsp {
         }
     }
 
-    #[wasm_bindgen(js_name = setWindow)]
-    pub fn set_window(
-        &mut self,
-        channels: Array,
-        source_sample_rate: f64,
-        window_start: u32,
-        total_frames: u32,
-        reset_position: Option<f64>,
-    ) -> Result<(), JsValue> {
-        if !source_sample_rate.is_finite() || source_sample_rate <= 0.0 {
-            return Err(JsValue::from_str("sourceSampleRate must be positive"));
-        }
-        let channel_count = channels.length() as usize;
-        let mut channel_length = None;
-        for value in channels.iter() {
-            if !value.is_instance_of::<Float32Array>() {
-                return Err(JsValue::from_str(
-                    "source channels must be Float32Array values",
-                ));
-            }
-            let typed = Float32Array::new(&value);
-            let length = typed.length() as usize;
-            if channel_length.is_some_and(|expected| expected != length) {
-                return Err(JsValue::from_str("source channels must have equal lengths"));
-            }
-            channel_length = Some(length);
-        }
-        let Some(length) = channel_length.filter(|length| *length > 0) else {
-            return Err(JsValue::from_str(
-                "at least one non-empty source channel is required",
-            ));
-        };
-
-        self.prepare_window(channel_count as u32, length as u32)?;
-        for (channel_index, value) in channels.iter().enumerate() {
-            let typed = Float32Array::new(&value);
-            typed.copy_to(&mut self.channels[channel_index]);
-        }
-        self.commit_window(
-            source_sample_rate,
-            window_start,
-            total_frames,
-            reset_position,
-        )
-    }
-
     /// Prepares stable Rust-owned channel storage for a direct AudioWorklet
     /// copy. This removes the wasm-bindgen Array traversal from the realtime
     /// window replacement path while retaining Rust ownership of source PCM.
@@ -633,81 +587,6 @@ impl ScratchAcousticDsp {
         if let Some(position) = reset_position {
             self.reset_position(position);
         }
-        Ok(())
-    }
-
-    #[wasm_bindgen(js_name = startStreamWindow)]
-    pub fn start_stream_window(
-        &mut self,
-        channel_count: u32,
-        source_sample_rate: f64,
-        total_frames: u32,
-    ) -> Result<(), JsValue> {
-        if !source_sample_rate.is_finite() || source_sample_rate <= 0.0 {
-            return Err(JsValue::from_str("sourceSampleRate must be positive"));
-        }
-        let channel_count = channel_count.max(1) as usize;
-        let total_frames = total_frames.max(1) as usize;
-        self.source_sample_rate = source_sample_rate;
-        self.window_start = 0;
-        self.window_end = 0;
-        self.total_frames = total_frames;
-        self.channels = (0..channel_count)
-            .map(|_| vec![0.0_f32; total_frames])
-            .collect();
-        self.reset_position(0.0);
-        Ok(())
-    }
-
-    #[wasm_bindgen(js_name = appendPcmI16)]
-    pub fn append_pcm_i16(
-        &mut self,
-        channel_buffers: Array,
-        start_frame: u32,
-        end_frame: u32,
-    ) -> Result<(), JsValue> {
-        let start_frame = start_frame as usize;
-        let end_frame = end_frame as usize;
-        if end_frame <= start_frame {
-            return Err(JsValue::from_str(
-                "endFrame must be greater than startFrame",
-            ));
-        }
-        if self.channels.is_empty() {
-            return Err(JsValue::from_str("stream window has not been initialised"));
-        }
-        if channel_buffers.length() as usize != self.channels.len() {
-            return Err(JsValue::from_str(
-                "PCM channel count does not match stream window",
-            ));
-        }
-        if end_frame > self.total_frames {
-            return Err(JsValue::from_str(
-                "PCM segment exceeds stream window length",
-            ));
-        }
-        let frame_count = end_frame - start_frame;
-        for (channel_index, value) in channel_buffers.iter().enumerate() {
-            if !value.is_instance_of::<Int16Array>() {
-                return Err(JsValue::from_str(
-                    "PCM channel buffers must be Int16Array values",
-                ));
-            }
-            let typed = Int16Array::new(&value);
-            if typed.length() as usize != frame_count {
-                return Err(JsValue::from_str(
-                    "PCM channel buffer length does not match frame range",
-                ));
-            }
-            let mut samples = vec![0_i16; frame_count];
-            typed.copy_to(&mut samples);
-            let channel = &mut self.channels[channel_index];
-            for (offset, sample) in samples.into_iter().enumerate() {
-                channel[start_frame + offset] = sample as f32 / 32768.0;
-            }
-        }
-        self.window_start = 0;
-        self.window_end = self.window_end.max(end_frame);
         Ok(())
     }
 

@@ -69,6 +69,14 @@ Current automated evidence:
   zero-filled PCM or return at full level. The current release run measured
   `1.47%` normal, `6.40%` reversing Crab/8 and `2.94%` fresh-window p95 against
   the audio quantum.
+- The release-WASM bounded-window fixture configures a five-minute stereo
+  source. The worklet and Rust retain 6.59 MiB of PCM instead of a 109.86 MiB
+  full Float32 record. Transport initialization and distant bank swaps do not
+  grow Rust memory beyond the first 2.25 MiB window allocation. The worklet
+  rejects a window that exceeds its configured frame budget before Rust can
+  allocate it. The generated Rust API has no legacy full-record set or append
+  methods. Rendered forward and reverse rates above `4×` each request and
+  activate a bank 48,000 source frames in the direction of travel.
 - `npm run test:browser`: Chrome 150 loaded real release WASM at 48 kHz.
   It exercised all eight gates in both directions and captured rendered audio.
   It recorded, replayed and restored an engine-version-5 take with more than

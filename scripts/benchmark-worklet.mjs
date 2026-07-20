@@ -221,6 +221,285 @@ function benchmarkFreshWindowApplication() {
   return result;
 }
 
+function verifyFiveMinuteBoundedDirectionalWindows() {
+  const totalFrames = SAMPLE_RATE * 60 * 5;
+  const rustWindowBytes = CHANNEL_COUNT * WINDOW_FRAMES * Float32Array.BYTES_PER_ELEMENT;
+  const bankValues = [0.24, -0.27];
+  const bankViews = bankValues.map(value => Array.from({ length: CHANNEL_COUNT }, () => {
+    const channel = new Float32Array(new SharedArrayBuffer(WINDOW_FRAMES * Float32Array.BYTES_PER_ELEMENT));
+    channel.fill(value);
+    return channel;
+  }));
+  const bankBuffers = bankViews.map(bank => bank.map(channel => channel.buffer));
+  const windowStartFor = position => Math.max(
+    0,
+    Math.min(totalFrames - WINDOW_FRAMES, Math.round(position - WINDOW_FRAMES / 2)),
+  );
+  const windowMessage = ({
+    generation,
+    bankIndex,
+    position,
+    start = windowStartFor(position),
+    resetPosition = false,
+    workletRequestId = 0,
+  }) => ({
+    type: "window-ready",
+    generation,
+    requestId: generation,
+    workletRequestId,
+    start,
+    totalFrames,
+    length: WINDOW_FRAMES,
+    availableEnd: totalFrames,
+    sampleRate: SAMPLE_RATE,
+    bankIndex,
+    position,
+    resetPosition,
+  });
+  const findWindowRequest = (processor, beforeQuantum, maximumQuanta = 256) => {
+    for (let quantum = 0; quantum < maximumQuanta; quantum += 1) {
+      beforeQuantum?.(quantum);
+      const output = createOutput();
+      renderQuantum(processor, output);
+      const request = processor.port.messages.find(message => message?.type === "window-request");
+      if (request) return request;
+    }
+    return null;
+  };
+  const renderedMean = output => (
+    output[0][0].reduce((sum, sample) => sum + sample, 0) / output[0][0].length
+  );
+
+  globalThis.currentFrame = 0;
+  globalThis.currentTime = 0;
+  const processor = new PlayerProcessor({
+    processorOptions: { wasmModule, loggingEnabled: false },
+  });
+  assert.equal(typeof processor.dsp.setWindow, "undefined");
+  assert.equal(typeof processor.dsp.startStreamWindow, "undefined");
+  assert.equal(typeof processor.dsp.appendPcmI16, "undefined");
+  const memoryBeforeTransport = processor.wasmMemoryByteLength;
+  processor.handleMessage({
+    type: "window-transport-init",
+    totalFrames,
+    sampleRate: SAMPLE_RATE,
+    channelCount: CHANNEL_COUNT,
+    windowFrames: WINDOW_FRAMES,
+    bankBuffers,
+  });
+  assert.equal(
+    processor.wasmMemoryByteLength,
+    memoryBeforeTransport,
+    "five-minute transport metadata allocated source-sized Rust memory",
+  );
+  assert.equal(processor.streamLength, totalFrames);
+  assert.equal(processor.windowBanks.length, 2);
+  const retainedBankSamples = processor.windowBanks.reduce(
+    (total, bank) => total + bank.reduce((bankTotal, channel) => bankTotal + channel.length, 0),
+    0,
+  );
+  assert.equal(retainedBankSamples, 2 * CHANNEL_COUNT * WINDOW_FRAMES);
+  assert.ok(
+    retainedBankSamples < totalFrames * CHANNEL_COUNT / 10,
+    "five-minute worklet banks retained source-sized PCM",
+  );
+
+  processor.port.messages.length = 0;
+  processor.handleMessage({
+    ...windowMessage({ generation: 1, bankIndex: 0, position: WINDOW_CENTER, resetPosition: true }),
+    length: WINDOW_FRAMES + 1,
+  });
+  const rejected = processor.port.messages.find(message => message?.type === "window-applied");
+  assert.equal(rejected?.applied, false, "the worklet accepted an over-budget PCM window");
+  assert.match(rejected?.error || "", /configured frame budget/);
+  assert.equal(
+    processor.wasmMemoryByteLength,
+    memoryBeforeTransport,
+    "an over-budget PCM window reached the Rust allocator",
+  );
+
+  const sourceCenter = totalFrames / 2;
+  processor.port.messages.length = 0;
+  processor.handleMessage(windowMessage({
+    generation: 2,
+    bankIndex: 0,
+    position: sourceCenter,
+    resetPosition: true,
+  }));
+  const initialApplied = processor.port.messages.find(message => message?.type === "window-applied");
+  assert.equal(initialApplied?.applied, true, "the bounded initial PCM window did not apply");
+  const memoryAfterFirstWindow = processor.wasmMemoryByteLength;
+  assert.ok(
+    memoryAfterFirstWindow - memoryBeforeTransport <= rustWindowBytes + 8 * 65_536,
+    "the first Rust PCM window exceeded its bounded allocation allowance",
+  );
+  const channelPointers = [
+    processor.dsp.windowChannelPtr(0),
+    processor.dsp.windowChannelPtr(1),
+  ];
+
+  for (const [offset, position] of [
+    WINDOW_FRAMES / 2,
+    totalFrames / 4,
+    totalFrames * 3 / 4,
+    totalFrames - WINDOW_FRAMES / 2,
+  ].entries()) {
+    processor.handleMessage(windowMessage({
+      generation: 3 + offset,
+      bankIndex: offset % 2,
+      position,
+    }));
+    assert.deepEqual(
+      [processor.dsp.windowChannelPtr(0), processor.dsp.windowChannelPtr(1)],
+      channelPointers,
+      "a same-size PCM replacement changed the Rust channel allocations",
+    );
+  }
+  assert.equal(
+    processor.wasmMemoryByteLength,
+    memoryAfterFirstWindow,
+    "far five-minute window replacements grew Rust memory",
+  );
+
+  const directionalStart = windowStartFor(sourceCenter);
+  const forwardPosition = directionalStart + WINDOW_FRAMES / 2;
+  processor.handleMessage(windowMessage({
+    generation: 10,
+    bankIndex: 0,
+    position: forwardPosition,
+    start: directionalStart,
+    resetPosition: true,
+  }));
+  processor.handleMessage({ type: "stream-complete" });
+  processor.handleMessage({ type: "set-effects", acoustic: false, surface: false });
+  processor.handleMessage({ type: "needle", lifted: false });
+  processor.handleMessage({ type: "transport", running: true });
+  processor.handleMessage({
+    type: "play",
+    position: forwardPosition,
+    rate: 1,
+    handoff: true,
+    playbackEpoch: 1,
+  });
+  processor.port.messages.length = 0;
+  processor.handleMessage({
+    type: "scratch",
+    active: true,
+    position: forwardPosition,
+    rate: 8,
+    impulse: 1,
+    grip: 1,
+  });
+  const forwardRequest = findWindowRequest(processor, quantum => {
+    processor.handleMessage({
+      type: "motion",
+      position: forwardPosition,
+      rate: 8,
+      impulse: quantum === 0 ? 1 : 0,
+      grip: 1,
+    });
+  });
+  assert.ok(
+    forwardRequest,
+    `8x forward travel did not request a projected PCM bank (position ${processor.dsp.position}, `
+      + `rate ${processor.dsp.effectiveRate}, window ${processor.windowStart}..${processor.windowEnd}, `
+      + `waiting ${processor.waitingForData}, pending ${processor.windowRequestPending}, `
+      + `messages ${processor.port.messages.map(message => message?.type).join(",")})`,
+  );
+  assert.equal(processor.waitingForData, false, "forward prefetch waited for the active bank edge");
+  const forwardHeldPosition = processor.dsp.position;
+  assert.ok(
+    processor.dsp.effectiveRate > 4,
+    `forward prefetch occurred before high-speed travel (${processor.dsp.effectiveRate}x)`,
+  );
+  assert.ok(forwardRequest.position > forwardHeldPosition, "forward prefetch did not project ahead");
+  processor.port.messages.length = 0;
+  processor.handleMessage(windowMessage({
+    generation: 11,
+    bankIndex: 1,
+    position: forwardRequest.position,
+    workletRequestId: forwardRequest.workletRequestId,
+  }));
+  const forwardApplied = processor.port.messages.find(message => message?.type === "window-applied");
+  assert.equal(forwardApplied?.applied, true, "the projected forward bank did not apply");
+  assert.equal(forwardApplied?.resumed, false, "proactive forward prefetch entered buffering");
+  assert.ok(
+    processor.windowContainsPosition(forwardRequest.position),
+    "the activated forward bank did not cover the projected request",
+  );
+  assert.equal(processor.dsp.position, forwardHeldPosition, "forward bank activation reset the readhead");
+  let directionalOutput = createOutput();
+  for (let quantum = 0; quantum < 4; quantum += 1) {
+    directionalOutput = createOutput();
+    renderQuantum(processor, directionalOutput);
+  }
+  assert.ok(renderedMean(directionalOutput) < -0.05, "the forward replacement did not render its bank");
+
+  const reversePosition = processor.windowStart + WINDOW_FRAMES / 2;
+  processor.handleMessage({ type: "seek", position: reversePosition, impulse: 0, generation: 1 });
+  processor.handleMessage({
+    type: "motion",
+    position: reversePosition,
+    rate: -8,
+    impulse: 1,
+    grip: 1,
+  });
+  processor.port.messages.length = 0;
+  const reverseRequest = findWindowRequest(processor, quantum => {
+    processor.handleMessage({
+      type: "motion",
+      position: reversePosition,
+      rate: -8,
+      impulse: quantum === 0 ? 1 : 0,
+      grip: 1,
+    });
+  });
+  assert.ok(reverseRequest, "8x reverse travel did not request a projected PCM bank");
+  assert.equal(processor.waitingForData, false, "reverse prefetch waited for the active bank edge");
+  const reverseHeldPosition = processor.dsp.position;
+  assert.ok(
+    processor.dsp.effectiveRate < -4,
+    `reverse prefetch occurred before high-speed travel (${processor.dsp.effectiveRate}x)`,
+  );
+  assert.ok(reverseRequest.position < reverseHeldPosition, "reverse prefetch did not project behind");
+  processor.port.messages.length = 0;
+  processor.handleMessage(windowMessage({
+    generation: 12,
+    bankIndex: 0,
+    position: reverseRequest.position,
+    workletRequestId: reverseRequest.workletRequestId,
+  }));
+  const reverseApplied = processor.port.messages.find(message => message?.type === "window-applied");
+  assert.equal(reverseApplied?.applied, true, "the projected reverse bank did not apply");
+  assert.equal(reverseApplied?.resumed, false, "proactive reverse prefetch entered buffering");
+  assert.ok(
+    processor.windowContainsPosition(reverseRequest.position),
+    "the activated reverse bank did not cover the projected request",
+  );
+  assert.equal(processor.dsp.position, reverseHeldPosition, "reverse bank activation reset the readhead");
+  for (let quantum = 0; quantum < 4; quantum += 1) {
+    directionalOutput = createOutput();
+    renderQuantum(processor, directionalOutput);
+  }
+  assert.ok(renderedMean(directionalOutput) > 0.05, "the reverse replacement did not render its bank");
+  assert.equal(
+    processor.wasmMemoryByteLength,
+    memoryAfterFirstWindow,
+    "directional bank activation grew Rust window memory",
+  );
+
+  const evidence = {
+    totalFrames,
+    retainedWorkletPcmBytes: retainedBankSamples * Float32Array.BYTES_PER_ELEMENT + rustWindowBytes,
+    fullRecordFloat32Bytes: totalFrames * CHANNEL_COUNT * Float32Array.BYTES_PER_ELEMENT,
+    wasmGrowthBytes: memoryAfterFirstWindow - memoryBeforeTransport,
+    forwardProjectionFrames: forwardRequest.position - forwardHeldPosition,
+    reverseProjectionFrames: reverseHeldPosition - reverseRequest.position,
+  };
+  processor.dsp.free();
+  return evidence;
+}
+
 function assertFiniteOutput(output, label) {
   for (const channel of output[0]) {
     for (const sample of channel) {
@@ -1051,6 +1330,7 @@ function benchmark(label, processor, beforeQuantum, afterQuantum) {
   return result;
 }
 
+const boundedWindowEvidence = verifyFiveMinuteBoundedDirectionalWindows();
 verifyEofHandoffs();
 verifyLiveScratchReleasePolicy();
 verifyProgressiveFrontierResume();
@@ -1107,6 +1387,16 @@ console.log(
   `Release-WASM AudioWorklet benchmark: ${CHANNEL_COUNT}ch x ${FRAME_COUNT} frames at ${SAMPLE_RATE} Hz; `
   + `${WARMUP_ITERATIONS} warmup + ${MEASURED_ITERATIONS} measured; `
   + `${QUANTUM_BUDGET_MS.toFixed(4)} ms budget`,
+);
+console.log(
+  `Bounded 5m PCM windows      | worklet+Rust ${(
+    boundedWindowEvidence.retainedWorkletPcmBytes / (1024 * 1024)
+  ).toFixed(2)} MiB vs ${(
+    boundedWindowEvidence.fullRecordFloat32Bytes / (1024 * 1024)
+  ).toFixed(2)} MiB full Float32`
+  + ` | WASM growth ${(boundedWindowEvidence.wasmGrowthBytes / (1024 * 1024)).toFixed(2)} MiB`
+  + ` | projections +${boundedWindowEvidence.forwardProjectionFrames.toFixed(0)}`
+  + ` / -${boundedWindowEvidence.reverseProjectionFrames.toFixed(0)} frames`,
 );
 console.log(formatResult("Normal playback", normal));
 console.log(formatResult("Reversing +/-8x crab/8", scratch));
