@@ -39,6 +39,19 @@ function requiredBoolean(value, name) {
   return value;
 }
 
+function requiredDigest(value, name) {
+  const normalized = requiredString(value, name).toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(normalized)) throw new TypeError(`${name} must be a SHA-256 digest`);
+  return normalized;
+}
+
+function hasPinnedPlayerSettings(snapshot) {
+  return Math.abs(Number(snapshot?.highFrequencyAccelerationLimit) - 0.35) < 1e-9
+    && Math.abs(Number(snapshot?.stylusTracingLimit) - 0.72) < 1e-9
+    && snapshot?.acousticEffects === true
+    && snapshot?.surfaceEffects === true;
+}
+
 function allowed(value, values, name) {
   const normalized = requiredString(value, name);
   if (!values.has(normalized)) throw new TypeError(`${name} has an unsupported value: ${normalized}`);
@@ -84,7 +97,7 @@ function participantById(data, participantId) {
 export class DjValidationSession {
   constructor({ data = createDjValidationTemplate({ includeExample: false }), now = () => Date.now() } = {}) {
     if (data?.schemaVersion !== DJ_VALIDATION_SCHEMA_VERSION || !Array.isArray(data?.participants) || !Array.isArray(data?.blocks)) {
-      throw new TypeError("A DJ validation schema version 2 collection is required");
+      throw new TypeError("A DJ validation schema version 3 collection is required");
     }
     this.data = clone(data);
     this.now = now;
@@ -221,6 +234,10 @@ export class DjValidationSession {
       bCondition,
       xCondition: allowed(values.xCondition, conditions, "xCondition"),
       responseCondition: allowed(values.responseCondition, conditions, "responseCondition"),
+      captureSha256: {
+        physical: requiredDigest(values.captureSha256?.physical, "captureSha256.physical"),
+        player: requiredDigest(values.captureSha256?.player, "captureSha256.player"),
+      },
       confidence: finiteNumber(values.confidence, "confidence", { minimum: 1, maximum: 5, integer: true }),
       realism: finiteNumber(values.realism, "realism", { minimum: 1, maximum: 7, integer: true }),
       transientSharpness: finiteNumber(values.transientSharpness, "transientSharpness", { minimum: 1, maximum: 7, integer: true }),
@@ -266,6 +283,9 @@ export class DjValidationSession {
     if (this.activeBlock) throw new Error("Another audio block is already active");
     participantById(this.data, participantId);
     const blockKind = allowed(kind, blockKinds, "block kind");
+    if (!hasPinnedPlayerSettings(playerSnapshot)) {
+      throw new Error("The player does not have all shipped acoustic and limiter settings");
+    }
     const before = playbackStats(playerSnapshot, "block start");
     this.activeBlock = {
       participantId,
@@ -276,6 +296,7 @@ export class DjValidationSession {
       lastPointerAppliedCommandId: Number.isFinite(playerSnapshot?.pointerAppliedCommandId)
         ? playerSnapshot.pointerAppliedCommandId
         : null,
+      candidateSettingsValid: true,
     };
     this.observePlayerState(playerSnapshot);
     return clone(this.activeBlock);
@@ -292,6 +313,9 @@ export class DjValidationSession {
     ) {
       this.activeBlock.pointerCommandLatenciesMs.push(snapshot.pointerToAudioLatencyMs);
       this.activeBlock.lastPointerAppliedCommandId = snapshot.pointerAppliedCommandId;
+    }
+    if (this.activeBlock && !hasPinnedPlayerSettings(snapshot)) {
+      this.activeBlock.candidateSettingsValid = false;
     }
     if (Number.isFinite(snapshot.outputSampleRate) && snapshot.outputSampleRate > 0) {
       this.data.environment.audioContextSampleRateHz = snapshot.outputSampleRate;
@@ -311,6 +335,9 @@ export class DjValidationSession {
       throw new Error("Audio playback duration did not increase during the block");
     }
     this.observePlayerState(playerSnapshot);
+    if (!this.activeBlock.candidateSettingsValid) {
+      throw new Error("The candidate settings changed during the audio block");
+    }
     const matchingBlocks = this.data.blocks.filter(block => (
       block.participantId === this.activeBlock.participantId && block.kind === this.activeBlock.kind
     ));

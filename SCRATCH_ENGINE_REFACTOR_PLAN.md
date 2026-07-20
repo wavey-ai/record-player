@@ -9,12 +9,12 @@ is made.
 Current automated evidence:
 
 - `cargo test --workspace`: 81 tests (76 `record-player`, 5 `player-wasm`).
-- `node --test test/*.test.mjs`: 58 tests.
+- `node --test test/*.test.mjs`: 63 tests.
 - `npm run build`: both browser WASM packages build in release mode.
 - `npm run bench:worklet`: real release WASM in the deterministic worklet harness;
-  p95 `0.0387 ms` (`1.45%`) normal and `0.2118 ms` (`7.94%`) alternating
-  `±8×` crab/8. A fresh six-second stereo PCM window measured p95 `0.0665 ms`
-  (`2.50%`) and maximum `0.1963 ms` (`7.36%`) against a `2.667 ms` quantum.
+  p95 `0.0391 ms` (`1.47%`) normal and `0.2120 ms` (`7.95%`) alternating
+  `±8×` crab/8. A fresh six-second stereo PCM window measured p95 `0.0693 ms`
+  (`2.60%`) and maximum `0.0975 ms` (`3.66%`) against a `2.667 ms` quantum.
 - `npm run test:browser`: Chrome 150 loaded real release WASM at 44.1 kHz.
   It exercised all eight gates in both directions and captured rendered audio.
   It recorded, replayed and restored a take with more than 400 events.
@@ -41,7 +41,9 @@ Current automated evidence:
   refuses release measurements from a dirty or mismatched build.
 - `/dj-abx.html` runs participant-bound blind packages without condition labels.
   The coordinator tool verifies matched WAV captures, gives every A/B/X file a
-  unique opaque identity, and keeps decoding in a private post-freeze step.
+  unique opaque identity, binds the package to the clean candidate build and
+  keeps decoding in a private post-freeze step. Audio-data hashes prevent reuse
+  across participants even when WAV metadata changes.
 - The public acoustic-loopback probe emits a bounded diagnostic sweep and uses
   AudioWorklet frame tags for input correlation. Chrome passed a three-probe
   software loopback. Target hardware must supply the physical result.

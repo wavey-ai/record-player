@@ -34,6 +34,7 @@ function formatReport(result) {
     `Participants: ${result.participants.length}`,
     `Exclusions: ${result.exclusions.length}`,
     `ABX: ${result.pooledAbx.correct}/${result.pooledAbx.trials} correct (${percent(result.pooledAbx.accuracy)})`,
+    `ABX captures: ${result.pooledAbx.uniqueCaptureHashes} unique SHA-256 digests`,
     `Exact two-sided p: ${result.pooledAbx.exactTwoSidedP?.toFixed(8) ?? "n/a"}`,
     `Exact 95% interval: ${percent(result.pooledAbx.clopperPearson95.lower)}–${percent(result.pooledAbx.clopperPearson95.upper)}`,
     `Rendered realism median: ${result.pooledAbx.renderedRealismMedian ?? "n/a"}/7`,
@@ -70,6 +71,7 @@ async function sha256File(path) {
 async function verifyArtifacts(input, inputPath) {
   if (!Array.isArray(input?.artifacts)) throw new TypeError("artifacts must be an array");
   const verifiedRoles = [];
+  let verifiedCandidateBuildInfo = null;
   for (let index = 0; index < input.artifacts.length; index += 1) {
     const artifact = input.artifacts[index];
     if (!artifact || typeof artifact.path !== "string" || typeof artifact.sha256 !== "string") {
@@ -86,9 +88,16 @@ async function verifyArtifacts(input, inputPath) {
     if (actual.toLowerCase() !== artifact.sha256.toLowerCase()) {
       throw new Error(`artifacts[${index}] SHA-256 mismatch: ${artifact.path}`);
     }
+    if (artifact.role === "candidate-build-info") {
+      try {
+        verifiedCandidateBuildInfo = JSON.parse(await readFile(artifactPath, "utf8"));
+      } catch (error) {
+        throw new Error(`candidate-build-info is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     verifiedRoles.push(artifact.role);
   }
-  return verifiedRoles;
+  return { verifiedRoles, verifiedCandidateBuildInfo };
 }
 
 const args = process.argv.slice(2);
@@ -112,8 +121,12 @@ try {
   const bytes = await readFile(resolvedInputPath);
   const sourceSha256 = createHash("sha256").update(bytes).digest("hex");
   const input = JSON.parse(bytes.toString("utf8"));
-  const verifiedArtifactRoles = await verifyArtifacts(input, resolvedInputPath);
-  const result = analyzeDjValidation(input, { sourceSha256, verifiedArtifactRoles });
+  const { verifiedRoles, verifiedCandidateBuildInfo } = await verifyArtifacts(input, resolvedInputPath);
+  const result = analyzeDjValidation(input, {
+    sourceSha256,
+    verifiedArtifactRoles: verifiedRoles,
+    verifiedCandidateBuildInfo,
+  });
   if (args.includes("--json")) console.log(`${JSON.stringify(result, null, 2)}\n`);
   else console.log(formatReport(result));
   process.exitCode = result.accepted ? 0 : 2;

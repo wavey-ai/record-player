@@ -4,7 +4,7 @@ import {
   DJ_REQUIRED_ARTIFACT_ROLES,
 } from "./dj-validation-template.js";
 
-const STORAGE_KEY = "vinyl-dj-validation-v2";
+const STORAGE_KEY = "vinyl-dj-validation-v3";
 const element = id => document.getElementById(id);
 const statusOutput = element("console-status");
 const playerFrame = element("validation-player");
@@ -22,8 +22,18 @@ let movementTraces = [];
 let activeScratchRecording = false;
 let renderQueued = false;
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
 function ensureReleaseCandidate() {
-  if (!currentBuildInfo?.commit || typeof currentBuildInfo.worktreeDirty !== "boolean") {
+  if (currentBuildInfo?.schemaVersion !== 1
+    || !currentBuildInfo.commit
+    || typeof currentBuildInfo.worktreeDirty !== "boolean") {
     throw new Error("Build metadata is not available. Rebuild before collecting release evidence.");
   }
   if (currentBuildInfo.worktreeDirty) {
@@ -33,11 +43,17 @@ function ensureReleaseCandidate() {
   if (candidate.commit !== currentBuildInfo.commit || candidate.worktreeDirty !== false) {
     throw new Error("The open draft does not match this clean player build.");
   }
+  if (canonicalJson(candidate.settings) !== canonicalJson(currentBuildInfo.settings)) {
+    throw new Error("The open draft settings do not match this player build.");
+  }
   if (lastPlayerSnapshot) {
     const hfMatches = Math.abs(lastPlayerSnapshot.highFrequencyAccelerationLimit - 0.35) < 1e-9;
     const stylusMatches = Math.abs(lastPlayerSnapshot.stylusTracingLimit - 0.72) < 1e-9;
-    if (!hfMatches || !stylusMatches) {
-      throw new Error("Restore HF acceleration to 35% and stylus tracing to 72% before the block.");
+    if (!hfMatches
+      || !stylusMatches
+      || lastPlayerSnapshot.acousticEffects !== true
+      || lastPlayerSnapshot.surfaceEffects !== true) {
+      throw new Error("Restore the shipped acoustic and limiter settings before the block.");
     }
   }
 }
@@ -331,6 +347,7 @@ element("start-block").addEventListener("click", () => {
 
 element("end-block").addEventListener("click", async () => {
   try {
+    ensureReleaseCandidate();
     const active = session.summary().activeBlock;
     const block = session.endBlock(player.getState());
     if (activeScratchRecording) {
@@ -364,6 +381,10 @@ element("trial-form").addEventListener("submit", event => {
       bCondition: form.elements.bCondition.value,
       xCondition: form.elements.xCondition.value,
       responseCondition: form.elements.responseCondition.value,
+      captureSha256: {
+        physical: form.elements.physicalCaptureSha256.value,
+        player: form.elements.playerCaptureSha256.value,
+      },
       confidence: formNumber(form, "confidence"),
       realism: formNumber(form, "realism"),
       transientSharpness: formNumber(form, "transientSharpness"),

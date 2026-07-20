@@ -302,6 +302,17 @@ function validateTrial(trial, path) {
   assertion(aCondition !== bCondition, `${path}.aCondition and bCondition must differ`);
   enumValue(trial.xCondition, CONDITIONS, `${path}.xCondition`);
   enumValue(trial.responseCondition, CONDITIONS, `${path}.responseCondition`);
+  const captureSha256 = object(trial.captureSha256, `${path}.captureSha256`);
+  assertion(
+    Object.keys(captureSha256).length === 2
+      && Object.hasOwn(captureSha256, "physical")
+      && Object.hasOwn(captureSha256, "player"),
+    `${path}.captureSha256 must contain only physical and player`,
+  );
+  for (const conditionName of DJ_CONDITIONS) {
+    const hash = string(captureSha256[conditionName], `${path}.captureSha256.${conditionName}`);
+    assertion(/^[0-9a-f]{64}$/i.test(hash), `${path}.captureSha256.${conditionName} must be a SHA-256 digest`);
+  }
   number(trial.confidence, `${path}.confidence`, { minimum: 1, maximum: 5, integer: true });
   number(trial.realism, `${path}.realism`, { minimum: 1, maximum: 7, integer: true });
   number(trial.transientSharpness, `${path}.transientSharpness`, { minimum: 1, maximum: 7, integer: true });
@@ -351,11 +362,32 @@ function closeTo(value, expected) {
   return Number.isFinite(value) && Math.abs(value - expected) <= 1e-12;
 }
 
-export function analyzeDjValidation(input, { sourceSha256 = null, verifiedArtifactRoles = [] } = {}) {
+function sameJsonValue(left, right) {
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left)
+      && Array.isArray(right)
+      && left.length === right.length
+      && left.every((value, index) => sameJsonValue(value, right[index]));
+  }
+  if (left && right && typeof left === "object" && typeof right === "object") {
+    const leftKeys = Object.keys(left).sort();
+    const rightKeys = Object.keys(right).sort();
+    return leftKeys.length === rightKeys.length
+      && leftKeys.every((key, index) => key === rightKeys[index]
+        && sameJsonValue(left[key], right[key]));
+  }
+  return left === right;
+}
+
+export function analyzeDjValidation(input, {
+  sourceSha256 = null,
+  verifiedArtifactRoles = [],
+  verifiedCandidateBuildInfo = null,
+} = {}) {
   const data = object(input, "results");
-  if (data.schemaVersion === 1) {
+  if (data.schemaVersion === 1 || data.schemaVersion === 2) {
     throw new RangeError(
-      "DJ validation schema version 1 lacks physical-loopback evidence; generate a version 2 template",
+      `DJ validation schema version ${data.schemaVersion} lacks build-bound capture evidence; generate a version 3 template`,
     );
   }
   assertion(data.schemaVersion === DJ_VALIDATION_SCHEMA_VERSION, `Unsupported DJ validation schema version: ${data.schemaVersion}`);
@@ -365,14 +397,14 @@ export function analyzeDjValidation(input, { sourceSha256 = null, verifiedArtifa
 
   const candidate = object(data.candidate, "candidate");
   const commit = string(candidate.commit, "candidate.commit");
-  assertion(/^[0-9a-f]{7,40}$/i.test(commit), "candidate.commit must be a Git commit hash");
+  assertion(/^[0-9a-f]{40}$/i.test(commit), "candidate.commit must be a full Git commit hash");
   const worktreeDirty = boolean(candidate.worktreeDirty, "candidate.worktreeDirty");
   const settings = object(candidate.settings, "candidate.settings");
   for (const [field] of Object.entries(REQUIRED_SETTINGS)) {
     number(settings[field], `candidate.settings.${field}`, { minimum: 0, maximum: 1 });
   }
-  boolean(settings.acousticEffects, "candidate.settings.acousticEffects");
-  boolean(settings.surfaceEffects, "candidate.settings.surfaceEffects");
+  const acousticEffects = boolean(settings.acousticEffects, "candidate.settings.acousticEffects");
+  const surfaceEffects = boolean(settings.surfaceEffects, "candidate.settings.surfaceEffects");
   const nativeRpmValues = array(settings.nativeRpmValues, "candidate.settings.nativeRpmValues");
   nativeRpmValues.forEach((value, index) => number(value, `candidate.settings.nativeRpmValues[${index}]`, { minimum: 1 }));
   const endPolicies = array(settings.endPolicies, "candidate.settings.endPolicies");
@@ -428,6 +460,7 @@ export function analyzeDjValidation(input, { sourceSha256 = null, verifiedArtifa
   const allRoutines = [];
   const cueParticipants = new Map();
   const excerptIds = new Set();
+  const captureHashes = new Set();
   let trialPlanPass = true;
 
   participants.forEach((participant, participantIndex) => {
@@ -451,6 +484,11 @@ export function analyzeDjValidation(input, { sourceSha256 = null, verifiedArtifa
     for (const trial of trials) {
       assertion(!excerptIds.has(trial.excerptId), `${path} reuses excerptId: ${trial.excerptId}`);
       excerptIds.add(trial.excerptId);
+      for (const conditionName of DJ_CONDITIONS) {
+        const hash = trial.captureSha256[conditionName].toLowerCase();
+        assertion(!captureHashes.has(hash), `${path} reuses capture SHA-256: ${hash}`);
+        captureHashes.add(hash);
+      }
       familyCounts[trial.gestureFamily] += 1;
       conditionCounts[trial.xCondition] += 1;
       if (trial.xCondition === trial.responseCondition) correct += 1;
@@ -547,9 +585,16 @@ export function analyzeDjValidation(input, { sourceSha256 = null, verifiedArtifa
 
   const artifactRoles = new Set(artifacts.map(artifact => artifact.role));
   const verifiedRoles = new Set(verifiedArtifactRoles);
-  const artifactHashesPass = REQUIRED_ARTIFACT_ROLES.every(role => artifactRoles.has(role) && verifiedRoles.has(role));
+  const candidateBuildInfoMatches = verifiedCandidateBuildInfo?.schemaVersion === 1
+    && verifiedCandidateBuildInfo.commit === commit
+    && verifiedCandidateBuildInfo.worktreeDirty === false
+    && sameJsonValue(verifiedCandidateBuildInfo.settings, settings);
+  const artifactHashesPass = REQUIRED_ARTIFACT_ROLES.every(role => artifactRoles.has(role) && verifiedRoles.has(role))
+    && candidateBuildInfoMatches;
   const settingsPinned = !worktreeDirty && Object.entries(REQUIRED_SETTINGS)
     .every(([field, expected]) => closeTo(settings[field], expected))
+    && acousticEffects
+    && surfaceEffects
     && nativeRpmValues.some(value => closeTo(value, 100 / 3))
     && nativeRpmValues.some(value => closeTo(value, 45))
     && endPolicies.includes("runout")
@@ -575,8 +620,12 @@ export function analyzeDjValidation(input, { sourceSha256 = null, verifiedArtifa
     && cueCoding.differencesResolvedBeforeUnblinding;
 
   const criteria = Object.freeze({
-    pinnedCandidate: criterion(settingsPinned, { commit, worktreeDirty, settings }, "Use a clean commit with the shipped 0.35/0.72/0.08 settings, both RPM values, and both end policies."),
-    artifactHashes: criterion(artifactHashesPass, { declared: [...artifactRoles], verified: [...verifiedRoles] }, "Verify each required source, capture, trace, manifest, and cue-codebook SHA-256 digest."),
+    pinnedCandidate: criterion(settingsPinned, { commit, worktreeDirty, settings }, "Use a clean commit with all shipped acoustic, surface, limiter, fader, RPM, and end settings."),
+    artifactHashes: criterion(artifactHashesPass, {
+      declared: [...artifactRoles],
+      verified: [...verifiedRoles],
+      candidateBuildInfoMatches,
+    }, "Verify each required artifact and match the candidate build metadata."),
     preflight: criterion(preflightPass, preflight, "Pass all mechanical and signal checks with no rejection event."),
     studyControls: criterion(studyControlsPass, { blinding, cueCoding, allTrained, fixedPathDelayMs }, "Use the registered double-blind, training, cue-coding, and room controls."),
     controlLatency: criterion(
@@ -626,6 +675,7 @@ export function analyzeDjValidation(input, { sourceSha256 = null, verifiedArtifa
       clopperPearson95: Object.freeze(interval),
       renderedRealismMedian,
       renderedRealismRatings: renderedRealismValues.length,
+      uniqueCaptureHashes: captureHashes.size,
     }),
     cues: Object.freeze(cueSummary),
     live: Object.freeze({

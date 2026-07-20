@@ -419,6 +419,8 @@ const unsubscribe = player.subscribe(state => {
     effectiveRate: state.effectiveRate,
     highFrequencyAccelerationLimit: state.highFrequencyAccelerationLimit,
     stylusTracingLimit: state.stylusTracingLimit,
+    acousticEffects: state.acousticEffects,
+    surfaceEffects: state.surfaceEffects,
     pointerToAudioLatencyMs: state.pointerToAudioLatencyMs,
     audioBaseLatencyMs: state.audioBaseLatencyMs,
     audioOutputLatencyMs: state.audioOutputLatencyMs,
@@ -930,13 +932,13 @@ http://localhost:5193/dj-validation.html
 The console embeds the real player. It records the hardware chain, physical
 loopback, participant blocks, browser playback statistics, pointer-command
 latency, ABX trials, live routines, preflight declarations and artifact hashes.
-It saves a local draft and exports schema-version-2 JSON. It also exports the
+It saves a local draft and exports schema-version-3 JSON. It also exports the
 captured movement trace with a browser-computed SHA-256 hash.
 
 The console refuses release measurements and audio blocks if the build came
 from a dirty worktree, if the draft commit differs from the running build, or
-if the pinned HF, stylus or fader settings have changed. This prevents an
-unidentified candidate from contributing release evidence.
+if a shipped acoustic, surface, limiter, or fader setting has changed. The
+console invalidates a block if these settings change during collection.
 
 Blind listening uses a separate coordinator/operator workflow. The coordinator
 prepares one package per participant from fresh, matched physical and player WAV
@@ -944,14 +946,23 @@ captures:
 
 ```sh
 npm run validation:prepare-abx -- dj-01-spec.json \
+  --build-info dist/player-build-info.json \
   --out dj-01-blind-package \
   --codebook private/dj-01-codebook.json
 ```
 
-The operator opens `http://localhost:5193/dj-abx.html` and selects the blind
-package directory. The runner never loads the private codebook. It verifies all
-opaque audio-file hashes, requires A, B and X playback, saves a condition-free
-local draft and exports only frozen A/B responses and ratings.
+The build metadata must come from the clean candidate that made the player
+captures. The package binds its commit, settings, and metadata hash. The operator
+opens `http://localhost:5193/dj-abx.html` and selects the blind package directory.
+The runner never loads the private codebook. It verifies all opaque audio-file
+hashes, saves a condition-free local draft, and requires A, B, and X playback
+before it accepts a response.
+
+Preserve the exact `dist/player-build-info.json` bytes in the evidence directory.
+Before the first decode, record that file and its SHA-256 digest as the
+`candidate-build-info` artifact in the collection console. The decoder matches
+the digest; the final analyzer also parses the file and verifies its clean
+commit and settings.
 
 After responses, exclusions and cue coding are frozen, create the cue-code file
 and decode the participant into the main collection:
@@ -967,6 +978,8 @@ npm run validation:decode-abx -- private/dj-01-codebook.json \
 ```
 
 Two blinded coders must complete any empty cue codes before the decode step.
+The decoder rejects a different candidate and audio reuse across participants.
+The audio check ignores WAV metadata changes.
 The detailed package schema and coordinator procedure are in
 [`DJ_VALIDATION_PROTOCOL.md`](./DJ_VALIDATION_PROTOCOL.md).
 

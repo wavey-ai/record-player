@@ -437,6 +437,8 @@ const state = {
   effectiveRate: 0,
   highFrequencyAccelerationLimit: DEFAULT_HF_ACCELERATION_LIMIT,
   stylusTracingLimit: DEFAULT_STYLUS_TRACING_LIMIT,
+  acousticEffects: true,
+  surfaceEffects: true,
   pointerToAudioLatencyMs: null,
   pointerCommandId: 0,
   pointerAppliedCommandId: null,
@@ -2567,6 +2569,12 @@ function handleWorkletMessage(event) {
       if (Number.isFinite(message.stylusTracingLimit)) {
         state.stylusTracingLimit = message.stylusTracingLimit;
       }
+      if (typeof message.acousticEffects === "boolean") {
+        state.acousticEffects = message.acousticEffects;
+      }
+      if (typeof message.surfaceEffects === "boolean") {
+        state.surfaceEffects = message.surfaceEffects;
+      }
     }
     if (Number.isFinite(message.inputLatencyMs)) {
       state.pointerToAudioLatencyMs = message.inputLatencyMs;
@@ -3445,6 +3453,8 @@ function publicState() {
     effectiveRate: state.effectiveRate,
     highFrequencyAccelerationLimit: state.highFrequencyAccelerationLimit,
     stylusTracingLimit: state.stylusTracingLimit,
+    acousticEffects: state.acousticEffects,
+    surfaceEffects: state.surfaceEffects,
     pointerToAudioLatencyMs: state.pointerToAudioLatencyMs,
     pointerAppliedCommandId: state.pointerAppliedCommandId,
     audioBaseLatencyMs: Number.isFinite(state.context?.baseLatency)

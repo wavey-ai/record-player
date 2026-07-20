@@ -6,6 +6,10 @@ import { createDjValidationTemplate } from "../web/dj-validation-template.js";
 
 function playerSnapshot(totalDurationMs, pointerToAudioLatencyMs = null, pointerAppliedCommandId = null) {
   return {
+    highFrequencyAccelerationLimit: 0.35,
+    stylusTracingLimit: 0.72,
+    acousticEffects: true,
+    surfaceEffects: true,
     pointerToAudioLatencyMs,
     pointerAppliedCommandId,
     outputSampleRate: 48_000,
@@ -34,10 +38,10 @@ function addParticipant(session, id = "dj-01") {
   });
 }
 
-test("creates an empty browser collection from the shared schema-two template", () => {
+test("creates an empty browser collection from the shared schema-three template", () => {
   const template = createDjValidationTemplate({ includeExample: false });
   const session = new DjValidationSession({ data: template });
-  assert.equal(session.snapshot().schemaVersion, 2);
+  assert.equal(session.snapshot().schemaVersion, 3);
   assert.deepEqual(session.snapshot().participants, []);
   assert.deepEqual(session.snapshot().blocks, []);
   assert.equal(session.summary().participants, 0);
@@ -63,6 +67,10 @@ test("records one complete ABX trial and protects fresh excerpt ids", () => {
     bCondition: "player",
     xCondition: "player",
     responseCondition: "player",
+    captureSha256: {
+      physical: "a".repeat(64),
+      player: "b".repeat(64),
+    },
     confidence: 4,
     realism: 6,
     transientSharpness: 6,
@@ -138,6 +146,19 @@ test("guards audio block ownership, duration and export", () => {
   assert.throws(() => session.endBlock(playerSnapshot(1_000)), /did not increase/);
   assert.ok(session.cancelBlock());
   assert.doesNotThrow(() => session.exportResults());
+});
+
+test("rejects a block if shipped effects change during collection", () => {
+  const session = new DjValidationSession();
+  addParticipant(session);
+  session.startBlock("dj-01", "live", playerSnapshot(1_000));
+  session.observePlayerState({ ...playerSnapshot(1_500), surfaceEffects: false });
+  assert.throws(() => session.endBlock(playerSnapshot(2_000)), /settings changed/);
+  session.cancelBlock();
+  assert.throws(
+    () => session.startBlock("dj-01", "live", { ...playerSnapshot(2_000), acousticEffects: false }),
+    /shipped acoustic/,
+  );
 });
 
 test("discards pointer-command latency samples from a canceled block", () => {

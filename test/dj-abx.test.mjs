@@ -18,10 +18,28 @@ import {
 import { createDjValidationTemplate } from "../web/dj-validation-template.js";
 
 const scriptsDirectory = fileURLToPath(new URL("../scripts/", import.meta.url));
+const candidateSettings = Object.freeze({
+  highFrequencyAccelerationLimit: 0.35,
+  stylusTracingLimit: 0.72,
+  faderCurve: 0.08,
+  acousticEffects: true,
+  surfaceEffects: true,
+  nativeRpmValues: [100 / 3, 45],
+  endPolicies: ["runout", "clean"],
+});
+
+function candidate() {
+  return {
+    commit: "d".repeat(40),
+    worktreeDirty: false,
+    buildInfoSha256: "a".repeat(64),
+    settings: structuredClone(candidateSettings),
+  };
+}
 
 function preparationSpec(count = 2) {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     studyId: "scratch-study-001",
     participantId: "dj-01",
     trials: Array.from({ length: count }, (_, index) => ({
@@ -37,6 +55,7 @@ function preparationSpec(count = 2) {
 function blindPlan(spec = preparationSpec()) {
   let pathIndex = 0;
   const plan = createDjAbxBlindPlan(spec, {
+    candidate: candidate(),
     randomInteger: () => 0,
     opaqueAudioPath: () => `audio/${(++pathIndex).toString(16).padStart(32, "0")}.wav`,
     generatedAt: "2026-07-20T12:00:00.000Z",
@@ -47,11 +66,13 @@ function blindPlan(spec = preparationSpec()) {
       descriptor.sha256 = (++hashIndex).toString(16).padStart(64, "0");
     }
   }
+  let sourceHashIndex = 100;
   for (const trial of plan.codebook.trials) {
     for (const condition of ["physical", "player"]) {
       trial.sources[condition] = {
         path: trial.sources[condition].path,
-        sha256: condition === "physical" ? "b".repeat(64) : "c".repeat(64),
+        fileSha256: (++sourceHashIndex).toString(16).padStart(64, "0"),
+        audioSha256: (++sourceHashIndex).toString(16).padStart(64, "0"),
         wav: {
           audioFormat: 1,
           channels: 2,
@@ -133,6 +154,17 @@ function wavBytes(sample, frames = 32) {
   return bytes;
 }
 
+function wavBytesWithJunk(sample, tag) {
+  const source = wavBytes(sample);
+  const bytes = Buffer.alloc(source.length + 12);
+  source.copy(bytes);
+  bytes.writeUInt32LE(bytes.length - 8, 4);
+  bytes.write("JUNK", source.length, "ascii");
+  bytes.writeUInt32LE(4, source.length + 4);
+  bytes.writeUInt32LE(tag, source.length + 8);
+  return bytes;
+}
+
 test("creates an opaque blind plan with distinct A, B and X files", () => {
   const plan = blindPlan();
   const serialized = JSON.stringify(plan.manifest);
@@ -142,6 +174,23 @@ test("creates an opaque blind plan with distinct A, B and X files", () => {
   assert.equal(new Set(plan.manifest.trials.flatMap(trial => Object.values(trial.audio).map(audio => audio.sha256))).size, 6);
   assert.equal(plan.copies.length, 6);
   assert.doesNotThrow(() => validateDjAbxBlindManifest(plan.manifest));
+});
+
+test("rejects a dirty or differently configured candidate", () => {
+  const dirty = candidate();
+  dirty.worktreeDirty = true;
+  assert.throws(() => createDjAbxBlindPlan(preparationSpec(1), {
+    candidate: dirty,
+    randomInteger: () => 0,
+    opaqueAudioPath: () => "audio/11111111111111111111111111111111.wav",
+  }), /worktreeDirty/);
+  const changed = candidate();
+  changed.settings.surfaceEffects = false;
+  assert.throws(() => createDjAbxBlindPlan(preparationSpec(1), {
+    candidate: changed,
+    randomInteger: () => 0,
+    opaqueAudioPath: () => "audio/11111111111111111111111111111111.wav",
+  }), /shipped release settings/);
 });
 
 test("balances A and X conditions inside an even gesture-family block", () => {
@@ -276,17 +325,27 @@ test("CLI creates a non-overwriting matched-WAV package and merges frozen respon
   const specPath = join(directory, "spec.json");
   const packagePath = join(directory, "operator-package");
   const codebookPath = join(directory, "private", "codebook.json");
+  const buildInfoPath = join(directory, "player-build-info.json");
   const responsePath = join(directory, "response.json");
   const resultsPath = join(directory, "results.json");
   const outputPath = join(directory, "merged.json");
   try {
     const spec = preparationSpec(1);
+    const buildInfo = {
+      schemaVersion: 1,
+      commit: candidate().commit,
+      worktreeDirty: false,
+      settings: structuredClone(candidateSettings),
+    };
+    const buildInfoBytes = Buffer.from(`${JSON.stringify(buildInfo, null, 2)}\n`);
+    await writeFile(buildInfoPath, buildInfoBytes);
     await writeFile(join(directory, spec.trials[0].physicalPath), wavBytes(1_000));
-    await writeFile(join(directory, spec.trials[0].playerPath), wavBytes(1_000));
+    await writeFile(join(directory, spec.trials[0].playerPath), wavBytesWithJunk(1_000, 7));
     await writeFile(specPath, `${JSON.stringify(spec)}\n`);
     const undersized = spawnSync(process.execPath, [
       join(scriptsDirectory, "prepare-dj-abx.mjs"),
       specPath,
+      "--build-info", buildInfoPath,
       "--out", packagePath,
       "--codebook", codebookPath,
     ], { encoding: "utf8" });
@@ -295,6 +354,7 @@ test("CLI creates a non-overwriting matched-WAV package and merges frozen respon
     const reusedCapture = spawnSync(process.execPath, [
       join(scriptsDirectory, "prepare-dj-abx.mjs"),
       specPath,
+      "--build-info", buildInfoPath,
       "--out", packagePath,
       "--codebook", codebookPath,
       "--pilot",
@@ -305,6 +365,7 @@ test("CLI creates a non-overwriting matched-WAV package and merges frozen respon
     const prepare = spawnSync(process.execPath, [
       join(scriptsDirectory, "prepare-dj-abx.mjs"),
       specPath,
+      "--build-info", buildInfoPath,
       "--out", packagePath,
       "--codebook", codebookPath,
       "--pilot",
@@ -314,6 +375,11 @@ test("CLI creates a non-overwriting matched-WAV package and merges frozen respon
     const manifest = JSON.parse(manifestBytes);
     const codebook = JSON.parse(await readFile(codebookPath, "utf8"));
     assert.doesNotMatch(JSON.stringify(manifest), /physical|player/);
+    assert.equal(manifest.candidate.commit, buildInfo.commit);
+    assert.equal(
+      manifest.candidate.buildInfoSha256,
+      createHash("sha256").update(buildInfoBytes).digest("hex"),
+    );
     assert.equal((await readdir(join(packagePath, "audio"))).length, 3);
     assert.equal(new Set(Object.values(manifest.trials[0].audio).map(audio => audio.sha256)).size, 3);
     const codebookBytes = await readFile(codebookPath);
@@ -324,6 +390,14 @@ test("CLI creates a non-overwriting matched-WAV package and merges frozen respon
     assert.equal(response.manifestSha256, createHash("sha256").update(manifestBytes).digest("hex"));
     await writeFile(responsePath, `${JSON.stringify(response)}\n`);
     const results = createDjValidationTemplate({ includeExample: false });
+    results.candidate = {
+      commit: buildInfo.commit,
+      worktreeDirty: false,
+      settings: structuredClone(candidateSettings),
+    };
+    const buildArtifact = results.artifacts.find(artifact => artifact.role === "candidate-build-info");
+    buildArtifact.path = "player-build-info.json";
+    buildArtifact.sha256 = createHash("sha256").update(buildInfoBytes).digest("hex");
     results.participants.push({
       id: "dj-01",
       currentlyActiveDj: true,
@@ -357,6 +431,7 @@ test("CLI creates a non-overwriting matched-WAV package and merges frozen respon
     const repeat = spawnSync(process.execPath, [
       join(scriptsDirectory, "prepare-dj-abx.mjs"),
       specPath,
+      "--build-info", buildInfoPath,
       "--out", packagePath,
       "--codebook", codebookPath,
       "--pilot",

@@ -1,8 +1,8 @@
 import { DJ_GESTURE_FAMILIES } from "./dj-validation-template.js";
 
-export const DJ_ABX_PACKAGE_SCHEMA_VERSION = 1;
-export const DJ_ABX_RESPONSE_SCHEMA_VERSION = 1;
-export const DJ_ABX_CODEBOOK_SCHEMA_VERSION = 1;
+export const DJ_ABX_PACKAGE_SCHEMA_VERSION = 2;
+export const DJ_ABX_RESPONSE_SCHEMA_VERSION = 2;
+export const DJ_ABX_CODEBOOK_SCHEMA_VERSION = 2;
 
 const gestureFamilies = new Set(DJ_GESTURE_FAMILIES);
 const roles = new Set(["a", "b", "x"]);
@@ -44,6 +44,12 @@ function integer(value, name, minimum, maximum) {
   return number;
 }
 
+function finiteNumber(value, name) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) throw new TypeError(`${name} must be a finite number`);
+  return number;
+}
+
 function exactKeys(value, keys, name) {
   const expected = [...keys].sort();
   const actual = Object.keys(value).sort();
@@ -78,6 +84,54 @@ function gestureFamily(value, name) {
   const normalized = string(value, name);
   if (!gestureFamilies.has(normalized)) throw new TypeError(`${name} is not registered`);
   return normalized;
+}
+
+function validateCandidateSettings(input, name) {
+  const value = object(input, name);
+  exactKeys(value, [
+    "highFrequencyAccelerationLimit", "stylusTracingLimit", "faderCurve",
+    "acousticEffects", "surfaceEffects", "nativeRpmValues", "endPolicies",
+  ], name);
+  const normalized = {
+    highFrequencyAccelerationLimit: finiteNumber(
+      value.highFrequencyAccelerationLimit,
+      `${name}.highFrequencyAccelerationLimit`,
+    ),
+    stylusTracingLimit: finiteNumber(value.stylusTracingLimit, `${name}.stylusTracingLimit`),
+    faderCurve: finiteNumber(value.faderCurve, `${name}.faderCurve`),
+    acousticEffects: value.acousticEffects,
+    surfaceEffects: value.surfaceEffects,
+    nativeRpmValues: array(value.nativeRpmValues, `${name}.nativeRpmValues`, { minimum: 2 })
+      .map((rpm, index) => finiteNumber(rpm, `${name}.nativeRpmValues[${index}]`)),
+    endPolicies: array(value.endPolicies, `${name}.endPolicies`, { minimum: 2 })
+      .map((policy, index) => string(policy, `${name}.endPolicies[${index}]`)),
+  };
+  if (Math.abs(normalized.highFrequencyAccelerationLimit - 0.35) > 1e-12
+    || Math.abs(normalized.stylusTracingLimit - 0.72) > 1e-12
+    || Math.abs(normalized.faderCurve - 0.08) > 1e-12
+    || normalized.acousticEffects !== true
+    || normalized.surfaceEffects !== true
+    || !normalized.nativeRpmValues.some(value => Math.abs(value - 100 / 3) <= 1e-12)
+    || !normalized.nativeRpmValues.some(value => Math.abs(value - 45) <= 1e-12)
+    || !normalized.endPolicies.includes("runout")
+    || !normalized.endPolicies.includes("clean")) {
+    throw new Error(`${name} does not contain the shipped release settings`);
+  }
+  return normalized;
+}
+
+export function validateDjAbxCandidate(input, name = "candidate") {
+  const value = object(input, name);
+  exactKeys(value, ["commit", "worktreeDirty", "buildInfoSha256", "settings"], name);
+  const commit = string(value.commit, `${name}.commit`).toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(commit)) throw new TypeError(`${name}.commit must be a full Git commit hash`);
+  if (value.worktreeDirty !== false) throw new Error(`${name}.worktreeDirty must be false`);
+  return {
+    commit,
+    worktreeDirty: false,
+    buildInfoSha256: digest(value.buildInfoSha256, `${name}.buildInfoSha256`),
+    settings: validateCandidateSettings(value.settings, `${name}.settings`),
+  };
 }
 
 function condition(value, name) {
@@ -155,6 +209,7 @@ function balancedConditions(count, draw) {
 }
 
 export function createDjAbxBlindPlan(input, {
+  candidate,
   randomInteger,
   opaqueAudioPath,
   generatedAt = new Date().toISOString(),
@@ -162,6 +217,7 @@ export function createDjAbxBlindPlan(input, {
   if (typeof randomInteger !== "function") throw new TypeError("randomInteger is required");
   if (typeof opaqueAudioPath !== "function") throw new TypeError("opaqueAudioPath is required");
   const spec = validateDjAbxPreparationSpec(input);
+  const pinnedCandidate = validateDjAbxCandidate(candidate);
   const draw = maximum => {
     const value = randomInteger(maximum);
     if (!Number.isInteger(value) || value < 0 || value >= maximum) {
@@ -206,8 +262,8 @@ export function createDjAbxBlindPlan(input, {
         xCondition,
         audio: publicAudio,
         sources: {
-          physical: { path: trial.physicalPath, sha256: null, wav: null },
-          player: { path: trial.playerPath, sha256: null, wav: null },
+          physical: { path: trial.physicalPath, fileSha256: null, audioSha256: null, wav: null },
+          player: { path: trial.playerPath, fileSha256: null, audioSha256: null, wav: null },
         },
       },
       copies: [
@@ -228,6 +284,7 @@ export function createDjAbxBlindPlan(input, {
       schemaVersion: DJ_ABX_PACKAGE_SCHEMA_VERSION,
       studyId: spec.studyId,
       participantId: spec.participantId,
+      candidate: pinnedCandidate,
       generatedAt: timestamp,
       codebookSha256: null,
       trials: ordered.map(value => value.manifestTrial),
@@ -236,6 +293,7 @@ export function createDjAbxBlindPlan(input, {
       schemaVersion: DJ_ABX_CODEBOOK_SCHEMA_VERSION,
       studyId: spec.studyId,
       participantId: spec.participantId,
+      candidate: pinnedCandidate,
       generatedAt: timestamp,
       trials: ordered.map(value => value.codebookTrial),
     },
@@ -273,7 +331,7 @@ function validateManifestTrial(value, index) {
 
 export function validateDjAbxBlindManifest(input) {
   const value = object(input, "blind manifest");
-  exactKeys(value, ["schemaVersion", "studyId", "participantId", "generatedAt", "codebookSha256", "trials"], "blind manifest");
+  exactKeys(value, ["schemaVersion", "studyId", "participantId", "candidate", "generatedAt", "codebookSha256", "trials"], "blind manifest");
   if (value.schemaVersion !== DJ_ABX_PACKAGE_SCHEMA_VERSION) {
     throw new TypeError(`blind manifest schemaVersion must be ${DJ_ABX_PACKAGE_SCHEMA_VERSION}`);
   }
@@ -286,6 +344,7 @@ export function validateDjAbxBlindManifest(input) {
     schemaVersion: DJ_ABX_PACKAGE_SCHEMA_VERSION,
     studyId: studyId(value.studyId, "manifest.studyId"),
     participantId: string(value.participantId, "manifest.participantId"),
+    candidate: validateDjAbxCandidate(value.candidate, "manifest.candidate"),
     generatedAt: isoTimestamp(value.generatedAt, "manifest.generatedAt"),
     codebookSha256: digest(value.codebookSha256, "manifest.codebookSha256"),
     trials,
@@ -326,6 +385,7 @@ export class DjBlindAbxSession {
     this.manifest = validateDjAbxBlindManifest(manifest);
     this.manifestSha256 = digest(manifestSha256, "manifestSha256");
     this.codebookSha256 = this.manifest.codebookSha256;
+    this.candidate = this.manifest.candidate;
     this.participantId = string(participantId, "participantId");
     if (this.participantId !== this.manifest.participantId) {
       throw new Error("participantId does not match this blind package");
@@ -387,6 +447,8 @@ export class DjBlindAbxSession {
     return {
       schemaVersion: DJ_ABX_RESPONSE_SCHEMA_VERSION,
       studyId: this.manifest.studyId,
+      candidateCommit: this.candidate.commit,
+      candidateBuildInfoSha256: this.candidate.buildInfoSha256,
       manifestSha256: this.manifestSha256,
       codebookSha256: this.codebookSha256,
       participantId: this.participantId,
@@ -399,6 +461,8 @@ export class DjBlindAbxSession {
     return {
       schemaVersion: DJ_ABX_RESPONSE_SCHEMA_VERSION,
       studyId: this.manifest.studyId,
+      candidateCommit: this.candidate.commit,
+      candidateBuildInfoSha256: this.candidate.buildInfoSha256,
       manifestSha256: this.manifestSha256,
       codebookSha256: this.codebookSha256,
       participantId: this.participantId,
@@ -410,7 +474,7 @@ export class DjBlindAbxSession {
 
 function validateCodebook(input) {
   const value = object(input, "private codebook");
-  exactKeys(value, ["schemaVersion", "studyId", "participantId", "generatedAt", "trials"], "private codebook");
+  exactKeys(value, ["schemaVersion", "studyId", "participantId", "candidate", "generatedAt", "trials"], "private codebook");
   if (value.schemaVersion !== DJ_ABX_CODEBOOK_SCHEMA_VERSION) {
     throw new TypeError(`private codebook schemaVersion must be ${DJ_ABX_CODEBOOK_SCHEMA_VERSION}`);
   }
@@ -429,7 +493,11 @@ function validateCodebook(input) {
     exactKeys(sources, conditions, `${path}.sources`);
     const normalizedSources = Object.fromEntries([...conditions].map(conditionName => {
       const source = object(sources[conditionName], `${path}.sources.${conditionName}`);
-      exactKeys(source, ["path", "sha256", "wav"], `${path}.sources.${conditionName}`);
+      exactKeys(
+        source,
+        ["path", "fileSha256", "audioSha256", "wav"],
+        `${path}.sources.${conditionName}`,
+      );
       const wav = object(source.wav, `${path}.sources.${conditionName}.wav`);
       exactKeys(wav, ["audioFormat", "channels", "sampleRateHz", "bitsPerSample", "frames"], `${path}.sources.${conditionName}.wav`);
       const audioFormat = integer(wav.audioFormat, `${path}.sources.${conditionName}.wav.audioFormat`, 1, 3);
@@ -442,7 +510,8 @@ function validateCodebook(input) {
       }
       return [conditionName, {
         path: string(source.path, `${path}.sources.${conditionName}.path`),
-        sha256: digest(source.sha256, `${path}.sources.${conditionName}.sha256`),
+        fileSha256: digest(source.fileSha256, `${path}.sources.${conditionName}.fileSha256`),
+        audioSha256: digest(source.audioSha256, `${path}.sources.${conditionName}.audioSha256`),
         wav: {
           audioFormat,
           channels: integer(wav.channels, `${path}.sources.${conditionName}.wav.channels`, 1, 2),
@@ -471,11 +540,13 @@ function validateCodebook(input) {
   unique(trials.flatMap(trial => Object.values(trial.audio).map(value => value.path)), "codebook audio paths");
   unique(trials.flatMap(trial => Object.values(trial.audio).map(value => value.sha256)), "codebook audio hashes");
   unique(trials.flatMap(trial => Object.values(trial.sources).map(value => value.path)), "codebook source paths");
-  unique(trials.flatMap(trial => Object.values(trial.sources).map(value => value.sha256)), "codebook source hashes");
+  unique(trials.flatMap(trial => Object.values(trial.sources).map(value => value.fileSha256)), "codebook source file hashes");
+  unique(trials.flatMap(trial => Object.values(trial.sources).map(value => value.audioSha256)), "codebook source audio hashes");
   return {
     schemaVersion: DJ_ABX_CODEBOOK_SCHEMA_VERSION,
     studyId: studyId(value.studyId, "codebook.studyId"),
     participantId: string(value.participantId, "codebook.participantId"),
+    candidate: validateDjAbxCandidate(value.candidate, "codebook.candidate"),
     generatedAt: isoTimestamp(value.generatedAt, "codebook.generatedAt"),
     trials,
   };
@@ -483,13 +554,21 @@ function validateCodebook(input) {
 
 function normalizeResponseBundle(input) {
   const value = object(input, "blind response bundle");
-  exactKeys(value, ["schemaVersion", "studyId", "manifestSha256", "codebookSha256", "participantId", "completedAt", "responses"], "blind response bundle");
+  exactKeys(value, [
+    "schemaVersion", "studyId", "candidateCommit", "candidateBuildInfoSha256",
+    "manifestSha256", "codebookSha256", "participantId", "completedAt", "responses",
+  ], "blind response bundle");
   if (value.schemaVersion !== DJ_ABX_RESPONSE_SCHEMA_VERSION) {
     throw new TypeError(`blind response schemaVersion must be ${DJ_ABX_RESPONSE_SCHEMA_VERSION}`);
   }
   const normalized = {
     schemaVersion: DJ_ABX_RESPONSE_SCHEMA_VERSION,
     studyId: studyId(value.studyId, "response.studyId"),
+    candidateCommit: string(value.candidateCommit, "response.candidateCommit").toLowerCase(),
+    candidateBuildInfoSha256: digest(
+      value.candidateBuildInfoSha256,
+      "response.candidateBuildInfoSha256",
+    ),
     manifestSha256: digest(value.manifestSha256, "response.manifestSha256"),
     codebookSha256: digest(value.codebookSha256, "response.codebookSha256"),
     participantId: string(value.participantId, "response.participantId"),
@@ -504,6 +583,8 @@ function normalizeResponseBundle(input) {
 function validateResponseBundle(input, codebook, manifestSha256, codebookSha256) {
   const normalized = normalizeResponseBundle(input);
   if (normalized.studyId !== codebook.studyId
+    || normalized.candidateCommit !== codebook.candidate.commit
+    || normalized.candidateBuildInfoSha256 !== codebook.candidate.buildInfoSha256
     || normalized.manifestSha256 !== manifestSha256
     || normalized.codebookSha256 !== codebookSha256) {
     throw new Error("Blind response does not match the private codebook");
@@ -541,6 +622,7 @@ export function reconstructDjAbxBlindManifest(codebookInput, codebookSha256) {
     schemaVersion: DJ_ABX_PACKAGE_SCHEMA_VERSION,
     studyId: codebook.studyId,
     participantId: codebook.participantId,
+    candidate: codebook.candidate,
     generatedAt: codebook.generatedAt,
     codebookSha256: digest(codebookSha256, "codebookSha256"),
     trials: codebook.trials.map(trial => ({
@@ -633,6 +715,10 @@ export function decodeDjBlindAbxResponses(codebookInput, responseInputs, {
         bCondition: trial.bCondition,
         xCondition: trial.xCondition,
         responseCondition: response.responseLabel === "a" ? trial.aCondition : trial.bCondition,
+        captureSha256: {
+          physical: trial.sources.physical.audioSha256,
+          player: trial.sources.player.audioSha256,
+        },
         confidence: response.confidence,
         realism: response.realism,
         transientSharpness: response.transientSharpness,
@@ -646,8 +732,9 @@ export function decodeDjBlindAbxResponses(codebookInput, responseInputs, {
     throw new Error("Cue codes contain an entry that does not match a reported cue");
   }
   return {
-    schemaVersion: 1,
+    schemaVersion: DJ_ABX_RESPONSE_SCHEMA_VERSION,
     studyId: codebook.studyId,
+    candidate: clone(codebook.candidate),
     manifestSha256: expectedManifestSha256,
     codebookSha256: expectedCodebookSha256,
     participants,

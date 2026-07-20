@@ -27,7 +27,7 @@ function setStatus(message, error = false) {
 }
 
 function storageKey(participantId) {
-  return `vinyl-dj-abx-v1:${manifestSha256}:${participantId}`;
+  return `vinyl-dj-abx-v2:${manifestSha256}:${participantId}`;
 }
 
 async function sha256Hex(bytes) {
@@ -66,7 +66,12 @@ async function loadPackageFiles(filesInput) {
   session = null;
   participantInput.value = manifest.participantId;
   participantInput.readOnly = true;
-  element("package-state").textContent = `${manifest.studyId} · ${manifest.trials.length} trials · ${manifestSha256.slice(0, 12)}`;
+  element("package-state").textContent = [
+    manifest.studyId,
+    `${manifest.trials.length} trials`,
+    `build ${manifest.candidate.commit.slice(0, 12)}`,
+    manifestSha256.slice(0, 12),
+  ].join(" · ");
   element("progress-state").textContent = `0 / ${manifest.trials.length}`;
   startButton.disabled = false;
   trialPanel.hidden = true;

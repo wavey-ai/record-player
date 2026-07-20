@@ -33,6 +33,7 @@ function participant(participantIndex) {
   const trials = Array.from({ length: 24 }, (_, trialIndex) => {
     const xCondition = trialIndex % 2 === 0 ? "physical" : "player";
     const correct = trialIndex < 12;
+    const captureIndex = participantIndex * 48 + trialIndex * 2;
     return {
       id: `${id}-trial-${trialIndex + 1}`,
       excerptId: `${id}-excerpt-${trialIndex + 1}`,
@@ -41,6 +42,10 @@ function participant(participantIndex) {
       bCondition: trialIndex % 2 === 0 ? "player" : "physical",
       xCondition,
       responseCondition: correct ? xCondition : (xCondition === "physical" ? "player" : "physical"),
+      captureSha256: {
+        physical: (captureIndex + 1).toString(16).padStart(64, "0"),
+        player: (captureIndex + 2).toString(16).padStart(64, "0"),
+      },
       confidence: 3,
       realism: 6,
       transientSharpness: 6,
@@ -89,6 +94,7 @@ function passingResults() {
     after: playbackStats((index + 1) * 10_000),
   })));
   const artifactRoles = [
+    "candidate-build-info",
     "source-master",
     "physical-capture",
     "player-capture",
@@ -97,9 +103,9 @@ function passingResults() {
     "cue-codebook",
   ];
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     candidate: {
-      commit: "29e7746",
+      commit: "2".repeat(40),
       worktreeDirty: false,
       settings: {
         highFrequencyAccelerationLimit: 0.35,
@@ -189,6 +195,12 @@ function passingResults() {
 function analyzeFixture(results, options = {}) {
   return analyzeDjValidation(results, {
     verifiedArtifactRoles: results.artifacts.map(artifact => artifact.role),
+    verifiedCandidateBuildInfo: {
+      schemaVersion: 1,
+      commit: results.candidate.commit,
+      worktreeDirty: results.candidate.worktreeDirty,
+      settings: structuredClone(results.candidate.settings),
+    },
     ...options,
   });
 }
@@ -207,6 +219,7 @@ test("accepts a complete pre-registered study at chance identification", () => {
   assert.equal(result.sourceSha256, "a".repeat(64));
   assert.equal(result.pooledAbx.trials, 288);
   assert.equal(result.pooledAbx.correct, 144);
+  assert.equal(result.pooledAbx.uniqueCaptureHashes, 576);
   assert.equal(result.pooledAbx.exactTwoSidedP, 1);
   assert.ok(result.pooledAbx.clopperPearson95.upper < 0.60);
   assert.equal(result.participants[0].correct, 12);
@@ -286,27 +299,55 @@ test("rejects reuse of a supposedly fresh ABX excerpt", () => {
   assert.throws(() => analyzeFixture(results), /reuses excerptId/);
 });
 
+test("rejects reuse of capture audio across participant packages", () => {
+  const results = passingResults();
+  results.participants[1].trials[0].captureSha256.physical =
+    results.participants[0].trials[0].captureSha256.physical;
+  assert.throws(() => analyzeFixture(results), /reuses capture SHA-256/);
+});
+
+test("requires the shipped acoustic and surface effects", () => {
+  const results = passingResults();
+  results.candidate.settings.surfaceEffects = false;
+  const analysis = analyzeFixture(results);
+  assert.equal(analysis.criteria.pinnedCandidate.pass, false);
+});
+
+test("rejects build metadata from a different candidate", () => {
+  const results = passingResults();
+  const analysis = analyzeFixture(results, {
+    verifiedCandidateBuildInfo: {
+      schemaVersion: 1,
+      commit: "f".repeat(40),
+      worktreeDirty: false,
+      settings: structuredClone(results.candidate.settings),
+    },
+  });
+  assert.equal(analysis.criteria.artifactHashes.pass, false);
+});
+
 test("requires frozen cue coding when a participant reports a cue", () => {
   const results = passingResults();
   results.participants[0].trials[0].audibleCue = "I heard a click.";
   assert.throws(() => analyzeFixture(results), /cueCode is required/);
 });
 
-test("rejects schema one because it cannot contain registered physical-loopback evidence", () => {
+test("rejects older schemas because they cannot bind capture evidence", () => {
   const results = passingResults();
-  results.schemaVersion = 1;
-  assert.throws(() => analyzeFixture(results), /schema version 1 lacks physical-loopback evidence/);
+  results.schemaVersion = 2;
+  assert.throws(() => analyzeFixture(results), /schema version 2 lacks build-bound capture evidence/);
 });
 
-test("generates a schema-two collection template with pinned settings", () => {
+test("generates a schema-three collection template with pinned settings", () => {
   const template = createDjValidationTemplate();
-  assert.equal(template.schemaVersion, 2);
+  assert.equal(template.schemaVersion, 3);
   assert.equal(template.candidate.settings.highFrequencyAccelerationLimit, 0.35);
   assert.equal(template.candidate.settings.stylusTracingLimit, 0.72);
   assert.equal(template.candidate.settings.faderCurve, 0.08);
   assert.equal(template.candidate.worktreeDirty, null);
   assert.equal(template.participants.length, 1);
   assert.equal(template.participants[0].trials.length, 1);
+  assert.deepEqual(template.participants[0].trials[0].captureSha256, { physical: "", player: "" });
   assert.equal(template.participants[0].routines.length, 1);
   assert.equal(template.blocks.length, 2);
   assert.equal(template.blocks[0].before.underrunEvents, null);
@@ -318,7 +359,14 @@ test("CLI hashes and accepts a frozen passing result file", async () => {
   try {
     const results = passingResults();
     for (const artifact of results.artifacts) {
-      const content = `${artifact.role}\n`;
+      const content = artifact.role === "candidate-build-info"
+        ? `${JSON.stringify({
+          schemaVersion: 1,
+          commit: results.candidate.commit,
+          worktreeDirty: false,
+          settings: results.candidate.settings,
+        }, null, 2)}\n`
+        : `${artifact.role}\n`;
       await writeFile(join(directory, artifact.path), content, "utf8");
       artifact.sha256 = createHash("sha256").update(content).digest("hex");
     }

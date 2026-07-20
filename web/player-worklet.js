@@ -1230,6 +1230,8 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
         scratchStrokeProgress: this.dsp.scratchStrokeProgress,
         highFrequencyAccelerationLimit: this.dsp.highFrequencyAccelerationLimit,
         stylusTracingLimit: this.dsp.stylusTracingLimit,
+        acousticEffects: this.effects.acoustic,
+        surfaceEffects: this.effects.surface,
         outputFrame: renderedOutputFrame,
         currentFrame: renderedOutputFrame,
         scratching: this.scratching,

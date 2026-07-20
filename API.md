@@ -209,6 +209,8 @@ const unsubscribe = player.subscribe(state => {
   state.effectiveRate;
   state.highFrequencyAccelerationLimit;
   state.stylusTracingLimit;
+  state.acousticEffects;
+  state.surfaceEffects;
   state.pointerToAudioLatencyMs;
   state.pointerAppliedCommandId;
   state.audioBaseLatencyMs;
@@ -803,9 +805,10 @@ does not claim results from that human validation. The build includes
 `/dj-validation.html`, which binds a collection session to a clean candidate and
 records the public latency and playback-statistics APIs. The separate
 `/dj-abx.html` runner verifies participant-bound opaque WAV packages and exports
-condition-free responses. Create an offline versioned results file with
-`npm run validation:template`. Apply the pre-registered acceptance rules with
-`npm run validation:analyze -- <file>`.
+condition-free responses. Each package binds the build commit, shipped settings,
+build-metadata hash, and source-capture hashes. Create a versioned results file
+with `npm run validation:template`. Apply the pre-registered acceptance rules
+with `npm run validation:analyze -- <file>`.
 
 
 ## Transport motor

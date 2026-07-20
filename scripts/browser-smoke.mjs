@@ -237,6 +237,8 @@ async function runBrowserScenario() {
   assert(loaded.ready, "The synthetic browser source did not become ready");
   assert(loaded.highFrequencyAccelerationLimit === 0.35, "HF limiter engine default is not 0.35");
   assert(loaded.stylusTracingLimit === 0.72, "Stylus tracing engine default is not 0.72");
+  assert(loaded.acousticEffects === true, "Acoustic effects are not enabled in the rendered path");
+  assert(loaded.surfaceEffects === true, "Surface effects are not enabled in the rendered path");
   assert(globalThis.crossOriginIsolated, "The player page is not cross-origin isolated");
 
   const capture = await player.getCaptureStream();
@@ -884,7 +886,7 @@ try {
     );
   }
   const validationConsole = validationConsoleResult.result?.value;
-  if (validationConsole?.schemaVersion !== 2) throw new Error("Validation console did not use schema version 2");
+  if (validationConsole?.schemaVersion !== 3) throw new Error("Validation console did not use schema version 3");
   if (validationConsole?.summary?.participants !== 1) throw new Error("Validation console did not record a participant");
   if (!validationConsole?.playerApiPublished) throw new Error("Validation console did not expose the real player API");
   if (typeof validationConsole?.buildInfo?.worktreeDirty !== "boolean") {
@@ -949,9 +951,23 @@ try {
         sha256: await hexDigest(audioBytes[role]),
       }])));
       const manifest = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         studyId: "browser-abx-001",
         participantId: "browser-dj-01",
+        candidate: {
+          commit: "dddddddddddddddddddddddddddddddddddddddd",
+          worktreeDirty: false,
+          buildInfoSha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          settings: {
+            highFrequencyAccelerationLimit: 0.35,
+            stylusTracingLimit: 0.72,
+            faderCurve: 0.08,
+            acousticEffects: true,
+            surfaceEffects: true,
+            nativeRpmValues: [100 / 3, 45],
+            endPolicies: ["runout", "clean"],
+          },
+        },
         generatedAt: "2026-07-20T12:00:00.000Z",
         codebookSha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         trials: [{

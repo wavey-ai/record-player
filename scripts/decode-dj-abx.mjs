@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import {
   decodeDjBlindAbxResponses,
@@ -68,12 +69,27 @@ async function readJsonWithSha256(path, label) {
 }
 
 function mergeDecodedTrials(resultsInput, decoded) {
-  if (!resultsInput || resultsInput.schemaVersion !== 2 || !Array.isArray(resultsInput.participants)) {
-    throw new TypeError("The validation draft must use schema version 2");
+  if (!resultsInput || resultsInput.schemaVersion !== 3 || !Array.isArray(resultsInput.participants)) {
+    throw new TypeError("The validation draft must use schema version 3");
   }
   const results = structuredClone(resultsInput);
+  if (decoded.candidate?.commit !== results.candidate?.commit
+    || decoded.candidate?.worktreeDirty !== false
+    || results.candidate?.worktreeDirty !== false
+    || !isDeepStrictEqual(decoded.candidate?.settings, results.candidate?.settings)) {
+    throw new Error("Decoded ABX evidence belongs to a different candidate build");
+  }
+  const buildArtifact = results.artifacts?.find(artifact => artifact.role === "candidate-build-info");
+  if (buildArtifact?.sha256?.toLowerCase() !== decoded.candidate.buildInfoSha256) {
+    throw new Error("The candidate build-info artifact does not match the blind package");
+  }
   const existingExcerptIds = new Set(results.participants.flatMap(participant => (
     Array.isArray(participant.trials) ? participant.trials.map(trial => trial.excerptId) : []
+  )));
+  const existingCaptureHashes = new Set(results.participants.flatMap(participant => (
+    Array.isArray(participant.trials)
+      ? participant.trials.flatMap(trial => Object.values(trial.captureSha256 || {}))
+      : []
   )));
   for (const decodedParticipant of decoded.participants) {
     const participant = results.participants.find(value => value.id === decodedParticipant.id);
@@ -84,6 +100,16 @@ function mergeDecodedTrials(resultsInput, decoded) {
       if (existingIds.has(trial.id)) throw new Error(`Validation draft already contains trial ${trial.id}`);
       if (existingExcerptIds.has(trial.excerptId)) {
         throw new Error(`Validation draft already contains excerpt ${trial.excerptId}`);
+      }
+      const captureHashes = Object.values(trial.captureSha256 || {});
+      if (captureHashes.length !== 2 || captureHashes.some(hash => !/^[0-9a-f]{64}$/i.test(hash))) {
+        throw new Error(`Decoded trial ${trial.id} does not contain both capture hashes`);
+      }
+      for (const hash of captureHashes) {
+        if (existingCaptureHashes.has(hash)) {
+          throw new Error(`Validation draft already contains capture ${hash}`);
+        }
+        existingCaptureHashes.add(hash);
       }
       participant.trials.push(structuredClone(trial));
       existingIds.add(trial.id);

@@ -185,7 +185,7 @@ balanced gesture-family counts:
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "studyId": "vinyl-rc1",
   "participantId": "dj-01",
   "trials": [
@@ -204,19 +204,32 @@ Generate the operator package and private codebook:
 
 ```sh
 npm run validation:prepare-abx -- dj-01-spec.json \
+  --build-info dist/player-build-info.json \
   --out operator/dj-01-blind \
   --codebook private/dj-01-codebook.json
 ```
 
-The generator refuses reused capture paths or content, compressed inputs,
-mismatched WAV formats, mismatched frame counts and existing output targets. It
-balances A and X conditions inside each even gesture-family block. It gives A, B and X unique
-opaque filenames and adds a different ignored WAV metadata chunk to every copy.
+The generator requires metadata from a clean build with all shipped settings.
+It stores the build commit, settings, and metadata hash in both ABX files.
+Copy the exact `player-build-info.json` file into the frozen evidence directory.
+Do not reformat it. Calculate its SHA-256 digest and enter its relative path and
+digest as the `candidate-build-info` artifact in the collection console before
+the first participant decode. The decoder requires this digest to match the
+blind package. The final analyzer reads the file and verifies its schema,
+commit, clean-worktree state and settings.
+
+The generator refuses reused capture paths or content. It also refuses
+compressed inputs, mismatched WAV data, and existing output targets. It balances
+A and X conditions inside each even gesture-family block. It gives each A, B,
+and X file a unique opaque name. It adds a different ignored WAV metadata chunk
+to each copy.
 This keeps X from being exposed by filename or whole-file hash equality without
 changing decoded audio. The public manifest contains distinct integrity hashes.
 It also contains the SHA-256 commitment of the completed private codebook. The
 private codebook binds every opaque file to its condition and original capture
-hash. It must stay outside the operator package.
+hashes. It stores a whole-file hash and an audio-data hash for each source WAV.
+The audio-data hash detects reuse even if WAV metadata changes. Keep the private
+codebook outside the operator package.
 
 ### Run and freeze blind responses
 
@@ -241,8 +254,8 @@ Two analysts code the copied cue text while condition labels remain hidden. They
 must resolve every non-empty `cueCode` with the registered lower-case kebab-case
 codebook. Do not change the copied `audibleCue` text.
 
-After responses, exclusions and cue codes are frozen, decode one participant and
-merge the trials into the schema-version-2 console export:
+After responses, exclusions and cue codes are frozen, decode one participant.
+Merge the trials into the schema-version-3 console export:
 
 ```sh
 npm run validation:decode-abx -- private/dj-01-codebook.json \
@@ -252,15 +265,15 @@ npm run validation:decode-abx -- private/dj-01-codebook.json \
   --out dj-validation-results.dj-01.json
 ```
 
-Use the prior output as `--results` for the next participant. The decoder will
-not overwrite a file. It rejects a wrong participant, manifest hash, trial,
-excerpt, cue text or codebook hash. This prevents a private mapping from being
-changed after responses exist. Bundle all completed private codebooks
-into the study's randomization-manifest artifact. Bundle the completed cue-code
-files into the cue-codebook artifact.
+Use the prior output as `--results` for the next participant. The decoder does
+not overwrite a file. It rejects a different candidate, build metadata, trial,
+excerpt, cue text, or codebook hash. It also rejects an audio-data hash that
+another participant used. The final analyzer applies the same full-study check.
+Bundle all private codebooks into the randomization-manifest artifact. Bundle
+all completed cue files into the cue-codebook artifact.
 
 The command-line template remains available for an offline workflow. Generate a
-version-2 JSON collection template:
+version-3 JSON collection template:
 
 ```sh
 npm run validation:template > dj-validation-results.json

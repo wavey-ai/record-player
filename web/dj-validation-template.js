@@ -1,4 +1,4 @@
-export const DJ_VALIDATION_SCHEMA_VERSION = 2;
+export const DJ_VALIDATION_SCHEMA_VERSION = 3;
 
 export const DJ_GESTURE_FAMILIES = Object.freeze([
   "baby-drag-cue",
@@ -29,6 +29,7 @@ export const DJ_EXPERIENCE_BANDS = Object.freeze([
   "over-10-years",
 ]);
 export const DJ_REQUIRED_ARTIFACT_ROLES = Object.freeze([
+  "candidate-build-info",
   "source-master",
   "physical-capture",
   "player-capture",
@@ -79,6 +80,10 @@ function exampleParticipant(participantId) {
       bCondition: "player",
       xCondition: "physical",
       responseCondition: "physical",
+      captureSha256: {
+        physical: "",
+        player: "",
+      },
       confidence: null,
       realism: null,
       transientSharpness: null,

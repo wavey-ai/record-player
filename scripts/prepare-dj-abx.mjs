@@ -28,10 +28,11 @@ import { createDjAbxBlindPlan } from "../web/dj-abx.js";
 function usage() {
   return [
     "Usage:",
-    "  node scripts/prepare-dj-abx.mjs <spec.json> --out <blind-package-dir> --codebook <private-codebook.json> [--pilot]",
+    "  node scripts/prepare-dj-abx.mjs <spec.json> --build-info <player-build-info.json> --out <blind-package-dir> --codebook <private-codebook.json> [--pilot]",
     "",
     "The package directory and private codebook must not already exist.",
     "Keep the private codebook outside the package and away from the test operator.",
+    "The build metadata must identify a clean candidate with the shipped settings.",
     "Release packages require at least 24 balanced trials. --pilot permits a smaller test package.",
   ].join("\n");
 }
@@ -90,7 +91,9 @@ function readFourCc(bytes, offset) {
 async function inspectWav(path) {
   const file = await open(path, "r");
   let format = null;
-  let dataBytes = null;
+  let dataBytes = 0;
+  const dataChunks = [];
+  let audioSha256 = null;
   try {
     const { size } = await file.stat();
     const riff = Buffer.alloc(12);
@@ -124,14 +127,29 @@ async function inspectWav(path) {
           bitsPerSample: bytes.readUInt16LE(14),
         };
       } else if (kind === "data") {
-        dataBytes = length;
+        dataBytes += length;
+        dataChunks.push({ start, length });
       }
       offset = end + (length % 2);
     }
+    const audioHash = createHash("sha256");
+    const buffer = Buffer.alloc(64 * 1024);
+    for (const chunk of dataChunks) {
+      let position = chunk.start;
+      const end = chunk.start + chunk.length;
+      while (position < end) {
+        const length = Math.min(buffer.length, end - position);
+        const { bytesRead } = await file.read(buffer, 0, length, position);
+        if (bytesRead !== length) throw new Error(`${path} contains truncated WAV audio data`);
+        audioHash.update(buffer.subarray(0, bytesRead));
+        position += bytesRead;
+      }
+    }
+    if (dataChunks.length > 0) audioSha256 = audioHash.digest("hex");
   } finally {
     await file.close();
   }
-  if (!format || dataBytes === null) throw new Error(`${path} lacks a WAV format or data chunk`);
+  if (!format || audioSha256 === null) throw new Error(`${path} lacks a WAV format or data chunk`);
   if (format.audioFormat !== 1 && format.audioFormat !== 3) {
     throw new Error(`${path} must use uncompressed PCM or IEEE float WAV audio`);
   }
@@ -150,6 +168,7 @@ async function inspectWav(path) {
     sampleRateHz: format.sampleRateHz,
     bitsPerSample: format.bitsPerSample,
     frames: dataBytes / format.blockAlign,
+    audioSha256,
   };
 }
 
@@ -165,10 +184,12 @@ if (args.includes("--help") || args.includes("-h")) {
 
 const specArgument = args.find(argument => !argument.startsWith("--")
   && argument !== option(args, "--out")
-  && argument !== option(args, "--codebook"));
+  && argument !== option(args, "--codebook")
+  && argument !== option(args, "--build-info"));
 const outputArgument = option(args, "--out");
 const codebookArgument = option(args, "--codebook");
-if (!specArgument || !outputArgument || !codebookArgument) {
+const buildInfoArgument = option(args, "--build-info");
+if (!specArgument || !outputArgument || !codebookArgument || !buildInfoArgument) {
   console.error(usage());
   process.exit(1);
 }
@@ -178,6 +199,7 @@ let outputDirectory = null;
 let packageCreated = false;
 try {
   const specPath = resolve(specArgument);
+  const buildInfoPath = resolve(buildInfoArgument);
   outputDirectory = resolve(outputArgument);
   const codebookPath = resolve(codebookArgument);
   if (isInside(outputDirectory, codebookPath)) {
@@ -186,8 +208,21 @@ try {
   if (await exists(outputDirectory)) throw new Error(`Blind package already exists: ${outputDirectory}`);
   if (await exists(codebookPath)) throw new Error(`Private codebook already exists: ${codebookPath}`);
 
-  const specBytes = await readFile(specPath);
+  const [specBytes, buildInfoBytes] = await Promise.all([
+    readFile(specPath),
+    readFile(buildInfoPath),
+  ]);
   const spec = JSON.parse(specBytes.toString("utf8"));
+  const buildInfo = JSON.parse(buildInfoBytes.toString("utf8"));
+  if (buildInfo?.schemaVersion !== 1) {
+    throw new Error("Player build metadata must use schema version 1");
+  }
+  const candidate = {
+    commit: buildInfo.commit,
+    worktreeDirty: buildInfo.worktreeDirty,
+    buildInfoSha256: createHash("sha256").update(buildInfoBytes).digest("hex"),
+    settings: buildInfo.settings,
+  };
   if (!args.includes("--pilot")) {
     const familyCounts = new Map();
     for (const trial of spec.trials || []) {
@@ -202,6 +237,7 @@ try {
   }
   const usedPaths = new Set();
   const plan = createDjAbxBlindPlan(spec, {
+    candidate,
     randomInteger: maximum => randomInt(maximum),
     opaqueAudioPath: () => {
       let path;
@@ -226,22 +262,34 @@ try {
     if (extname(physicalPath).toLowerCase() !== ".wav" || extname(playerPath).toLowerCase() !== ".wav") {
       throw new Error(`${trial.id} must use WAV files for both conditions`);
     }
-    const [physicalWav, playerWav, physicalSha256, playerSha256] = await Promise.all([
+    const [physicalInspection, playerInspection, physicalFileSha256, playerFileSha256] = await Promise.all([
       inspectWav(physicalPath),
       inspectWav(playerPath),
       sha256File(physicalPath),
       sha256File(playerPath),
     ]);
+    const { audioSha256: physicalAudioSha256, ...physicalWav } = physicalInspection;
+    const { audioSha256: playerAudioSha256, ...playerWav } = playerInspection;
     if (!sameWavFormat(physicalWav, playerWav)) {
       throw new Error(`${trial.id} physical and player WAV formats or frame counts differ`);
     }
-    for (const hash of [physicalSha256, playerSha256]) {
+    for (const hash of [physicalAudioSha256, playerAudioSha256]) {
       if (captureHashes.has(hash)) throw new Error(`${trial.id} reuses capture audio from another condition or trial`);
       captureHashes.add(hash);
     }
     sourceEvidence.set(trial.id, {
-      physical: { path: trial.physicalPath, sha256: physicalSha256, wav: physicalWav },
-      player: { path: trial.playerPath, sha256: playerSha256, wav: playerWav },
+      physical: {
+        path: trial.physicalPath,
+        fileSha256: physicalFileSha256,
+        audioSha256: physicalAudioSha256,
+        wav: physicalWav,
+      },
+      player: {
+        path: trial.playerPath,
+        fileSha256: playerFileSha256,
+        audioSha256: playerAudioSha256,
+        wav: playerWav,
+      },
     });
   }
   for (const trial of plan.codebook.trials) trial.sources = sourceEvidence.get(trial.id);

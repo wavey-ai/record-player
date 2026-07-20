@@ -55,6 +55,16 @@ function gitResult(args) {
 const gitCommit = gitResult(["rev-parse", "HEAD"]);
 const gitStatus = gitResult(["status", "--porcelain"]);
 await writeFile(resolve(distDir, "player-build-info.json"), `${JSON.stringify({
+  schemaVersion: 1,
   commit: gitCommit.ok && /^[0-9a-f]{40}$/i.test(gitCommit.output) ? gitCommit.output : null,
   worktreeDirty: gitCommit.ok && gitStatus.ok ? gitStatus.output.length > 0 : null,
+  settings: {
+    highFrequencyAccelerationLimit: 0.35,
+    stylusTracingLimit: 0.72,
+    faderCurve: 0.08,
+    acousticEffects: true,
+    surfaceEffects: true,
+    nativeRpmValues: [100 / 3, 45],
+    endPolicies: ["runout", "clean"],
+  },
 }, null, 2)}\n`);

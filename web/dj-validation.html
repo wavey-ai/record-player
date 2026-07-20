@@ -87,8 +87,8 @@
       </details>
 
       <details>
-        <summary>3. Post-unblinding ABX entry</summary>
-        <p class="notice">Enter conditions only after responses and cue coding are frozen.</p>
+        <summary>3. Decoded ABX entry</summary>
+        <p class="notice">Use the decoder when possible. Enter conditions and capture hashes only after responses and cue coding are frozen.</p>
         <form id="trial-form" class="field-grid compact">
           <label>Participant<select name="participantId"></select></label>
           <label>Excerpt ID<input name="excerptId" required autocomplete="off"></label>
@@ -104,6 +104,8 @@
           <label>B condition<select name="bCondition"><option value="player">Player</option><option value="physical">Physical</option></select></label>
           <label>X condition<select name="xCondition"><option value="physical">Physical</option><option value="player">Player</option></select></label>
           <label>Response<select name="responseCondition"><option value="physical">Physical</option><option value="player">Player</option></select></label>
+          <label>Physical capture SHA-256<input name="physicalCaptureSha256" pattern="[0-9a-fA-F]{64}" required autocomplete="off"></label>
+          <label>Player capture SHA-256<input name="playerCaptureSha256" pattern="[0-9a-fA-F]{64}" required autocomplete="off"></label>
           <label>Confidence (1–5)<input name="confidence" type="number" min="1" max="5" step="1" required></label>
           <label>Realism (1–7)<input name="realism" type="number" min="1" max="7" step="1" required></label>
           <label>Transient sharpness (1–7)<input name="transientSharpness" type="number" min="1" max="7" step="1" required></label>
