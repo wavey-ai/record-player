@@ -77,6 +77,7 @@ The audit compared those files with:
 | Manual fader | Mixer automation | Independent Rust post-gate gain | Beyond reference |
 | Advanced controls | Not present as this pair | HF limit and stylus limit dropdown | Beyond reference |
 | Device underrun telemetry | Not public | Normalized browser playback statistics | Beyond reference |
+| DJ-study analysis | Not present | Versioned exact acceptance analyzer | Beyond reference |
 
 ## Important deliberate differences
 
@@ -132,7 +133,7 @@ measured audio-thread reason to make either change.
 ## Automated evidence
 
 - `cargo test --workspace`: 81 tests.
-- `node --test test/*.test.mjs`: 26 tests.
+- `node --test test/*.test.mjs`: 36 tests.
 - `npm run bench:worklet`: normal p95 `1.46%` of a quantum.
 - The same benchmark measured `7.87%` for alternating `±8×` Crab/8.
 - Direct copy into prepared Rust window storage reduced fresh six-second window
@@ -159,6 +160,9 @@ measured audio-thread reason to make either change.
 - The capture checks covered about `12.7 s` per run. All timestamps were
   monotonic. Cumulative timeline error stayed at or below `3.18 ms`. Steady
   playback did not contain a silent packet.
+- The DJ validation analyzer computes the exact two-sided binomial test and a
+  95% Clopper-Pearson interval. Tests reject identification, repeated cues and
+  audio underruns. A complete synthetic study passes all registered rules.
 
 ## Remaining proof gaps
 
@@ -167,7 +171,8 @@ measured audio-thread reason to make either change.
    device.
 2. Test actual touchscreens, pens, trackpads and mouse devices.
 3. Measure end-to-end acoustic latency through the interface and speakers.
-4. Run the pre-registered blind test in `DJ_VALIDATION_PROTOCOL.md`.
+4. Collect the frozen data for the pre-registered blind test. Analyze that data
+   with `npm run validation:analyze -- <file>`.
 5. Tune only the variables that fail those tests.
 
 An exact JavaScript-to-Rust output hash is not a useful release gate. The target

@@ -97,6 +97,11 @@ realism (1–7), transient sharpness (1–7), timing naturalness (1–7), and an
 cue in free text. Use fresh excerpts across trials so memory of surface-noise
 events cannot reveal a condition.
 
+Two analysts must code each free-text cue before condition labels become
+available. They must use one frozen, lower-case cue codebook. Resolve coding
+differences while the conditions are still hidden. Store the codebook hash with
+the other artifact hashes.
+
 Publish per-participant and pooled correct counts with exact binomial confidence
 intervals. The auditory indistinguishability criterion is pre-registered as:
 
@@ -108,6 +113,10 @@ intervals. The auditory indistinguishability criterion is pre-registered as:
 
 "Failure to reject chance" alone is not evidence of equivalence, hence the upper
 confidence bound and realism requirements.
+
+The analysis uses an exact two-sided binomial test with chance probability
+`0.5`. It uses a two-sided 95% Clopper-Pearson interval for the confidence
+limits.
 
 ## Live-control test
 
@@ -134,3 +143,39 @@ all trials, raw ratings, analysis script and failures. Report negative and posit
 results together. Any DSP, gate, latency or gesture-filter change after a passing
 run creates a new candidate and requires at least the affected preflight and blind
 trial blocks to be rerun.
+
+## Executable analysis
+
+Generate a versioned JSON collection template:
+
+```sh
+npm run validation:template > dj-validation-results.json
+```
+
+Complete the environment, artifact, preflight, audio-block, trial and routine
+fields. Use anonymized participant identifiers. Do not put participant names in
+the file.
+
+Use a new `excerptId` for each scored trial. Record all exclusions before
+unblinding. Complete the blinding and cue-coding declarations only after their
+conditions are true.
+
+The template contains one example participant, trial and routine. Duplicate the
+records to meet the registered counts. Replace all placeholder and `null`
+values. An exclusion record requires `id`, `reason` and
+`decidedBeforeUnblinding: true`.
+
+Analyze the frozen file:
+
+```sh
+npm run validation:analyze -- dj-validation-results.json
+```
+
+Add `--json` after the file name to produce a machine-readable report. The
+report contains the input SHA-256 digest and all acceptance decisions.
+The analyzer also streams each artifact path and verifies its SHA-256 digest.
+Relative artifact paths start from the results-file directory.
+
+Exit status `0` means that all pre-registered criteria passed. Exit status `2`
+means that the data was valid but one or more criteria failed. Exit status `1`
+means that the data was invalid.

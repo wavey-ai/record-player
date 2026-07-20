@@ -7,6 +7,8 @@
     "bench:worklet": "npm run build && node scripts/benchmark-worklet.mjs",
     "build": "node scripts/build.mjs",
     "dev": "node scripts/dev-server.mjs",
-    "test:browser": "npm run build && node scripts/browser-smoke.mjs"
+    "test:browser": "npm run build && node scripts/browser-smoke.mjs",
+    "validation:analyze": "node scripts/analyze-dj-validation.mjs",
+    "validation:template": "node scripts/analyze-dj-validation.mjs --template"
   }
 }

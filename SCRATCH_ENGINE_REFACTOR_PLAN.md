@@ -9,7 +9,7 @@ is made.
 Current automated evidence:
 
 - `cargo test --workspace`: 81 tests (76 `record-player`, 5 `player-wasm`).
-- `node --test test/*.test.mjs`: 26 tests.
+- `node --test test/*.test.mjs`: 36 tests.
 - `npm run build`: both browser WASM packages build in release mode.
 - `npm run bench:worklet`: real release WASM in the deterministic worklet harness;
   p95 `0.0389 ms` (`1.46%`) normal and `0.2100 ms` (`7.87%`) alternating
@@ -33,6 +33,9 @@ Current automated evidence:
   `playoutStats`. Three current Chrome runs observed `12.05–13.05 s` with zero
   underrun events and zero underrun duration. Target hardware must repeat this
   result.
+- `npm run validation:template` creates the versioned DJ-study data shape.
+  `npm run validation:analyze -- <file>` applies the pinned preflight, ABX and
+  live-control acceptance rules. Unit tests cover passing and failing studies.
 - Physical output-device xrun measurements, physical controller runs and the
   human protocol in `DJ_VALIDATION_PROTOCOL.md` remain outstanding.
 

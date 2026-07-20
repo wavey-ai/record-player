@@ -912,6 +912,19 @@ blind listening, control-task and free-performance procedure is defined in
 [`DJ_VALIDATION_PROTOCOL.md`](./DJ_VALIDATION_PROTOCOL.md), including hardware,
 level matching, failure reporting and acceptance criteria.
 
+The repository includes a versioned collection template and an exact acceptance
+analyzer. Generate a template and analyze a frozen result file with:
+
+```sh
+npm run validation:template > dj-validation-results.json
+npm run validation:analyze -- dj-validation-results.json
+```
+
+The analyzer validates pinned engine settings, streams and verifies artifact hashes, preflight
+results and zero-underrun audio blocks. It also checks trial balance, exact ABX
+statistics, repeated cues and live-control criteria. Its report includes the
+SHA-256 digest of the input file.
+
 The current engineering gap audit is in
 [`REFERENCE_ENGINE_GAP_AUDIT.md`](./REFERENCE_ENGINE_GAP_AUDIT.md). It compares
 this engine with `../yl.vin/apps/play` and separates deliberate improvements

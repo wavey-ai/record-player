@@ -760,7 +760,9 @@ Automated checks do not establish subjective vinyl similarity or tactile
 quality. The outstanding blind listening, control-task and free-performance
 procedure is specified in
 [`DJ_VALIDATION_PROTOCOL.md`](./DJ_VALIDATION_PROTOCOL.md); this API reference
-does not claim results from that human validation.
+does not claim results from that human validation. Create the versioned results
+file with `npm run validation:template`. Apply the pre-registered acceptance
+rules with `npm run validation:analyze -- <file>`.
 
 
 ## Transport motor
