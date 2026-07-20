@@ -214,6 +214,15 @@ impl ScratchGate {
         self.update_phase();
     }
 
+    /// Starts a recorded performance from one defined gate state while
+    /// retaining its selected technique and click count.
+    pub fn reset_for_replay(&mut self) {
+        let preset = self.preset;
+        let clicks = self.clicks;
+        *self = Self::new(preset);
+        self.set_clicks(clicks);
+    }
+
     pub fn gate(&self) -> f64 {
         self.gate
     }

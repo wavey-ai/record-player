@@ -450,13 +450,20 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
           ));
         }
         const position = this.clampPosition(Number(initial.positionFrames) || 0);
+        const rotationTurns = (Number(initial.rotationDegrees) || 0) / 360;
+        const replaySeed = Math.trunc(Number(performance.replaySeed) || 0) >>> 0;
+        if (!this.applyDspControl("begin-deterministic-replay", () => {
+          this.dsp.beginDeterministicReplay(position, rotationTurns, replaySeed);
+        })) {
+          this.finishReplay(true, currentFrame, { requestWindow: false });
+          break;
+        }
         this.playbackRate = Number.isFinite(initial.playbackRate) ? initial.playbackRate : this.playbackRate;
         this.motorRunning = Boolean(initial.motorRunning);
         this.playing = Boolean(initial.playing);
         this.needleLifted = Boolean(initial.needleLifted);
         this.active = true;
-        this.dsp.start();
-        this.dsp.setPosition(position, 0);
+        this.lastPosition = position;
         this.dsp.setNeedleLifted(this.needleLifted);
         this.dsp.setTransport(false, this.motorRate(), 0);
         this.ensureWindowForPosition(position, { resetPosition: true, pauseFrame: currentFrame });

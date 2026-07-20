@@ -8,13 +8,16 @@ is made.
 
 Current automated evidence:
 
-- `cargo test --workspace`: 86 tests (81 `record-player`, 5 `player-wasm`).
+- `cargo test --workspace`: 87 tests (82 `record-player`, 5 `player-wasm`).
 - `node --test test/*.test.mjs`: 64 tests. The canvas test checks audio-owned
   phase at half-speed forward, full-speed reverse and rest.
 - `npm run build`: both browser WASM packages build in release mode.
 - `npm run bench:worklet`: two release-WASM runs measured p95 at `1.44–1.45%`
   normal and `7.80–7.86%` for alternating `±8×` crab/8. Fresh six-second
   stereo PCM window p95 was `2.55–3.52%` against a `2.667 ms` quantum.
+- The release-WASM harness requires identical output SHA-256 and gate traces
+  when 2,176 live frames separate two runs of the same take. It verifies
+  preset, click and manual-fader events at four exact sub-quantum offsets.
 - `npm run test:browser`: Chrome 150 loaded real release WASM at 44.1 kHz.
   It exercised all eight gates in both directions and captured rendered audio.
   It recorded, replayed and restored a take with more than 400 events.
@@ -280,6 +283,9 @@ Acceptance evidence:
 - Snapshot and restore motor, playing, needle, effects, preset/gate and final
   output-gain state in Rust on completion and cancellation; keep host/core
   public state untouched throughout replay.
+- Store a stable replay seed and initial platter angle. Initialize replay-only
+  mechanics, wow/flutter, noise, filters, limiter and gate state in Rust so a
+  take never inherits mutable live DSP phase.
 - Validate/migrate IndexedDB records instead of blindly accepting arbitrary shapes.
 
 Acceptance evidence:

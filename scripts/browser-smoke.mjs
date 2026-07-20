@@ -498,7 +498,10 @@ async function runBrowserScenario() {
   const recordedTake = await player.stopScratchRecording({ save: false });
   assert(recordedTake?.events?.length > 10, "The browser scratch take did not record engine events");
   assert(recordedTake.schemaVersion === 2, "The browser scratch take did not use schema version 2");
+  assert(recordedTake.engine?.version === 3, "The browser scratch take did not use deterministic replay engine version 3");
   assert(recordedTake.engine?.gateAlgorithmVersion === 3, "The browser scratch take did not identify gate algorithm version 3");
+  assert(Number.isInteger(recordedTake.replaySeed) && recordedTake.replaySeed > 0, "The browser scratch take did not store a replay seed");
+  assert(Number.isFinite(recordedTake.initialState?.rotationDegrees), "The browser scratch take did not store its platter angle");
   let replayObserved = false;
   const unsubscribeReplay = player.subscribe(snapshot => {
     replayObserved ||= Boolean(snapshot.scratchReplayActive);
@@ -603,6 +606,9 @@ async function runBrowserScenario() {
     replay: {
       eventCount: recordedTake.events.length,
       durationFrames: recordedTake.durationFrames,
+      engineVersion: recordedTake.engine.version,
+      replaySeedStored: Number.isInteger(recordedTake.replaySeed),
+      rotationStored: Number.isFinite(recordedTake.initialState.rotationDegrees),
       completedAndRestored: true,
     },
     traces: Object.fromEntries(Object.entries(traces).map(([name, trace]) => [name, {

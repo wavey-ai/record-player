@@ -48,6 +48,7 @@ const CONTACT_IMPULSE_DECAY: f64 = 0.985;
 const WINDOW_REQUEST_MARGIN_SECONDS: f64 = 0.75;
 const WINDOW_REQUEST_PROJECT_SECONDS: f64 = 0.18;
 const WINDOW_MISS_FADE_SECONDS: f64 = 0.006;
+const DEFAULT_REPLAY_NOISE_SEED: u32 = 0x9e37_79b9;
 
 // Needle-surface bed and needle-drop foley (original: player.js 3915–4249).
 const LEAD_IN_STATIC_GAIN: f64 = 0.048;
@@ -490,7 +491,7 @@ impl ScratchAcousticDsp {
             ended: false,
             contact_impulse: 0.0,
             last_effective_rate: 0.0,
-            noise_seed: 0x9e37_79b9,
+            noise_seed: DEFAULT_REPLAY_NOISE_SEED,
             last_noise: 0.0,
             last_output_samples: Vec::new(),
             window_miss_frames: 0,
@@ -910,6 +911,62 @@ impl ScratchAcousticDsp {
         self.needle_thump = snapshot.needle_thump;
         self.needle_burst = snapshot.needle_burst;
         true
+    }
+
+    /// Reinitializes every dynamic input that can color a recorded take.
+    /// The caller must capture the live state first and restore it after the
+    /// replay transaction. Static PCM, surface assets and selected controls
+    /// remain in place.
+    #[wasm_bindgen(js_name = beginDeterministicReplay)]
+    pub fn begin_deterministic_replay(
+        &mut self,
+        position: f64,
+        rotation_turns: f64,
+        replay_seed: u32,
+    ) -> Result<(), JsValue> {
+        if !position.is_finite() {
+            return Err(JsValue::from_str("replay position must be finite"));
+        }
+        if !rotation_turns.is_finite() {
+            return Err(JsValue::from_str("replay rotationTurns must be finite"));
+        }
+
+        self.active = true;
+        self.position = self.clamp_source_position(position);
+        self.target_position = self.position;
+        self.rate = 0.0;
+        self.rate_velocity = 0.0;
+        self.target_rate = 0.0;
+        self.wow_phase = rotation_turns.rem_euclid(1.0);
+        self.flutter_phase = f64::from(replay_seed) / (f64::from(u32::MAX) + 1.0);
+        self.platter_rotation_turns = rotation_turns;
+        self.drag_lowpass_state.clear();
+        self.high_frequency_acceleration_limiter.reset();
+        self.hand_contact = false;
+        self.grip = 0.0;
+        self.motor_rate = 0.0;
+        self.motor_delivered_rate = 0.0;
+        self.unpowered_throw_rate = 0.0;
+        self.ended = false;
+        self.contact_impulse = 0.0;
+        self.last_effective_rate = 0.0;
+        self.noise_seed = if replay_seed == 0 {
+            DEFAULT_REPLAY_NOISE_SEED
+        } else {
+            replay_seed
+        };
+        self.last_noise = 0.0;
+        self.last_output_samples.clear();
+        self.window_miss_frames = 0;
+        self.frames_since_motion = 0;
+        self.frames_since_window_request = self.output_sample_rate as usize;
+        self.requested_window_position = None;
+        self.scratch_gate.reset_for_replay();
+        self.scratch_gate_trace.clear();
+        self.surface_bed = None;
+        self.needle_thump = None;
+        self.needle_burst = None;
+        Ok(())
     }
 
     #[wasm_bindgen(js_name = setHighFrequencyAccelerationLimit)]
@@ -2802,6 +2859,75 @@ mod tests {
         dsp.render(32, 2);
         assert!(dsp.last_effective_rate > 0.99);
         assert!(dsp.output.iter().any(|sample| *sample != 0.0));
+    }
+
+    #[test]
+    fn deterministic_replay_initialization_resets_dynamic_state_and_restores_live_state() {
+        let mut dsp = simulation_dsp();
+        dsp.start();
+        dsp.set_position(2_400_000.0, 0.0);
+        dsp.set_transport(false, 1.0, 0.0);
+        dsp.motor_delivered_rate = 0.81;
+        dsp.rate = 0.77;
+        dsp.wow_phase = 0.63;
+        dsp.flutter_phase = 0.42;
+        dsp.noise_seed = 17;
+        dsp.manual_fader_gain = 0.73;
+        dsp.capture_replay_state();
+
+        dsp.set_scratch_preset("crab").unwrap();
+        dsp.set_scratch_clicks(8);
+        dsp.set_manual_fader_gain(0.4).unwrap();
+        dsp.set_output_gain(0.75, 0.0).unwrap();
+        dsp.begin_deterministic_replay(24_000.0, -2.25, 0x4d2c_6df3)
+            .unwrap();
+        let first = (
+            dsp.position,
+            dsp.wow_phase,
+            dsp.flutter_phase,
+            dsp.platter_rotation_turns,
+            dsp.noise_seed,
+            dsp.scratch_gate(),
+            dsp.scratch_gate_phase(),
+            dsp.scratch_direction(),
+        );
+        assert_eq!(dsp.scratch_preset(), "crab");
+        assert_eq!(dsp.scratch_clicks(), 8);
+        assert_eq!(dsp.manual_fader_gain(), 0.4);
+        assert_eq!(dsp.output_gain_current, 0.75);
+        assert!(dsp.drag_lowpass_state.is_empty());
+        assert!(dsp.last_output_samples.is_empty());
+        assert!(dsp.surface_bed.is_none());
+        assert!(dsp.needle_thump.is_none());
+        assert!(dsp.needle_burst.is_none());
+
+        dsp.set_transport(true, 0.0, -4.0);
+        dsp.set_motion(23_000.0, -4.0, 0.8);
+        dsp.render(2_048, 2);
+        assert_ne!(dsp.noise_seed, first.4);
+        dsp.begin_deterministic_replay(24_000.0, -2.25, 0x4d2c_6df3)
+            .unwrap();
+        let second = (
+            dsp.position,
+            dsp.wow_phase,
+            dsp.flutter_phase,
+            dsp.platter_rotation_turns,
+            dsp.noise_seed,
+            dsp.scratch_gate(),
+            dsp.scratch_gate_phase(),
+            dsp.scratch_direction(),
+        );
+        assert_eq!(second, first);
+
+        assert!(dsp.restore_replay_state());
+        assert_eq!(dsp.position, 2_400_000.0);
+        assert_eq!(dsp.motor_delivered_rate, 0.81);
+        assert_eq!(dsp.rate, 0.77);
+        assert_eq!(dsp.wow_phase, 0.63);
+        assert_eq!(dsp.flutter_phase, 0.42);
+        assert_eq!(dsp.noise_seed, 17);
+        assert_eq!(dsp.manual_fader_gain, 0.73);
+        assert_eq!(dsp.scratch_preset(), "baby");
     }
 
     #[test]

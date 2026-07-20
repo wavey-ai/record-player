@@ -3109,6 +3109,7 @@ function scratchInitialState() {
   const view = deckView();
   return {
     positionFrames: state.positionFrames,
+    rotationDegrees: state.rotation,
     rpm: state.rpm,
     nativeRpm: state.baseRpm,
     playbackRate: state.baseRpm > 0 ? state.rpm / state.baseRpm : 1,
@@ -3174,7 +3175,7 @@ function createScratchRecorder({ name = "" } = {}) {
         durationMs: durationFrames / outputSampleRate * 1000,
         engine: {
           name: "vin.yl.player.acoustic",
-          version: 2,
+          version: 3,
           gateAlgorithmVersion: SCRATCH_GATE_ALGORITHM_VERSION,
           recordProfile: elements.metaProfile?.textContent || "",
           nativeRpm: state.baseRpm

@@ -45,6 +45,7 @@ test("schema v2 preserves equal-frame ordering and normalizes controls", () => {
     initialState: {
       preset: "FLARE",
       clicks: 99,
+      rotationDegrees: -725.5,
       highFrequencyAccelerationLimit: 2,
       stylusTracingLimit: -1,
     },
@@ -64,10 +65,23 @@ test("schema v2 preserves equal-frame ordering and normalizes controls", () => {
   assert.equal(normalized.events[1].clicks, 1);
   assert.equal(normalized.events[2].preset, "crab");
   assert.equal(normalized.initialState.clicks, 8);
+  assert.equal(normalized.initialState.rotationDegrees, -725.5);
   assert.equal(normalized.initialState.highFrequencyAccelerationLimit, 1);
   assert.equal(normalized.initialState.stylusTracingLimit, 0);
   assert.equal(SCRATCH_GATE_ALGORITHM_VERSION, 3);
   assert.equal(normalized.engine.gateAlgorithmVersion, 3);
+  assert.ok(Number.isInteger(normalized.replaySeed));
+  assert.ok(normalized.replaySeed > 0);
+  assert.equal(normalizeScratchPerformance(normalized).replaySeed, normalized.replaySeed);
+
+  const anotherTake = normalizeScratchPerformance({
+    id: "another-v2",
+    schemaVersion: 2,
+    sourceSampleRate: 48_000,
+    outputSampleRate: 48_000,
+    events: [],
+  });
+  assert.notEqual(anotherTake.replaySeed, normalized.replaySeed);
 
   const historical = normalizeScratchPerformance({
     schemaVersion: 2,

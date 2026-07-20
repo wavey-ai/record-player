@@ -36,6 +36,7 @@ const MAX_EVENTS = 65_536;
 const MAX_EVENTS_PER_RENDER_QUANTUM = 128;
 const RENDER_QUANTUM_FRAMES = 128;
 const MAX_RATE = 16;
+const DEFAULT_REPLAY_SEED = 0x9e3779b9;
 
 function finite(value, fallback = 0) {
   const number = Number(value);
@@ -50,6 +51,19 @@ function positiveRate(value, fallback = 48_000) {
 
 function clamp(value, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, finite(value, minimum)));
+}
+
+function normalizeReplaySeed(value, identity) {
+  const explicit = Number(value);
+  if (Number.isFinite(explicit)) return (Math.trunc(explicit) >>> 0) || DEFAULT_REPLAY_SEED;
+  const text = String(identity || "");
+  if (!text) return DEFAULT_REPLAY_SEED;
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash || DEFAULT_REPLAY_SEED;
 }
 
 export function normalizeScratchPreset(value, fallback = "baby") {
@@ -70,6 +84,7 @@ function normalizeInitialState(value, sourceScale, { legacy = false } = {}) {
   const preset = normalizeScratchPreset(initial.preset);
   return {
     positionFrames: Math.max(0, finite(initial.positionFrames) * sourceScale),
+    rotationDegrees: finite(initial.rotationDegrees),
     rpm: Math.max(0, finite(initial.rpm, 33.3333333333)),
     nativeRpm: Math.max(1, finite(initial.nativeRpm, 33.3333333333)),
     playbackRate: clamp(initial.playbackRate ?? 1, -MAX_RATE, MAX_RATE),
@@ -184,6 +199,7 @@ export function normalizeScratchPerformance(performance, target = {}) {
     recordHash: String(performance.recordHash || ""),
     releaseId: String(performance.releaseId || ""),
     createdAt: String(performance.createdAt || ""),
+    replaySeed: normalizeReplaySeed(performance.replaySeed, performance.id),
     sourceSampleRate,
     outputSampleRate,
     durationFrames,

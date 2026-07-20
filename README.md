@@ -489,10 +489,10 @@ events at their exact output-frame boundaries, including boundaries inside a
 more than 128 events in any 128-frame output window so an imported performance
 cannot monopolize the realtime thread.
 
-A v2 recording also carries the gate algorithm version, initial preset and
-click count, manual-crossfader position, fader curve, and both HF/stylus limit
-strengths. Preset, click and manual-crossfader changes are frame-timed events.
-The essential shape is:
+A v2 recording also carries a stable replay seed, initial platter angle, gate
+algorithm version, preset and click count, manual-crossfader position, fader
+curve, and both HF/stylus limit strengths. Preset, click and
+manual-crossfader changes are frame-timed events. The essential shape is:
 
 ```js
 {
@@ -500,9 +500,11 @@ The essential shape is:
   sourceSampleRate: 48000,
   outputSampleRate: 48000,
   durationFrames,
-  engine: { gateAlgorithmVersion: 3 },
+  replaySeed,
+  engine: { version: 3, gateAlgorithmVersion: 3 },
   initialState: {
     positionFrames,
+    rotationDegrees,
     preset: "flare",
     clicks: 1,
     manualCrossfader: 0.5,
@@ -516,11 +518,19 @@ The essential shape is:
 }
 ```
 
+Replay snapshots the live Rust DSP, then starts the take from its recorded seed
+and platter angle. Rust resets the replay-only mechanical, wow/flutter, surface,
+filter, limiter and gate dynamics. The same take therefore produces the same
+gate trace and rendered bytes even after live playback advances. Completion or
+cancellation restores the exact live snapshot.
+
 Schema v1 remains readable. Migration treats its single `sampleRate` as both
 legacy clocks, then scales source positions and output event offsets/duration
 independently onto the current clocks. Missing gate data becomes `baby` with
 one click and the sharp manual-fader curve; the two newer limit strengths are
-set to exact bypass (`0`) so an old take does not acquire new coloration.
+set to exact bypass (`0`) so an old take does not acquire new coloration. An
+older take derives a stable replay seed from its ID and defaults its missing
+platter angle to zero.
 
 Start and stop the default recorder:
 

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { access, readFile } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
@@ -632,6 +633,147 @@ function verifyFarWindowReplayCancellation() {
   assert.ok(Math.abs(unavailableProcessor.dsp.effectiveRate - unavailableOriginalRate) < 0.000001);
 }
 
+function hashReplayOutput(channelBlocks) {
+  const hash = createHash("sha256");
+  for (const channel of channelBlocks) {
+    for (const block of channel) {
+      hash.update(new Uint8Array(block.buffer, block.byteOffset, block.byteLength));
+    }
+  }
+  return hash.digest("hex");
+}
+
+function captureReplayEvidence(processor, id, scratchPerformance) {
+  const channelBlocks = Array.from({ length: CHANNEL_COUNT }, () => []);
+  const gateTrace = [];
+  const controlTrace = [];
+  let renderedFrames = 0;
+  const originalRender = processor.dsp.render.bind(processor.dsp);
+  const originalSetPreset = processor.dsp.setScratchPreset.bind(processor.dsp);
+  const originalSetClicks = processor.dsp.setScratchClicks.bind(processor.dsp);
+  const originalSetManualCrossfader = processor.dsp.setManualCrossfader.bind(processor.dsp);
+  processor.dsp.render = (frameCount, channelCount) => {
+    const rendered = originalRender(frameCount, channelCount);
+    renderedFrames += frameCount;
+    gateTrace.push({
+      frameOffset: renderedFrames,
+      gate: processor.dsp.scratchGate,
+      phase: processor.dsp.scratchGatePhase,
+      direction: processor.dsp.scratchDirection,
+    });
+    return rendered;
+  };
+  processor.dsp.setScratchPreset = preset => {
+    controlTrace.push({ type: "scratch-preset", frameOffset: renderedFrames, value: preset });
+    return originalSetPreset(preset);
+  };
+  processor.dsp.setScratchClicks = clicks => {
+    controlTrace.push({ type: "scratch-clicks", frameOffset: renderedFrames, value: clicks });
+    return originalSetClicks(clicks);
+  };
+  processor.dsp.setManualCrossfader = value => {
+    controlTrace.push({ type: "manual-crossfader", frameOffset: renderedFrames, value });
+    return originalSetManualCrossfader(value);
+  };
+
+  try {
+    processor.handleMessage({
+      type: "replay-scratch",
+      id,
+      performance: scratchPerformance,
+      effectsMode: "original",
+    });
+    assert.ok(processor.replay, `deterministic replay ${id} did not start`);
+    // Initial-state controls are applied before frame zero. Keep only the
+    // scheduled event trace below.
+    controlTrace.length = 0;
+    let quantumCount = 0;
+    while (processor.replay && quantumCount < 32) {
+      const output = createOutput();
+      renderQuantum(processor, output);
+      for (let channel = 0; channel < CHANNEL_COUNT; channel += 1) {
+        channelBlocks[channel].push(output[0][channel].slice());
+      }
+      quantumCount += 1;
+    }
+    assert.equal(processor.replay, null, `deterministic replay ${id} did not finish`);
+    assert.equal(renderedFrames, scratchPerformance.durationFrames);
+  } finally {
+    processor.dsp.render = originalRender;
+    processor.dsp.setScratchPreset = originalSetPreset;
+    processor.dsp.setScratchClicks = originalSetClicks;
+    processor.dsp.setManualCrossfader = originalSetManualCrossfader;
+  }
+
+  return {
+    outputHash: hashReplayOutput(channelBlocks),
+    gateTrace,
+    controlTrace,
+    channelBlocks,
+  };
+}
+
+function verifyDeterministicReplay() {
+  globalThis.currentFrame = 0;
+  globalThis.currentTime = 0;
+  const processor = createProcessor();
+  warmStablePlayback(processor, 64);
+  const scratchPerformance = {
+    durationFrames: FRAME_COUNT * 4,
+    replaySeed: 0x4d2c6df3,
+    effects: { acoustic: true, surface: true },
+    initialState: {
+      positionFrames: WINDOW_CENTER,
+      playbackRate: 1,
+      motorRunning: true,
+      playing: true,
+      needleLifted: false,
+      manualCrossfader: 0,
+      preset: "flare",
+      clicks: 2,
+      nativeRpm: 33.3333333333,
+      highFrequencyAccelerationLimit: 0.35,
+      stylusTracingLimit: 0.72,
+    },
+    events: [
+      { type: "scratch-start", frameOffset: 0, positionFrames: WINDOW_CENTER, rate: 1.4, impulse: 0.4 },
+      { type: "scratch-motion", frameOffset: 37, positionFrames: WINDOW_CENTER + 420, rate: 1.7, impulse: 0 },
+      { type: "scratch-preset", frameOffset: 83, preset: "crab" },
+      { type: "scratch-clicks", frameOffset: 91, clicks: 8 },
+      { type: "manual-crossfader", frameOffset: 155, value: 1 },
+      { type: "scratch-motion", frameOffset: 233, positionFrames: WINDOW_CENTER - 360, rate: -2.1, impulse: 0.25 },
+      { type: "manual-crossfader", frameOffset: 301, value: 0 },
+      { type: "scratch-end", frameOffset: 447, positionFrames: WINDOW_CENTER - 120, rate: 0, impulse: 0, resumePlayback: true },
+    ],
+  };
+
+  const first = captureReplayEvidence(processor, 101, scratchPerformance);
+  // A saved take must not inherit the live deck's later wow, noise or platter
+  // phase. Advance ordinary playback before the second run to prove that the
+  // recording, rather than invocation time, defines the rendered result.
+  warmStablePlayback(processor, 17);
+  const second = captureReplayEvidence(processor, 102, scratchPerformance);
+  assert.match(first.outputHash, /^[0-9a-f]{64}$/);
+  assert.equal(second.outputHash, first.outputHash, "identical replays produced different output hashes");
+  assert.deepEqual(second.gateTrace, first.gateTrace, "identical replays produced different gate traces");
+  assert.deepEqual(first.controlTrace, [
+    { type: "scratch-preset", frameOffset: 83, value: "crab" },
+    { type: "scratch-clicks", frameOffset: 91, value: 8 },
+    { type: "manual-crossfader", frameOffset: 155, value: 1 },
+    { type: "manual-crossfader", frameOffset: 301, value: 0 },
+  ], "replay controls did not apply on their requested sub-quantum frames");
+  assert.ok(
+    first.channelBlocks.some(channel => channel.some(block => channelEnergy(block, 0, block.length) > 0.01)),
+    "deterministic replay fixture rendered only silence",
+  );
+  return {
+    outputHash: first.outputHash,
+    gateSegments: first.gateTrace.length,
+    controlEvents: first.controlTrace.length,
+    interveningPlaybackFrames: 17 * FRAME_COUNT,
+  };
+}
+
 function benchmark(label, processor, beforeQuantum, afterQuantum) {
   const output = createOutput();
   globalThis.currentFrame = 0;
@@ -672,6 +814,7 @@ verifyEofHandoffs();
 verifyReplayDurationBoundary();
 verifyReplayControlInterruption();
 verifyFarWindowReplayCancellation();
+const deterministicReplay = verifyDeterministicReplay();
 
 const freshWindowApplication = benchmarkFreshWindowApplication();
 
@@ -723,6 +866,12 @@ console.log(
 );
 console.log(formatResult("Normal playback", normal));
 console.log(formatResult("Reversing +/-8x crab/8", scratch));
+console.log(
+  `Deterministic replay        | SHA-256 ${deterministicReplay.outputHash}`
+  + ` | ${deterministicReplay.gateSegments} gate segments`
+  + ` | ${deterministicReplay.controlEvents} sub-quantum controls`
+  + ` | ${deterministicReplay.interveningPlaybackFrames} live frames between runs`,
+);
 console.log(
   formatResult(
     `Fresh ${WINDOW_FRAMES / SAMPLE_RATE}s PCM window`,

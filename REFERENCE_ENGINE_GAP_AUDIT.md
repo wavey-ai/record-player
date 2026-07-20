@@ -74,7 +74,7 @@ The audit compared those files with:
 | PCM windows | Four-second reference windows | Two six-second bounded banks | Covered |
 | Seam repair | Reference window assembly | Authoritative 24-sample repair | Covered |
 | Capture | Throttled telemetry | Versioned output-frame events | Beyond reference |
-| Replay | Frame-driven re-performance | Sub-quantum events plus Rust snapshot | Beyond reference |
+| Replay | Frame-driven re-performance | Deterministic seed/phase, sub-quantum events and Rust snapshot | Beyond reference |
 | TAPE master source | Sample-aligned HQ sidecar switch | Same local/remote source and window replacement | Covered |
 | Manual fader | Mixer automation | Independent Rust post-gate gain | Beyond reference |
 | Advanced controls | Not present as this pair | HF limit and stylus limit dropdown | Beyond reference |
@@ -138,7 +138,7 @@ measured audio-thread reason to make either change.
 
 ## Automated evidence
 
-- `cargo test --workspace`: 86 tests.
+- `cargo test --workspace`: 87 tests.
 - `node --test test/*.test.mjs`: 64 tests.
 - The canvas regression anchors the visible platter to audio-owned phase and
   covers half-speed forward motion, full-speed reverse motion and zero-rate
@@ -149,6 +149,10 @@ measured audio-thread reason to make either change.
   application to p95 `2.55–3.52%` across the same runs.
 - Regression gates now require window-application p95 below `25%` and maximum
   below `50%` of a quantum.
+- Release WASM replays the same mixed preset/click/fader take twice with 2,176
+  live playback frames between runs. It requires identical SHA-256 output and
+  gate traces. It also verifies controls at frame offsets `83`, `91`, `155` and
+  `301`.
 - `npm run test:browser`: real Chrome 150 and real release WASM passed.
 - The Chrome run exercised every preset in both directions.
 - Chrome intercepted the actual worklet seek messages. It verified that active
