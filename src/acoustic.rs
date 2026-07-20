@@ -27,6 +27,8 @@ const BEARING_THROW_DECAY_SECONDS: f64 = 0.85;
 const DRAG_LOWPASS_MAX_HZ: f64 = 19_000.0;
 const DRAG_LOWPASS_RATE_KNEE: f64 = 0.95;
 const TRACING_LOSS_START_RATE: f64 = 2.5;
+const HF_ACCELERATION_THRESHOLD: f64 = 0.65;
+const HF_ACCELERATION_FULL_SCALE: f64 = 3.0;
 const WOW_REV_SECONDS: f64 = 1.8;
 const FLUTTER_HZ: f64 = 6.4;
 const CONTACT_NOISE_GAIN: f64 = 0.00008;
@@ -135,6 +137,10 @@ pub struct AcousticConfig {
     pub acoustic_enabled: bool,
     #[serde(default = "default_true")]
     pub surface_enabled: bool,
+    /// Soft cartridge tracing limit. `0` disables it; `1` applies the full
+    /// signal- and velocity-dependent high-frequency acceleration model.
+    #[serde(default = "default_hf_acceleration_limit")]
+    pub high_frequency_acceleration_limit: f64,
 }
 
 fn default_max_rate() -> f64 {
@@ -149,6 +155,9 @@ fn default_flutter_hz() -> f64 {
 fn default_true() -> bool {
     true
 }
+fn default_hf_acceleration_limit() -> f64 {
+    0.72
+}
 
 impl Default for AcousticConfig {
     fn default() -> Self {
@@ -158,6 +167,7 @@ impl Default for AcousticConfig {
             flutter_hz: default_flutter_hz(),
             acoustic_enabled: true,
             surface_enabled: true,
+            high_frequency_acceleration_limit: default_hf_acceleration_limit(),
         }
     }
 }
@@ -189,6 +199,7 @@ pub struct ScratchAcousticDsp {
     target_rate: f64,
     wow_phase: f64,
     flutter_phase: f64,
+    platter_rotation_turns: f64,
     drag_lowpass_state: Vec<f64>,
     active: bool,
     needle_lifted: bool,
@@ -234,6 +245,11 @@ impl ScratchAcousticDsp {
         if !config.max_rate.is_finite() || config.max_rate <= 0.0 {
             return Err(JsValue::from_str("maxRate must be positive"));
         }
+        if !valid_unit_interval(config.high_frequency_acceleration_limit) {
+            return Err(JsValue::from_str(
+                "highFrequencyAccelerationLimit must be between 0 and 1",
+            ));
+        }
         Ok(Self::new_internal(output_sample_rate, config))
     }
 
@@ -255,6 +271,7 @@ impl ScratchAcousticDsp {
             target_rate: 0.0,
             wow_phase: 0.0,
             flutter_phase: 0.0,
+            platter_rotation_turns: 0.0,
             drag_lowpass_state: Vec::new(),
             active: false,
             needle_lifted: false,
@@ -462,6 +479,22 @@ impl ScratchAcousticDsp {
         }
     }
 
+    #[wasm_bindgen(js_name = setHighFrequencyAccelerationLimit)]
+    pub fn set_high_frequency_acceleration_limit(&mut self, strength: f64) -> Result<(), JsValue> {
+        if !valid_unit_interval(strength) {
+            return Err(JsValue::from_str(
+                "highFrequencyAccelerationLimit must be between 0 and 1",
+            ));
+        }
+        self.config.high_frequency_acceleration_limit = strength;
+        Ok(())
+    }
+
+    #[wasm_bindgen(getter, js_name = highFrequencyAccelerationLimit)]
+    pub fn high_frequency_acceleration_limit(&self) -> f64 {
+        self.config.high_frequency_acceleration_limit
+    }
+
     #[wasm_bindgen(js_name = setScratchPreset)]
     pub fn set_scratch_preset(&mut self, name: &str) -> Result<(), JsValue> {
         let preset = name
@@ -533,6 +566,11 @@ impl ScratchAcousticDsp {
     #[wasm_bindgen(getter, js_name = nativeRpm)]
     pub fn native_rpm(&self) -> f64 {
         self.native_rpm
+    }
+
+    #[wasm_bindgen(getter, js_name = platterRotationTurns)]
+    pub fn platter_rotation_turns(&self) -> f64 {
+        self.platter_rotation_turns
     }
 
     #[wasm_bindgen(js_name = setMotion)]
@@ -700,6 +738,8 @@ impl ScratchAcousticDsp {
             } else {
                 corrected_rate
             };
+            self.platter_rotation_turns +=
+                effective_rate * self.native_rpm / (60.0 * self.output_sample_rate);
             self.scratch_gate_trace[frame] =
                 self.scratch_gate
                     .process(dt, self.hand_contact, hand_rate, effective_rate)
@@ -782,7 +822,13 @@ impl ScratchAcousticDsp {
                     }
                     Some((sampled, slope, curvature)) => {
                         let drag_state = self.drag_lowpass_state[channel_index];
-                        let filtered = drag_state + (sampled - drag_state) * drag_alpha;
+                        let tracing_alpha = tracing_acceleration_alpha(
+                            drag_alpha,
+                            curvature,
+                            abs_rate,
+                            self.config.high_frequency_acceleration_limit,
+                        );
+                        let filtered = drag_state + (sampled - drag_state) * tracing_alpha;
                         self.drag_lowpass_state[channel_index] = filtered;
                         let music = filtered * movement_gain * OUTPUT_GAIN;
                         self.last_output_samples[channel_index] = music;
@@ -898,6 +944,8 @@ impl ScratchAcousticDsp {
             } else {
                 self.rate
             };
+            self.platter_rotation_turns +=
+                self.last_effective_rate * self.native_rpm / (60.0 * self.output_sample_rate);
             self.scratch_gate_trace[frame] = self.scratch_gate.process(dt, false, 0.0, 0.0) as f32;
         }
         self.mix_foley(frame_count, output_channel_count);
@@ -1434,6 +1482,10 @@ fn finite_or_zero(value: f64) -> f64 {
     }
 }
 
+fn valid_unit_interval(value: f64) -> bool {
+    value.is_finite() && (0.0..=1.0).contains(&value)
+}
+
 fn sign_nonzero(primary: f64, fallback: f64) -> f64 {
     if primary != 0.0 {
         primary.signum()
@@ -1458,6 +1510,36 @@ fn compute_movement_gain(abs_rate: f64) -> f64 {
         overspeed
     };
     (acoustic + realtime_presence * 0.025).clamp(0.68, 1.08)
+}
+
+/// Approximate the finite acceleration a cartridge can trace. Curvature is the
+/// local second difference of groove displacement; traversing it faster raises
+/// acceleration with velocity squared. Instead of hard clipping that demand,
+/// reduce the existing tracing-filter cutoff through a smooth knee.
+fn tracing_acceleration_alpha(
+    base_alpha: f64,
+    curvature: f64,
+    abs_rate: f64,
+    strength: f64,
+) -> f64 {
+    let base_alpha = finite_or_zero(base_alpha).clamp(0.0, 1.0);
+    let strength = finite_or_zero(strength).clamp(0.0, 1.0);
+    if strength <= 0.0 || abs_rate <= 0.75 || curvature == 0.0 {
+        return base_alpha;
+    }
+    let demand = curvature.abs() * abs_rate * abs_rate;
+    let overload = smoothstep_unit(
+        (demand - HF_ACCELERATION_THRESHOLD)
+            / (HF_ACCELERATION_FULL_SCALE - HF_ACCELERATION_THRESHOLD),
+    );
+    let velocity_presence = smoothstep_unit((abs_rate - 0.75) / (4.0 - 0.75));
+    let cutoff_scale = (1.0 - strength * overload * velocity_presence).clamp(0.16, 1.0);
+    1.0 - (1.0 - base_alpha).powf(cutoff_scale)
+}
+
+fn smoothstep_unit(value: f64) -> f64 {
+    let value = finite_or_zero(value).clamp(0.0, 1.0);
+    value * value * (3.0 - 2.0 * value)
 }
 
 fn compute_contact_noise_gain(abs_rate: f64) -> f64 {
@@ -1652,6 +1734,23 @@ mod tests {
     }
 
     #[test]
+    fn platter_rotation_telemetry_integrates_rendered_rate() {
+        let mut dsp = simulation_dsp();
+        dsp.set_native_rpm(45.0).unwrap();
+        dsp.set_effects(false, false);
+        dsp.hand_contact = false;
+        dsp.motor_rate = 1.0;
+        dsp.motor_delivered_rate = 1.0;
+        dsp.rate = 1.0;
+        dsp.render_surface(48_000, 1);
+        assert!(
+            (dsp.platter_rotation_turns() - 0.75).abs() < 1e-6,
+            "integrated {} turns",
+            dsp.platter_rotation_turns(),
+        );
+    }
+
+    #[test]
     fn movement_gain_is_silent_in_deadzone() {
         assert_eq!(compute_movement_gain(DEADZONE_RATE * 0.5), 0.0);
     }
@@ -1662,6 +1761,34 @@ mod tests {
             let gain = compute_movement_gain(rate);
             assert!((0.0..=1.08).contains(&gain));
         }
+    }
+
+    #[test]
+    fn high_frequency_acceleration_limit_is_soft_velocity_aware_and_optional() {
+        let base_alpha = 0.90;
+        assert_eq!(
+            tracing_acceleration_alpha(base_alpha, 3.0, 0.5, 1.0),
+            base_alpha,
+        );
+        assert_eq!(
+            tracing_acceleration_alpha(base_alpha, 3.0, 4.0, 0.0),
+            base_alpha,
+        );
+        let moderate = tracing_acceleration_alpha(base_alpha, 1.0, 2.0, 0.72);
+        let demanding = tracing_acceleration_alpha(base_alpha, 3.0, 4.0, 0.72);
+        assert!((0.0..base_alpha).contains(&moderate));
+        assert!((0.0..moderate).contains(&demanding));
+    }
+
+    #[test]
+    fn high_frequency_acceleration_limit_strength_is_validated() {
+        let mut dsp = simulation_dsp();
+        dsp.set_high_frequency_acceleration_limit(0.0).unwrap();
+        assert_eq!(dsp.high_frequency_acceleration_limit(), 0.0);
+        dsp.set_high_frequency_acceleration_limit(1.0).unwrap();
+        assert_eq!(dsp.high_frequency_acceleration_limit(), 1.0);
+        assert!(!valid_unit_interval(f64::NAN));
+        assert!(!valid_unit_interval(1.1));
     }
 
     #[test]

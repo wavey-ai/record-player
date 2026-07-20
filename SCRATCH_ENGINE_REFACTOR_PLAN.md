@@ -174,6 +174,9 @@ Acceptance evidence:
 - Configure revolution-locked wow from native RPM (1.8 s at 33⅓, 1.333… s at 45).
 - Add a rate-adaptive band-limited interpolation/anti-alias path for high-speed
   forward and reverse motion, with a smooth transition from the low-latency path.
+- Add a soft cartridge-tracing acceleration limit whose high-frequency attenuation
+  depends on groove curvature and squared travel velocity; keep it adjustable so
+  normal-speed transients are not flattened by a blanket low-pass.
 - Drive canvas rotation from worklet effective rate during spin-up, pitch slew,
   braking and release rather than from an instantaneous nominal RPM flag.
 - Keep lead-in surface rendering isolated from programme sampling and complete its

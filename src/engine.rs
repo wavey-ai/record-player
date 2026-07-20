@@ -761,9 +761,11 @@ impl PlayerEngine {
                 });
             }
         } else {
+            let keep_silent_platter_running =
+                self.deck(deck).needle.lifted && self.deck(deck).transport.motor_on;
             self.commands.push(HostCommand::StopPacketPlayback {
                 deck,
-                platter_handoff: false,
+                platter_handoff: keep_silent_platter_running,
             });
         }
         self.commands.push(HostCommand::RefreshView);
@@ -1013,36 +1015,39 @@ mod tests {
     }
     #[test]
     fn scratch_positions_use_the_programme_source_clock() {
-        let mut e = PlayerEngine::default();
-        ready(&mut e);
-        e.dispatch(PlayerEvent::SetSourceSampleRate {
-            deck: DeckId::A,
-            sample_rate: 44_100.0,
-        })
-        .unwrap();
-        e.dispatch(PlayerEvent::TogglePlayback { deck: DeckId::A })
+        for source_rate in [44_100.0, 48_000.0, 96_000.0] {
+            let mut e = PlayerEngine::default();
+            ready(&mut e);
+            e.dispatch(PlayerEvent::SetSourceSampleRate {
+                deck: DeckId::A,
+                sample_rate: source_rate,
+            })
             .unwrap();
-        e.drain_commands();
-        e.dispatch(PlayerEvent::BeginScratch {
-            deck: DeckId::A,
-            pointer_id: 1,
-            playback_seconds: 2.0,
-            rotation_degrees: 0.0,
-        })
-        .unwrap();
-        assert!(e.drain_commands().iter().any(|command| matches!(command,
-            HostCommand::SetScratchTarget { position_frames, .. } if (*position_frames - 88_200.0).abs() < f64::EPSILON
-        )));
-        e.dispatch(PlayerEvent::EndScratch {
-            deck: DeckId::A,
-            rendered_position_frames: 132_300.0,
-            rotation_degrees: 0.0,
-            resume_playback: true,
-            save_sample: false,
-            can_platter_handoff: true,
-        })
-        .unwrap();
-        assert!((e.state().decks[0].playback.current_seconds - 3.0).abs() < f64::EPSILON);
+            e.dispatch(PlayerEvent::TogglePlayback { deck: DeckId::A })
+                .unwrap();
+            e.drain_commands();
+            e.dispatch(PlayerEvent::BeginScratch {
+                deck: DeckId::A,
+                pointer_id: 1,
+                playback_seconds: 2.0,
+                rotation_degrees: 0.0,
+            })
+            .unwrap();
+            let expected_start = source_rate * 2.0;
+            assert!(e.drain_commands().iter().any(|command| matches!(command,
+                HostCommand::SetScratchTarget { position_frames, .. } if (*position_frames - expected_start).abs() < f64::EPSILON
+            )));
+            e.dispatch(PlayerEvent::EndScratch {
+                deck: DeckId::A,
+                rendered_position_frames: source_rate * 3.0,
+                rotation_degrees: 0.0,
+                resume_playback: true,
+                save_sample: false,
+                can_platter_handoff: true,
+            })
+            .unwrap();
+            assert!((e.state().decks[0].playback.current_seconds - 3.0).abs() < f64::EPSILON);
+        }
     }
     #[test]
     fn scratching_a_lifted_record_stays_silent_and_lifted() {
@@ -1193,7 +1198,17 @@ mod tests {
                                         ..
                                     }
                                 )),
-                                !should_resume,
+                                !should_resume && !(needle_lifted && motor_on),
+                            );
+                            assert_eq!(
+                                commands.iter().any(|command| matches!(
+                                    command,
+                                    HostCommand::StopPacketPlayback {
+                                        platter_handoff: true,
+                                        ..
+                                    }
+                                )),
+                                !should_resume && needle_lifted && motor_on,
                             );
                         }
                     }
