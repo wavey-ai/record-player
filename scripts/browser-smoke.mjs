@@ -126,6 +126,18 @@ async function runBrowserScenario() {
   const assert = (condition, message) => {
     if (!condition) throw new Error(message);
   };
+  const waitUntil = async (predicate, timeoutMs, message) => {
+    const deadline = performance.now() + timeoutMs;
+    while (!predicate() && performance.now() < deadline) await wait(20);
+    assert(predicate(), message);
+  };
+  let phase = "startup";
+  let continuityWorker = null;
+  const setPhase = value => {
+    phase = value;
+    globalThis.__VINYL_BROWSER_PHASE__ = value;
+    continuityWorker?.postMessage({ type: "phase", phase: value });
+  };
   const readyDeadline = performance.now() + 10_000;
   while (!globalThis.vin?.yl?.player && performance.now() < readyDeadline) {
     await wait(25);
@@ -193,6 +205,150 @@ async function runBrowserScenario() {
   assert(globalThis.crossOriginIsolated, "The player page is not cross-origin isolated");
 
   const capture = await player.getCaptureStream();
+  function continuityWorkerEntry() {
+    let reader = null;
+    let reading = false;
+    let phase = "startup";
+    const result = {
+      supported: typeof ReadableStream === "function",
+      packets: 0,
+      frames: 0,
+      positiveTimestampDeviationCount: 0,
+      negativeTimestampDeviationCount: 0,
+      nonMonotonicTimestampCount: 0,
+      maximumAdjacentTimestampDeviationUs: 0,
+      summedDurationUs: 0,
+      firstTimestampUs: null,
+      lastEndTimestampUs: null,
+      phases: {},
+    };
+
+    async function readStream(readable) {
+      if (!result.supported || !readable) throw new Error("A transferable audio stream is unavailable");
+      reader = readable.getReader();
+      reading = true;
+      self.postMessage({ type: "ready" });
+      let expectedTimestamp = null;
+      let previousTimestamp = null;
+      while (reading) {
+        const { value, done } = await reader.read();
+        if (done || !value) break;
+        try {
+          const duration = Number(value.duration)
+            || Math.round(value.numberOfFrames / value.sampleRate * 1_000_000);
+          const timestamp = Number(value.timestamp);
+          const phaseState = result.phases[phase] ||= {
+            packets: 0,
+            frames: 0,
+            silentPackets: 0,
+            maximumSilentRunFrames: 0,
+            currentSilentRunFrames: 0,
+          };
+          phaseState.packets += 1;
+          phaseState.frames += value.numberOfFrames;
+          result.packets += 1;
+          result.frames += value.numberOfFrames;
+          result.summedDurationUs += duration;
+          if (result.firstTimestampUs == null && Number.isFinite(timestamp)) {
+            result.firstTimestampUs = timestamp;
+          }
+          if (previousTimestamp != null && timestamp <= previousTimestamp) {
+            result.nonMonotonicTimestampCount += 1;
+          }
+          if (expectedTimestamp != null && Number.isFinite(timestamp)) {
+            const delta = timestamp - expectedTimestamp;
+            const timestampToleranceUs = 1_000_000 / value.sampleRate + 2;
+            if (delta > timestampToleranceUs) {
+              result.positiveTimestampDeviationCount += 1;
+            } else if (delta < -timestampToleranceUs) {
+              result.negativeTimestampDeviationCount += 1;
+            }
+            result.maximumAdjacentTimestampDeviationUs = Math.max(
+              result.maximumAdjacentTimestampDeviationUs,
+              Math.abs(delta),
+            );
+          }
+          if (Number.isFinite(timestamp)) {
+            previousTimestamp = timestamp;
+            expectedTimestamp = timestamp + duration;
+            result.lastEndTimestampUs = expectedTimestamp;
+          }
+
+          const samples = new Float32Array(value.numberOfFrames);
+          let energy = 0;
+          for (let channel = 0; channel < value.numberOfChannels; channel += 1) {
+            value.copyTo(samples, { planeIndex: channel, format: "f32-planar" });
+            for (const sample of samples) energy += sample * sample;
+          }
+          const sampleCount = samples.length * value.numberOfChannels;
+          if (energy / Math.max(1, sampleCount) < 1e-12) {
+            phaseState.silentPackets += 1;
+            phaseState.currentSilentRunFrames += value.numberOfFrames;
+            phaseState.maximumSilentRunFrames = Math.max(
+              phaseState.maximumSilentRunFrames,
+              phaseState.currentSilentRunFrames,
+            );
+          } else {
+            phaseState.currentSilentRunFrames = 0;
+          }
+        } finally {
+          value.close();
+        }
+      }
+      for (const phaseState of Object.values(result.phases)) {
+        delete phaseState.currentSilentRunFrames;
+      }
+      result.timelineSpanUs = result.firstTimestampUs == null || result.lastEndTimestampUs == null
+        ? 0
+        : result.lastEndTimestampUs - result.firstTimestampUs;
+      result.timelineDurationErrorUs = result.timelineSpanUs - result.summedDurationUs;
+      self.postMessage({ type: "result", result });
+    }
+
+    self.onmessage = event => {
+      const message = event.data || {};
+      if (message.type === "phase") {
+        phase = String(message.phase || "unknown");
+      } else if (message.type === "start") {
+        phase = String(message.phase || phase);
+        void readStream(message.readable).catch(error => {
+          self.postMessage({ type: "error", message: error?.message || String(error) });
+        });
+      } else if (message.type === "stop") {
+        reading = false;
+        void reader?.cancel().catch(() => {});
+      }
+    };
+  }
+
+  const continuityWorkerUrl = URL.createObjectURL(new Blob([
+    `(${continuityWorkerEntry.toString()})()`,
+  ], { type: "text/javascript" }));
+  continuityWorker = new Worker(continuityWorkerUrl);
+  const continuityReady = new Promise((resolveReady, rejectReady) => {
+    continuityWorker.addEventListener("message", event => {
+      if (event.data?.type === "ready") resolveReady();
+      if (event.data?.type === "error") rejectReady(new Error(event.data.message));
+    });
+    continuityWorker.addEventListener("error", event => rejectReady(event.error || new Error(event.message)));
+  });
+  const continuityResult = new Promise((resolveResult, rejectResult) => {
+    continuityWorker.addEventListener("message", event => {
+      if (event.data?.type === "result") resolveResult(event.data.result);
+      if (event.data?.type === "error") rejectResult(new Error(event.data.message));
+    });
+    continuityWorker.addEventListener("error", event => rejectResult(event.error || new Error(event.message)));
+  });
+  assert(typeof MediaStreamTrackProcessor === "function", "MediaStreamTrackProcessor is unavailable");
+  const continuityTrack = capture.getAudioTracks()[0].clone();
+  const continuityReadable = new MediaStreamTrackProcessor({
+    track: continuityTrack,
+  }).readable;
+  continuityWorker.postMessage(
+    { type: "start", readable: continuityReadable, phase },
+    [continuityReadable],
+  );
+  await continuityReady;
   const recorder = new MediaRecorder(capture);
   const chunks = [];
   recorder.addEventListener("dataavailable", event => {
@@ -200,6 +356,25 @@ async function runBrowserScenario() {
   });
   const recorderStopped = new Promise(resolveStopped => recorder.addEventListener("stop", resolveStopped, { once: true }));
   recorder.start(100);
+
+  setPhase("lead-in");
+  await player.play();
+  await waitUntil(
+    () => player.getState().playing && !player.getState().leadInActive,
+    6_000,
+    "The real browser lead-in did not hand off to programme playback",
+  );
+  setPhase("steady-playback");
+  const steadyStartPosition = player.getState().positionFrames;
+  await wait(800);
+  assert(
+    player.getState().positionFrames > steadyStartPosition + loaded.sampleRate * 0.4,
+    "Steady browser playback did not advance on the Rust audio clock",
+  );
+  setPhase("window-swap");
+  await player.seekSeconds(9.25);
+  await wait(500);
+  assert(player.getState().positionSeconds > 8.5, "The browser window-swap seek did not apply");
 
   const presetNames = ["baby", "stab", "chirp", "transform", "flare", "crab", "orbit", "drum"];
   const traces = Object.fromEntries(presetNames.map(name => [name, {
@@ -222,7 +397,8 @@ async function runBrowserScenario() {
     }
   });
 
-  let positionFrames = loaded.sampleRate * 6;
+  setPhase("scratch-presets");
+  let positionFrames = player.getState().positionFrames;
   player.startScratchRecording({ name: "Chrome smoke" });
   const began = await player.beginScratch({
     pointerId: 41,
@@ -267,12 +443,20 @@ async function runBrowserScenario() {
   const unsubscribeReplay = player.subscribe(snapshot => {
     replayObserved ||= Boolean(snapshot.scratchReplayActive);
   });
+  setPhase("replay");
   await player.replayScratch(recordedTake, { effects: "original" });
   unsubscribeReplay();
   assert(replayObserved, "The browser did not expose the active replay transaction");
   assert(!player.getState().scratchReplayActive, "The browser replay transaction did not restore state");
   recorder.stop();
   await recorderStopped;
+  setPhase("complete");
+  continuityWorker.postMessage({ type: "stop" });
+  const continuity = await continuityResult;
+  continuityTrack.stop();
+  continuityWorker.terminate();
+  continuityWorker = null;
+  URL.revokeObjectURL(continuityWorkerUrl);
   const captureBytes = chunks.reduce((total, chunk) => total + chunk.size, 0);
 
   for (const preset of presetNames) {
@@ -288,6 +472,26 @@ async function runBrowserScenario() {
   }
   assert(captureBytes > 1_024, "The real browser capture stream did not contain rendered audio");
   assert(maximumLatencyMs > 0 && maximumLatencyMs < 250, `Pointer-to-audio latency telemetry was ${maximumLatencyMs} ms`);
+  assert(continuity.supported, "MediaStreamTrackProcessor is unavailable for continuity checks");
+  assert(continuity.packets > 100, "The browser capture did not expose enough audio packets");
+  assert(
+    continuity.nonMonotonicTimestampCount === 0,
+    `The browser capture had ${continuity.nonMonotonicTimestampCount} non-monotonic timestamps`,
+  );
+  assert(
+    Math.abs(continuity.timelineDurationErrorUs) < 5_000,
+    `The browser capture timeline differed from its audio duration by ${continuity.timelineDurationErrorUs} us`,
+  );
+  assert(
+    continuity.maximumAdjacentTimestampDeviationUs < 20_000,
+    `The browser capture had a ${continuity.maximumAdjacentTimestampDeviationUs} us delivery deviation`,
+  );
+  const steadyContinuity = continuity.phases["steady-playback"];
+  assert(steadyContinuity?.packets > 5, "Steady playback did not expose continuity packets");
+  assert(
+    steadyContinuity.maximumSilentRunFrames <= loaded.outputSampleRate * 0.02,
+    `Steady playback had ${steadyContinuity.maximumSilentRunFrames} consecutive silent frames`,
+  );
 
   return {
     chrome: navigator.userAgent,
@@ -298,6 +502,7 @@ async function runBrowserScenario() {
     audioOutputLatencyMs: player.getState().audioOutputLatencyMs,
     maximumPointerToAudioLatencyMs: maximumLatencyMs,
     captureBytes,
+    continuity,
     replay: {
       eventCount: recordedTake.events.length,
       durationFrames: recordedTake.durationFrames,
@@ -333,6 +538,7 @@ const chrome = spawn(chromePath, [
 ], { stdio: ["ignore", "pipe", "pipe"] });
 
 let session = null;
+const pause = milliseconds => new Promise(resolveWait => setTimeout(resolveWait, milliseconds));
 try {
   await pollResponse(`http://127.0.0.1:${serverPort}/`);
   await pollJson(`http://127.0.0.1:${debugPort}/json/version`);
@@ -344,6 +550,8 @@ try {
   const target = await targetResponse.json();
   session = new CdpSession(target.webSocketDebuggerUrl);
   const pageErrors = [];
+  const audioContexts = new Map();
+  const realtimeSamples = [];
   session.on("Runtime.exceptionThrown", event => {
     pageErrors.push(event.exceptionDetails?.exception?.description || event.exceptionDetails?.text || "Page exception");
   });
@@ -359,9 +567,19 @@ try {
     if (event.type !== "error") return;
     pageErrors.push((event.args || []).map(argument => argument.value || argument.description || "").join(" "));
   });
+  session.on("WebAudio.contextCreated", event => {
+    if (event.context?.contextId) audioContexts.set(event.context.contextId, event.context);
+  });
+  session.on("WebAudio.contextChanged", event => {
+    if (event.context?.contextId) audioContexts.set(event.context.contextId, event.context);
+  });
+  session.on("WebAudio.contextWillBeDestroyed", event => {
+    if (event.contextId) audioContexts.delete(event.contextId);
+  });
   await session.send("Runtime.enable");
   await session.send("Log.enable");
   await session.send("Page.enable");
+  await session.send("WebAudio.enable");
   await session.send("Page.navigate", { url: `http://127.0.0.1:${serverPort}/?player_log=0` });
   await new Promise(resolveLoad => {
     const timeout = setTimeout(resolveLoad, 15_000);
@@ -370,7 +588,7 @@ try {
       resolveLoad();
     });
   });
-  const result = await withTimeout(
+  const scenarioPromise = withTimeout(
     session.send("Runtime.evaluate", {
       expression: `(${runBrowserScenario.toString()})()`,
       awaitPromise: true,
@@ -380,6 +598,32 @@ try {
     30_000,
     "Chrome AudioWorklet scenario",
   );
+  let scenarioSettled = false;
+  scenarioPromise.then(
+    () => { scenarioSettled = true; },
+    () => { scenarioSettled = true; },
+  );
+  while (!scenarioSettled) {
+    const phaseResult = await session.send("Runtime.evaluate", {
+      expression: `String(globalThis.__VINYL_BROWSER_PHASE__ || "startup")`,
+      returnByValue: true,
+    });
+    const phase = String(phaseResult.result?.value || "startup");
+    for (const [contextId, context] of audioContexts) {
+      if (context.contextType !== "realtime" || context.contextState === "closed") continue;
+      try {
+        const sample = await session.send("WebAudio.getRealtimeData", { contextId });
+        const realtimeData = sample.realtimeData || {};
+        if (Number.isFinite(realtimeData.renderCapacity)) {
+          realtimeSamples.push({ contextId, phase, ...realtimeData });
+        }
+      } catch {
+        // A context can close between its lifecycle event and this sample.
+      }
+    }
+    await pause(40);
+  }
+  const result = await scenarioPromise;
   if (result.exceptionDetails) {
     throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text || "Browser scenario failed");
   }
@@ -419,7 +663,6 @@ try {
     radiusY: 6,
     force: 0.7,
   });
-  const pause = milliseconds => new Promise(resolveWait => setTimeout(resolveWait, milliseconds));
   await session.send("Input.dispatchTouchEvent", {
     type: "touchStart",
     touchPoints: [touch(1, points.recordStart)],
@@ -478,10 +721,66 @@ try {
   if (Math.abs(multiPointer.crossfaderAfter - multiPointer.crossfaderBefore) < 0.05) {
     throw new Error("The second browser pointer did not move XFADE");
   }
+  if (realtimeSamples.length < 20) {
+    throw new Error(`Chrome exposed only ${realtimeSamples.length} Web Audio realtime samples`);
+  }
+  const percentile = (values, ratio) => {
+    const sorted = [...values].sort((left, right) => left - right);
+    return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * ratio))];
+  };
+  const capacities = realtimeSamples.map(sample => sample.renderCapacity);
+  // Chromium supplies a normalized ratio here: render duration / callback
+  // interval. The DevTools Protocol prose still describes a percentage.
+  const maximumRenderCapacitySample = realtimeSamples.reduce((maximum, sample) => (
+    sample.renderCapacity > maximum.renderCapacity ? sample : maximum
+  ));
+  const maximumRenderCapacityRatio = maximumRenderCapacitySample.renderCapacity;
+  const p95RenderCapacityRatio = percentile(capacities, 0.95);
+  const maximumRenderCapacityRatioAllowed = 1;
+  const p95RenderCapacityRatioAllowed = 0.5;
+  if (!(maximumRenderCapacityRatio < maximumRenderCapacityRatioAllowed)) {
+    throw new Error(
+      `Chrome Web Audio callback deadline reached ${(maximumRenderCapacityRatio * 100).toFixed(2)}%`
+        + ` during ${maximumRenderCapacitySample.phase}`,
+    );
+  }
+  if (!(p95RenderCapacityRatio < p95RenderCapacityRatioAllowed)) {
+    throw new Error(
+      `Chrome Web Audio p95 render capacity reached ${(p95RenderCapacityRatio * 100).toFixed(2)}%`,
+    );
+  }
+  const phaseCapacity = {};
+  for (const sample of realtimeSamples) {
+    const values = phaseCapacity[sample.phase] ||= [];
+    values.push(sample.renderCapacity);
+  }
+  const webAudioRealtime = {
+    samples: realtimeSamples.length,
+    maximumRenderCapacityPercent: maximumRenderCapacityRatio * 100,
+    maximumRenderCapacityPhase: maximumRenderCapacitySample.phase,
+    p95RenderCapacityPercent: p95RenderCapacityRatio * 100,
+    meanRenderCapacityPercent:
+      capacities.reduce((sum, value) => sum + value, 0) / capacities.length * 100,
+    maximumRenderCapacityPercentAllowed: maximumRenderCapacityRatioAllowed * 100,
+    p95RenderCapacityPercentAllowed: p95RenderCapacityRatioAllowed * 100,
+    maximumCallbackIntervalMeanMs: Math.max(
+      ...realtimeSamples.map(sample => Number(sample.callbackIntervalMean) || 0),
+    ) * 1_000,
+    maximumCallbackIntervalVarianceMsSquared: Math.max(
+      ...realtimeSamples.map(sample => Number(sample.callbackIntervalVariance) || 0),
+    ) * 1_000_000,
+    phaseCapacity: Object.fromEntries(Object.entries(phaseCapacity).map(([phase, values]) => [phase, {
+      samples: values.length,
+      maximumPercent: Math.max(...values) * 100,
+      p95Percent: percentile(values, 0.95) * 100,
+      meanPercent: values.reduce((sum, value) => sum + value, 0) / values.length * 100,
+    }])),
+  };
   if (pageErrors.length) throw new Error(`Browser page errors:\n${pageErrors.join("\n")}`);
   process.stdout.write(`Real Chrome AudioWorklet smoke passed:\n${JSON.stringify({
     ...result.result?.value,
     multiPointer,
+    webAudioRealtime,
   }, null, 2)}\n`);
 } finally {
   session?.close();

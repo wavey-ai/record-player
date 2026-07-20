@@ -211,10 +211,10 @@ cost: engine policy defaults to Rust unless the browser boundary would add work
 or latency.
 
 In the current real-WASM timing smoke benchmark, p95 render-call time was
-`0.0387 ms` (`1.45%` of budget) for normal playback and `0.2104 ms` (`7.89%`)
+`0.0387 ms` (`1.45%` of budget) for normal playback and `0.2102 ms` (`7.88%`)
 for alternating `±8×` scratching with `crab`/8 clicks. Applying a fresh
-six-second stereo PCM window measured p95 `0.5260 ms` (`19.73%`) and maximum
-`1.0373 ms` (`38.90%`). A 128-frame quantum at 48 kHz is `2.667 ms`. These are
+six-second stereo PCM window measured p95 `0.6670 ms` (`25.01%`) and maximum
+`1.4212 ms` (`53.30%`). A 128-frame quantum at 48 kHz is `2.667 ms`. These are
 engine timing measurements, not perceptual-validation results.
 
 `npm run bench:worklet` first rebuilds release WASM, then runs the deterministic
@@ -224,6 +224,18 @@ The figures above are a representative 2026-07-20 run on Apple Silicon macOS
 26.5 with Node 26.3.0. The harness uses real release WASM and a mocked
 `AudioWorkletProcessor`; it is a regression smoke test, not a browser audio-thread
 deadline measurement.
+
+`npm run test:browser` supplies the browser-side counterpart. It samples
+Chrome's realtime Web Audio render-capacity metric during lead-in, steady
+playback, a PCM window swap, every scratch preset and replay. It fails if a
+p95 sample uses `50%` or more of the callback interval, or if any sampled
+callback reaches its full deadline. It also transfers captured audio packets to
+a dedicated worker and checks monotonic timestamps, cumulative timeline
+continuity and unintended silence during steady playback. Repeated 2026-07-20
+headless Chrome 150 runs had a worst sampled callback of `62.66%`; the three-run
+stress batch had a worst run-level p95 of `10.65%`. These results cover the real
+browser AudioWorklet and release WASM, but they do not replace physical
+output-device xrun tests.
 
 ## Architecture
 

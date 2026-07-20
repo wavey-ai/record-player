@@ -129,18 +129,31 @@ measured audio-thread reason to make either change.
 - `cargo test --workspace`: 80 tests.
 - `node --test test/*.test.mjs`: 22 tests.
 - `npm run bench:worklet`: normal p95 `1.45%` of a quantum.
-- The same benchmark measured `7.89%` for alternating `±8×` Crab/8.
-- Fresh six-second window application measured p95 `19.73%`.
+- The same benchmark measured `7.88%` for alternating `±8×` Crab/8.
+- Fresh six-second window application measured p95 `25.01%` and maximum
+  `53.30%`.
 - `npm run test:browser`: real Chrome 150 and real release WASM passed.
 - The Chrome run exercised every preset in both directions.
 - It captured rendered output and replayed a take with more than 400 events.
 - It restored the pre-replay Rust state.
 - A second trusted touch moved and released XFADE.
 - The record touch remained active until its own release.
+- Three independent Chrome runs sampled Web Audio render capacity during
+  lead-in, normal playback, a PCM window swap, all presets and replay.
+- The three-run stress batch had a worst sampled render capacity of `13.33%`
+  and a worst run-level p95 of `10.65%`. A later full build-and-test invocation
+  produced a `62.66%` callback sample. It stayed below the full callback
+  deadline.
+- The harness enforces p95 below `50%` and every sampled callback below `100%`.
+- The capture checks covered about `12.7 s` per run. All timestamps were
+  monotonic. Cumulative timeline error stayed at or below `3.18 ms`. Steady
+  playback did not contain a silent packet.
 
 ## Remaining proof gaps
 
-1. Run deadline and xrun instrumentation on the supported hardware matrix.
+1. Repeat deadline, capture-continuity and device-xrun checks on the supported
+   hardware matrix. The headless Chrome result does not exercise a physical
+   output device.
 2. Test actual touchscreens, pens, trackpads and mouse devices.
 3. Measure end-to-end acoustic latency through the interface and speakers.
 4. Run the pre-registered blind test in `DJ_VALIDATION_PROTOCOL.md`.

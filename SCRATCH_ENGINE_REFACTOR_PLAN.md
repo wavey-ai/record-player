@@ -12,17 +12,24 @@ Current automated evidence:
 - `node --test test/*.test.mjs`: 22 tests.
 - `npm run build`: both browser WASM packages build in release mode.
 - `npm run bench:worklet`: real release WASM in the deterministic worklet harness;
-  p95 `0.0387 ms` (`1.45%`) normal and `0.2104 ms` (`7.89%`) alternating
-  `±8×` crab/8. A fresh six-second stereo PCM window measured p95 `0.5260 ms`
-  (`19.73%`) and maximum `1.0373 ms` (`38.90%`) against a `2.667 ms` quantum.
+  p95 `0.0387 ms` (`1.45%`) normal and `0.2102 ms` (`7.88%`) alternating
+  `±8×` crab/8. A fresh six-second stereo PCM window measured p95 `0.6670 ms`
+  (`25.01%`) and maximum `1.4212 ms` (`53.30%`) against a `2.667 ms` quantum.
 - `npm run test:browser`: Chrome 150 loaded real release WASM at 44.1 kHz.
   It exercised all eight gates in both directions and captured rendered audio.
   It recorded, replayed and restored a take with more than 400 events.
   It kept a trusted record touch active while a second touch moved XFADE.
 - The browser run measured less than `6 ms` maximum pointer-to-apply latency in
   this synthetic trace. It reported `5.80 ms` base latency and `32 ms` output
-  latency. These are one headless host result, not hardware population data.
-- A deadline/xrun instrumented browser run, physical controller runs and the
+  latency. These are headless host results, not hardware population data.
+- Three independent browser runs sampled Chrome's Web Audio render capacity by
+  phase. The worst maximum was `13.33%`, and the worst run-level p95 was
+  `10.65%`. A later build-and-test invocation produced a `62.66%` callback
+  sample, still below the full callback deadline. The harness enforces p95
+  below `50%` and every sampled callback below `100%`. Capture timestamps stayed
+  monotonic, cumulative timeline error stayed within `3.18 ms` over about
+  `12.7 s`, and steady playback had no silent packet.
+- Physical output-device xrun measurements, physical controller runs and the
   human protocol in `DJ_VALIDATION_PROTOCOL.md` remain outstanding.
 
 ## Objective and proof standard
@@ -278,7 +285,9 @@ Acceptance evidence:
   click counts without moving the manual fader.
 - API and README examples match runtime state and schema.
 - Headless browser smoke tests report no page/worklet errors and exercise synthetic
-  audio loading, multi-pointer control, every preset, capture and replay.
+  audio loading, normal playback, window replacement, multi-pointer control,
+  every preset, capture and replay. The test samples Web Audio callback use by
+  phase and checks capture timeline continuity in a dedicated worker.
 - The final audit maps every item above to a passing command, trace, browser result
   or explicitly outstanding human validation result.
 
@@ -287,6 +296,7 @@ Acceptance evidence:
 The checkpoint preserves the pre-refactor work. Implementation was committed in
 reviewable clock, mechanics, limiter, replay and browser slices. Automated
 acceptance is complete for the native, JavaScript, release-WASM and Chrome
-harnesses listed above. The remaining deployment claim requires instrumented
-deadline evidence on target hardware and the pre-registered DJ protocol. Those
-results must be attached here. They cannot be inferred from automated tests.
+harnesses listed above. The remaining deployment claim requires device-xrun and
+acoustic latency evidence on target hardware plus the pre-registered DJ
+protocol. Those results must be attached here. They cannot be inferred from
+automated tests.
