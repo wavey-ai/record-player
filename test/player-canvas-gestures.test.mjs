@@ -330,3 +330,165 @@ test("canvas rotation follows audio-owned phase and effective rate", t => {
   );
   mounted.destroy();
 });
+
+test("canvas mouse and touch controls cycle every scratch preset and click count without moving the fader", t => {
+  const animationFrames = new Map();
+  let nextAnimationFrame = 1;
+  const classList = { toggle() {}, remove() {} };
+  const ownerDocument = {
+    documentElement: { classList },
+    addEventListener() {},
+    removeEventListener() {},
+    querySelector() { return null; },
+  };
+  const globals = {
+    HTMLCanvasElement: globalThis.HTMLCanvasElement,
+    document: globalThis.document,
+    window: globalThis.window,
+    requestAnimationFrame: globalThis.requestAnimationFrame,
+    cancelAnimationFrame: globalThis.cancelAnimationFrame,
+  };
+  globalThis.HTMLCanvasElement = FakeCanvas;
+  globalThis.document = ownerDocument;
+  globalThis.window = { devicePixelRatio: 1 };
+  globalThis.requestAnimationFrame = callback => {
+    const id = nextAnimationFrame;
+    nextAnimationFrame += 1;
+    animationFrames.set(id, callback);
+    return id;
+  };
+  globalThis.cancelAnimationFrame = id => animationFrames.delete(id);
+  t.after(() => {
+    for (const [name, value] of Object.entries(globals)) {
+      if (value === undefined) delete globalThis[name];
+      else globalThis[name] = value;
+    }
+  });
+
+  const presets = ["baby", "stab", "chirp", "transform", "flare", "crab", "orbit", "drum"];
+  const calls = { presets: [], clicks: [], crossfader: [] };
+  const state = {
+    ready: false,
+    playing: false,
+    motorRunning: false,
+    scratching: false,
+    loading: false,
+    decoding: false,
+    rotationDegrees: 0,
+    rpm: 33.3333333333,
+    nativeRpm: 33.3333333333,
+    positionSeconds: 0,
+    positionFrames: 0,
+    durationSeconds: 0,
+    sampleRate: 48_000,
+    needleLifted: true,
+    volume: 1,
+    crossfader: 0.37,
+    scratchPreset: "baby",
+    scratchClicks: 1,
+    recordImageUrl: "",
+  };
+  let publishSnapshot = null;
+  const player = {
+    getState: () => ({ ...state }),
+    subscribe: listener => {
+      publishSnapshot = listener;
+      return () => {};
+    },
+    setScratchPreset(value) {
+      state.scratchPreset = value;
+      calls.presets.push(value);
+      publishSnapshot({ ...state });
+    },
+    setScratchClicks(value) {
+      state.scratchClicks = value;
+      calls.clicks.push(value);
+      publishSnapshot({ ...state });
+    },
+    setCrossfader(value) {
+      calls.crossfader.push(value);
+    },
+    setRpm() {},
+    setVolume() {},
+    setNeedleLifted() {},
+    toggleTransport() {},
+    seekRatio() {},
+  };
+  const canvas = new FakeCanvas(ownerDocument);
+  const mounted = createVinylPlayerCanvas(player, canvas, {
+    components: {
+      record: false,
+      syncRings: false,
+      spindle: false,
+      stylus: false,
+      needlePoint: false,
+      tonearmGuide: false,
+      startStop: false,
+      needle: false,
+      loadRecord: false,
+      rpm: false,
+      volume: false,
+      crossfader: false,
+      seek: false,
+      labels: true,
+      scratchPreset: true,
+      scratchClicks: true,
+    },
+  });
+
+  function renderNext() {
+    const next = animationFrames.entries().next().value;
+    assert(next, "The canvas did not schedule its updated technique controls");
+    animationFrames.delete(next[0]);
+    next[1](performance.now());
+  }
+
+  renderNext();
+  const geometry = buildCanvasGeometry(800, 840, { recordFill: false });
+  const controlRadius = (geometry.controlBandInner + geometry.controlBandOuter) / 2;
+  function controlPoint(minute) {
+    const angle = minuteToDegrees(minute) * Math.PI / 180;
+    return {
+      x: geometry.cx + Math.cos(angle) * controlRadius,
+      y: geometry.cy + Math.sin(angle) * controlRadius,
+    };
+  }
+  const presetPoint = controlPoint(52);
+  const clicksPoint = controlPoint(58);
+  let pointerId = 100;
+
+  function tap(point, pointerType) {
+    const currentPointerId = pointerId;
+    pointerId += 1;
+    canvas.emit("pointerdown", pointer(currentPointerId, point.x, point.y, performance.now(), { pointerType }));
+    canvas.emit("pointerup", pointer(currentPointerId, point.x, point.y, performance.now(), { pointerType }));
+    renderNext();
+  }
+
+  for (const pointerType of ["mouse", "touch"]) {
+    state.scratchPreset = "baby";
+    state.scratchClicks = 1;
+    publishSnapshot({ ...state });
+    renderNext();
+    const presetCallStart = calls.presets.length;
+    const clicksCallStart = calls.clicks.length;
+
+    for (let index = 0; index < presets.length; index += 1) tap(presetPoint, pointerType);
+    for (let index = 0; index < 8; index += 1) tap(clicksPoint, pointerType);
+
+    assert.deepEqual(
+      calls.presets.slice(presetCallStart),
+      ["stab", "chirp", "transform", "flare", "crab", "orbit", "drum", "baby"],
+      `${pointerType} did not reach every scratch preset`,
+    );
+    assert.deepEqual(
+      calls.clicks.slice(clicksCallStart),
+      [2, 3, 4, 5, 6, 7, 8, 1],
+      `${pointerType} did not reach every scratch click count`,
+    );
+    assert.equal(state.crossfader, 0.37);
+  }
+
+  assert.deepEqual(calls.crossfader, [], "Technique controls moved the manual crossfader");
+  mounted.destroy();
+});

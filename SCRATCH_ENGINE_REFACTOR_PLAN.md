@@ -9,8 +9,9 @@ is made.
 Current automated evidence:
 
 - `cargo test --workspace`: 87 tests (82 `record-player`, 5 `player-wasm`).
-- `node --test test/*.test.mjs`: 64 tests. The canvas test checks audio-owned
-  phase at half-speed forward, full-speed reverse and rest.
+- `node --test test/*.test.mjs`: 65 tests. Canvas tests check audio-owned phase
+  at half-speed forward, full-speed reverse and rest, plus all eight preset and
+  click-count selections through independent mouse and touch gestures.
 - `npm run build`: both browser WASM packages build in release mode.
 - `npm run bench:worklet`: two release-WASM runs measured p95 at `1.44–1.45%`
   normal and `7.80–7.86%` for alternating `±8×` crab/8. Fresh six-second
@@ -18,10 +19,14 @@ Current automated evidence:
 - The release-WASM harness requires identical output SHA-256 and gate traces
   when 2,176 live frames separate two runs of the same take. It verifies
   preset, click and manual-fader events at four exact sub-quantum offsets.
-- `npm run test:browser`: Chrome 150 loaded real release WASM at 44.1 kHz.
+- `npm run test:browser`: Chrome 150 loaded real release WASM at 48 kHz.
   It exercised all eight gates in both directions and captured rendered audio.
   It recorded, replayed and restored a take with more than 400 events.
-  It kept a trusted record touch active while a second touch moved XFADE.
+  It kept a trusted record touch active while a second touch moved XFADE. The
+  API, trusted mouse, trusted touch and trusted keyboard paths each selected
+  all eight presets and all eight click counts while XFADE remained at `0.37`.
+  The embed exposed both canvas selectors and its collapsed advanced dropdown
+  in the initial viewport.
 - The browser run measured less than `6 ms` maximum pointer-to-apply latency in
   this synthetic trace. It reported `5.80 ms` base latency and `32 ms` output
   latency. These are headless host results, not hardware population data.

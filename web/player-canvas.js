@@ -564,7 +564,7 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
     scheduleRender();
   });
 
-  const activityEvents = ["pointermove", "mousemove", "touchstart", "touchmove", "wheel", "keydown"];
+  const activityEvents = ["pointermove", "mousemove", "touchstart", "touchmove", "wheel", "keydown", "focusin"];
   for (const type of activityEvents) {
     activityTarget.addEventListener(type, noteActivity, { passive: true });
   }

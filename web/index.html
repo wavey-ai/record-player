@@ -38,19 +38,19 @@
       <label class="fallback-controls timeline"><span>VARIABLE RPM</span><input id="rpm" type="range" min="16" max="90" step="0.01" value="33.333333"></label>
       <label class="fallback-controls timeline"><span>VOLUME</span><input id="volume" type="range" min="0" max="1" step="0.001" value="1"></label>
       <label class="fallback-controls timeline"><span>XFADE</span><input id="xfade" type="range" min="0" max="1" step="0.001" value="0.5"></label>
-      <label class="fallback-controls technique-control"><span>SCRATCH</span><select id="scratch-preset">
-        <option value="baby">BABY</option>
-        <option value="stab">STAB</option>
-        <option value="chirp">CHIRP</option>
-        <option value="transform">TRANSFORM</option>
-        <option value="flare">FLARE</option>
-        <option value="crab">CRAB</option>
-        <option value="orbit">ORBIT</option>
-        <option value="drum">DRUM</option>
-      </select></label>
-      <label class="fallback-controls timeline"><span>CLICKS <output id="scratch-clicks-value">1</output></span><input id="scratch-clicks" type="range" min="1" max="8" step="1" value="1"></label>
       <details class="fallback-controls advanced-controls">
         <summary>ADVANCED CONTROLS</summary>
+        <div class="technique-control"><label for="scratch-preset">SCRATCH</label><div class="technique-picker"><select id="scratch-preset">
+          <option value="baby">BABY</option>
+          <option value="stab">STAB</option>
+          <option value="chirp">CHIRP</option>
+          <option value="transform">TRANSFORM</option>
+          <option value="flare">FLARE</option>
+          <option value="crab">CRAB</option>
+          <option value="orbit">ORBIT</option>
+          <option value="drum">DRUM</option>
+        </select><button id="scratch-preset-next" type="button" aria-label="Select next scratch preset">NEXT</button></div></div>
+        <div class="timeline"><label for="scratch-clicks">CLICKS <output id="scratch-clicks-value">1</output></label><div class="technique-picker"><input id="scratch-clicks" type="range" min="1" max="8" step="1" value="1"><button id="scratch-clicks-next" type="button" aria-label="Select next scratch click count">+1</button></div></div>
         <label class="timeline" title="Dynamically softens excessive upper-band signal acceleration while retaining the unprocessed lows and mids."><span>HF ACCEL LIMITER <output id="hf-acceleration-limit-value">35%</output></span><input id="hf-acceleration-limit" type="range" min="0" max="1" step="0.01" value="0.35" aria-describedby="hf-acceleration-limit-help"></label>
         <span id="hf-acceleration-limit-help" class="control-help">PROGRAMME TRANSIENTS · NOT STYLUS TRACING</span>
         <label class="timeline" title="Models the high-frequency tracing loss of a physical stylus during demanding playback and scratching."><span>STYLUS TRACING <output id="stylus-tracing-limit-value">72%</output></span><input id="stylus-tracing-limit" type="range" min="0" max="1" step="0.01" value="0.72"></label>

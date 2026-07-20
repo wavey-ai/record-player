@@ -14,6 +14,8 @@ export const CANVAS_COMPONENTS = Object.freeze({
   rpm: true,
   volume: true,
   crossfader: true,
+  scratchPreset: true,
+  scratchClicks: true,
   seek: true,
   labels: true
 });

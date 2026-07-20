@@ -159,6 +159,18 @@ button.is-active {
   font-weight: 900;
 }
 
+.technique-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.technique-picker button {
+  min-height: 40px;
+  padding: 0 12px;
+}
+
 .advanced-controls {
   width: 100%;
   box-sizing: border-box;
@@ -182,6 +194,11 @@ button.is-active {
 }
 
 .advanced-controls .timeline {
+  width: auto;
+  margin: 10px 12px 0;
+}
+
+.advanced-controls .technique-control {
   width: auto;
   margin: 10px 12px 0;
 }
@@ -329,6 +346,15 @@ body.embed-page {
 html.embed-mode .metadata,
 html.embed-mode .player-shell > header {
   display: none !important;
+}
+
+html.embed-mode .advanced-controls {
+  position: absolute;
+  z-index: 2;
+  top: 12px;
+  right: 12px;
+  width: min(360px, calc(100% - 24px));
+  background: var(--embed-bg);
 }
 
 html.embed-mode.embed-hide-controls .embed-controls {

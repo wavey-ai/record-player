@@ -229,6 +229,8 @@ async function runBrowserScenario() {
   const initialAdvanced = document.querySelector(".advanced-controls");
   assert(initialAdvanced instanceof HTMLDetailsElement, "Advanced controls are missing");
   assert(!initialAdvanced.open, "Advanced controls must start collapsed");
+  assert(initialAdvanced.contains(document.querySelector("#scratch-preset")), "Scratch preset is outside advanced controls");
+  assert(initialAdvanced.contains(document.querySelector("#scratch-clicks")), "Scratch clicks are outside advanced controls");
   assert(document.querySelector("#hf-acceleration-limit")?.value === "0.35", "HF limiter UI default is not 0.35");
 
   await player.loadAudioFile(createWaveFile(), { cleanEnd: true, title: "Browser smoke" });
@@ -748,6 +750,8 @@ try {
         recordMoveB: point(0.18, recordRadius),
         faderStart: point(minuteToDegrees(26) * Math.PI / 180, faderRadius),
         faderMove: point(minuteToDegrees(24.3) * Math.PI / 180, faderRadius),
+        scratchPreset: point(minuteToDegrees(52) * Math.PI / 180, faderRadius),
+        scratchClicks: point(minuteToDegrees(58) * Math.PI / 180, faderRadius),
         crossfaderBefore: globalThis.vin.yl.player.getState().crossfader,
       };
     })()`,
@@ -824,6 +828,240 @@ try {
   if (Math.abs(multiPointer.crossfaderAfter - multiPointer.crossfaderBefore) < 0.05) {
     throw new Error("The second browser pointer did not move XFADE");
   }
+
+  const allPresets = ["baby", "stab", "chirp", "transform", "flare", "crab", "orbit", "drum"];
+  const allClicks = [1, 2, 3, 4, 5, 6, 7, 8];
+  const cycledPresets = [...allPresets.slice(1), allPresets[0]];
+  const cycledClicks = [...allClicks.slice(1), allClicks[0]];
+  const resetTechniqueControls = async () => {
+    const reset = await session.send("Runtime.evaluate", {
+      expression: `(async () => {
+        const player = globalThis.vin.yl.player;
+        await player.setCrossfader(0.37);
+        player.setScratchPreset("baby");
+        player.setScratchClicks(1);
+        const state = player.getState();
+        return {
+          preset: state.scratchPreset,
+          clicks: state.scratchClicks,
+          crossfader: state.crossfader,
+          presetControl: document.querySelector("#scratch-preset")?.value,
+          clicksControl: Number(document.querySelector("#scratch-clicks")?.value),
+          activeControl: document.activeElement?.id || document.activeElement?.tagName,
+        };
+      })()`,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    if (reset.exceptionDetails) {
+      throw new Error(reset.exceptionDetails.exception?.description || "Could not reset technique controls");
+    }
+    await pause(25);
+    return reset.result?.value;
+  };
+  const readTechniqueControls = async () => {
+    const current = await session.send("Runtime.evaluate", {
+      expression: `(() => {
+        const state = globalThis.vin.yl.player.getState();
+        return {
+          preset: state.scratchPreset,
+          clicks: state.scratchClicks,
+          crossfader: state.crossfader,
+          presetControl: document.querySelector("#scratch-preset")?.value,
+          clicksControl: Number(document.querySelector("#scratch-clicks")?.value),
+          activeControl: document.activeElement?.id || document.activeElement?.tagName,
+        };
+      })()`,
+      returnByValue: true,
+    });
+    return current.result?.value;
+  };
+  const verifyTechniqueTrace = (name, trace, expectedPresets, expectedClicks) => {
+    const presets = trace.presets.map(entry => entry.preset);
+    const clicks = trace.clicks.map(entry => entry.clicks);
+    if (JSON.stringify(presets) !== JSON.stringify(expectedPresets)) {
+      throw new Error(
+        `${name} selected presets ${presets.join(", ")} instead of ${expectedPresets.join(", ")}`
+          + `; trace=${JSON.stringify(trace.presets)}`,
+      );
+    }
+    if (JSON.stringify(clicks) !== JSON.stringify(expectedClicks)) {
+      throw new Error(`${name} selected click counts ${clicks.join(", ")} instead of ${expectedClicks.join(", ")}`);
+    }
+    for (const entry of [...trace.presets, ...trace.clicks]) {
+      if (Math.abs(entry.crossfader - 0.37) > 0.000001) {
+        throw new Error(`${name} moved the manual crossfader to ${entry.crossfader}`);
+      }
+    }
+  };
+
+  await resetTechniqueControls();
+  const programmaticResult = await session.send("Runtime.evaluate", {
+    expression: `(() => {
+      const player = globalThis.vin.yl.player;
+      const presets = [];
+      const clicks = [];
+      for (const preset of ${JSON.stringify(allPresets)}) {
+        player.setScratchPreset(preset);
+        const state = player.getState();
+        presets.push({ preset: state.scratchPreset, crossfader: state.crossfader });
+      }
+      for (const clickCount of ${JSON.stringify(allClicks)}) {
+        player.setScratchClicks(clickCount);
+        const state = player.getState();
+        clicks.push({ clicks: state.scratchClicks, crossfader: state.crossfader });
+      }
+      return { presets, clicks };
+    })()`,
+    returnByValue: true,
+  });
+  const programmatic = programmaticResult.result?.value;
+  verifyTechniqueTrace("Programmatic controls", programmatic, allPresets, allClicks);
+
+  await resetTechniqueControls();
+  const pointer = { presets: [], clicks: [] };
+  const mouseTap = async point => {
+    await session.send("Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: point.x,
+      y: point.y,
+      buttons: 0,
+    });
+    await pause(5);
+    await session.send("Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x: point.x,
+      y: point.y,
+      button: "left",
+      buttons: 1,
+      clickCount: 1,
+    });
+    await pause(12);
+    await session.send("Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x: point.x,
+      y: point.y,
+      button: "left",
+      buttons: 0,
+      clickCount: 1,
+    });
+    await pause(25);
+  };
+  for (let index = 0; index < 8; index += 1) {
+    await mouseTap(points.scratchPreset);
+    pointer.presets.push(await readTechniqueControls());
+  }
+  for (let index = 0; index < 8; index += 1) {
+    await mouseTap(points.scratchClicks);
+    pointer.clicks.push(await readTechniqueControls());
+  }
+  verifyTechniqueTrace("Pointer canvas controls", pointer, cycledPresets, cycledClicks);
+
+  await resetTechniqueControls();
+  const touchControls = { presets: [], clicks: [] };
+  let techniqueTouchId = 20;
+  const touchTap = async point => {
+    techniqueTouchId += 1;
+    await session.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [touch(techniqueTouchId, point)],
+    });
+    await pause(12);
+    await session.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    });
+    await pause(25);
+  };
+  for (let index = 0; index < 8; index += 1) {
+    await touchTap(points.scratchPreset);
+    touchControls.presets.push(await readTechniqueControls());
+  }
+  for (let index = 0; index < 8; index += 1) {
+    await touchTap(points.scratchClicks);
+    touchControls.clicks.push(await readTechniqueControls());
+  }
+  verifyTechniqueTrace("Touch canvas controls", touchControls, cycledPresets, cycledClicks);
+
+  await resetTechniqueControls();
+  const focusSummary = await session.send("Runtime.evaluate", {
+    expression: `(() => {
+      const advanced = document.querySelector(".advanced-controls");
+      advanced.open = false;
+      const summary = advanced.querySelector("summary");
+      summary.focus();
+      return document.activeElement === summary;
+    })()`,
+    returnByValue: true,
+  });
+  if (!focusSummary.result?.value) throw new Error("Advanced-controls summary did not receive keyboard focus");
+  const dispatchKey = async (key, code, keyCode) => {
+    const macNativeKeyCodes = { Enter: 36, Space: 49, Home: 115, ArrowDown: 125, ArrowRight: 124 };
+    const nativeVirtualKeyCode = process.platform === "darwin" ? macNativeKeyCodes[code] : keyCode;
+    const text = key === "Enter" ? "\r" : key === " " ? " " : "";
+    await session.send("Input.dispatchKeyEvent", {
+      type: text ? "keyDown" : "rawKeyDown",
+      key,
+      code,
+      windowsVirtualKeyCode: keyCode,
+      nativeVirtualKeyCode,
+      ...(text ? { text, unmodifiedText: text } : {}),
+    });
+    await session.send("Input.dispatchKeyEvent", {
+      type: "keyUp",
+      key,
+      code,
+      windowsVirtualKeyCode: keyCode,
+      nativeVirtualKeyCode,
+    });
+    await pause(25);
+  };
+  await dispatchKey("Enter", "Enter", 13);
+  const advancedOpened = await session.send("Runtime.evaluate", {
+    expression: `document.querySelector(".advanced-controls").open`,
+    returnByValue: true,
+  });
+  if (!advancedOpened.result?.value) throw new Error("Keyboard did not open advanced controls");
+  const keyboard = { presets: [], clicks: [] };
+  const presetButtonFocused = await session.send("Runtime.evaluate", {
+    expression: `(() => {
+      const button = document.querySelector("#scratch-preset-next");
+      button?.focus();
+      return document.activeElement === button;
+    })()`,
+    returnByValue: true,
+  });
+  if (!presetButtonFocused.result?.value) throw new Error("Next-preset button did not receive keyboard focus");
+  for (let index = 0; index < 8; index += 1) {
+    await dispatchKey("Enter", "Enter", 13);
+    keyboard.presets.push(await readTechniqueControls());
+  }
+  const clicksButtonFocused = await session.send("Runtime.evaluate", {
+    expression: `(() => {
+      const button = document.querySelector("#scratch-clicks-next");
+      button?.focus();
+      return document.activeElement === button;
+    })()`,
+    returnByValue: true,
+  });
+  if (!clicksButtonFocused.result?.value) throw new Error("Next-click-count button did not receive keyboard focus");
+  for (let index = 0; index < 8; index += 1) {
+    await dispatchKey("Enter", "Enter", 13);
+    keyboard.clicks.push(await readTechniqueControls());
+  }
+  verifyTechniqueTrace("Keyboard advanced controls", keyboard, cycledPresets, cycledClicks);
+  const summarizeTechniqueTrace = trace => ({
+    presets: trace.presets.map(entry => entry.preset),
+    clicks: trace.clicks.map(entry => entry.clicks),
+  });
+  const techniqueControls = {
+    programmatic: summarizeTechniqueTrace(programmatic),
+    pointer: summarizeTechniqueTrace(pointer),
+    touch: summarizeTechniqueTrace(touchControls),
+    keyboard: summarizeTechniqueTrace(keyboard),
+    manualCrossfaderHeldAt: 0.37,
+  };
+
   if (realtimeSamples.length < 20) {
     throw new Error(`Chrome exposed only ${realtimeSamples.length} Web Audio realtime samples`);
   }
@@ -879,6 +1117,48 @@ try {
       meanPercent: values.reduce((sum, value) => sum + value, 0) / values.length * 100,
     }])),
   };
+  await session.send("Page.navigate", {
+    url: `http://127.0.0.1:${serverPort}/embed.html?player_log=0`,
+  });
+  await pause(250);
+  const embedAdvancedResult = await session.send("Runtime.evaluate", {
+    expression: `(async () => {
+      const deadline = performance.now() + 10000;
+      while ((!globalThis.vin?.yl?.player || location.pathname !== "/embed.html") && performance.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      const player = globalThis.vin?.yl?.player;
+      if (!player) throw new Error("Embed player did not start");
+      const advanced = document.querySelector(".advanced-controls");
+      const preset = document.querySelector("#scratch-preset");
+      const clicks = document.querySelector("#scratch-clicks");
+      const rect = advanced.getBoundingClientRect();
+      const style = getComputedStyle(advanced);
+      const components = player.canvas.getConfig()?.components || {};
+      return {
+        collapsed: !advanced.open,
+        containsPreset: advanced.contains(preset),
+        containsClicks: advanced.contains(clicks),
+        visible: style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) > 0,
+        inInitialViewport: rect.top >= 0 && rect.bottom <= innerHeight,
+        scratchPresetCanvasVisible: components.scratchPreset === true,
+        scratchClicksCanvasVisible: components.scratchClicks === true,
+      };
+    })()`,
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  if (embedAdvancedResult.exceptionDetails) {
+    throw new Error(
+      embedAdvancedResult.exceptionDetails.exception?.description
+        || embedAdvancedResult.exceptionDetails.text
+        || "Embed advanced controls failed",
+    );
+  }
+  const embedAdvancedControls = embedAdvancedResult.result?.value;
+  if (!Object.values(embedAdvancedControls || {}).every(Boolean)) {
+    throw new Error(`Embed technique controls were inaccessible: ${JSON.stringify(embedAdvancedControls)}`);
+  }
   await session.send("Page.navigate", {
     url: `http://127.0.0.1:${serverPort}/dj-validation.html`,
   });
@@ -1081,7 +1361,9 @@ try {
   process.stdout.write(`Real Chrome AudioWorklet smoke passed:\n${JSON.stringify({
     ...result.result?.value,
     multiPointer,
+    techniqueControls,
     webAudioRealtime,
+    embedAdvancedControls,
     validationConsole,
     blindAbx,
   }, null, 2)}\n`);

@@ -7,6 +7,7 @@ import {
   minuteToDegrees,
   normalizeDegrees
 } from "./player-canvas-geometry.js";
+import { SCRATCH_PRESETS } from "./scratch-performance-schema.js";
 
 const RPM_CENTER_MINUTE = 15;
 const RPM_RESET_PITCH_PCT = -6;
@@ -15,6 +16,8 @@ const XFADE_CENTER_MINUTE = 26;
 const START_STOP_CENTER_MINUTE = 33;
 const NEEDLE_CENTER_MINUTE = 8;
 const LOAD_RECORD_MINUTE = 21;
+const SCRATCH_PRESET_CENTER_MINUTE = 52;
+const SCRATCH_CLICKS_CENTER_MINUTE = 58;
 
 function drawCurvedTextSegments(ctx, geometry, segments, angleDeg, radius, size, flip = false) {
   const parts = [];
@@ -717,6 +720,51 @@ export function drawRadialControls(
           document
             .querySelector("#file")
             ?.click()
+      },
+      theme,
+      components.labels,
+      hitRegions
+    );
+  }
+
+  if (components.scratchPreset) {
+    const preset = String(state.scratchPreset || "baby").toLowerCase();
+    const presetIndex = Math.max(0, SCRATCH_PRESETS.indexOf(preset));
+    const label = `SCRATCH ${SCRATCH_PRESETS[presetIndex].toUpperCase()}`;
+
+    drawSectorButton(
+      ctx,
+      geometry,
+      {
+        key: "scratchPreset",
+        label,
+        active: false,
+        angle: minuteToDegrees(SCRATCH_PRESET_CENTER_MINUTE),
+        span: measureSpan(label),
+        onActivate: () => player.setScratchPreset(
+          SCRATCH_PRESETS[(presetIndex + 1) % SCRATCH_PRESETS.length]
+        )
+      },
+      theme,
+      components.labels,
+      hitRegions
+    );
+  }
+
+  if (components.scratchClicks) {
+    const clicks = clamp(Math.round(Number(state.scratchClicks) || 1), 1, 8);
+    const label = `CLICKS ${clicks}`;
+
+    drawSectorButton(
+      ctx,
+      geometry,
+      {
+        key: "scratchClicks",
+        label,
+        active: false,
+        angle: minuteToDegrees(SCRATCH_CLICKS_CENTER_MINUTE),
+        span: measureSpan(label),
+        onActivate: () => player.setScratchClicks(clicks === 8 ? 1 : clicks + 1)
       },
       theme,
       components.labels,

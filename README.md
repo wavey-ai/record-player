@@ -366,6 +366,10 @@ manual crossfader. A new player starts on `baby`/1 click. The full defaults
 table appears under
 [Manual crossfader and scratch gate](#manual-crossfader-and-scratch-gate).
 
+The same controls are available on the canvas and under **ADVANCED CONTROLS**;
+keyboard, pointer, touch and API paths all preserve the independent manual
+fader value.
+
 ### Programmatic scratching
 
 ```js
@@ -610,7 +614,11 @@ const controller = player.canvas.mount(canvas, {
 });
 ```
 
-The bundled page mounts its canvas automatically.
+The bundled page mounts its canvas automatically. Radial `SCRATCH` and `CLICKS`
+buttons cycle through every preset and click count with pointer or touch input.
+The advanced dropdown contains the equivalent native HTML controls plus
+keyboard-operable `NEXT` and `+1` buttons. It starts collapsed and remains in
+the initial viewport in the default embed.
 
 ### Components
 
@@ -631,6 +639,8 @@ player.canvas.configure({
     rpm: true,
     volume: true,
     crossfader: true,
+    scratchPreset: true,
+    scratchClicks: true,
     seek: true,
     labels: true
   }
@@ -766,8 +776,8 @@ The default strength is `0.35`. `setHighFrequencyAccelerationLimit(strength)`
 accepts `0..1`; `0` is an exact sample-for-sample bypass. Source texture,
 surface noise and needle foley are mixed outside this limiter, so a harsh
 programme transient cannot pull down those layers or the full-band lows and
-mids. The bundled page exposes both independent strength controls under
-**ADVANCED CONTROLS**.
+mids. The bundled page exposes the scratch technique, click count and both
+independent strength controls under **ADVANCED CONTROLS**.
 
 ### Wow and flutter
 

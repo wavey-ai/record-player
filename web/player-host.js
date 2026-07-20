@@ -13,6 +13,7 @@ import {
   normalizeScratchPreset,
   SCRATCH_GATE_ALGORITHM_VERSION,
   SCRATCH_PERFORMANCE_SCHEMA_VERSION,
+  SCRATCH_PRESETS,
   SCRATCH_PRESET_DEFAULT_CLICKS,
 } from "./scratch-performance-schema.js";
 
@@ -247,6 +248,8 @@ function embedCanvasOptions() {
       rpm: false,
       volume: false,
       crossfader: false,
+      scratchPreset: false,
+      scratchClicks: false,
       seek: false,
       labels: false,
       strobeLamp: effectiveParam("light") === "1",
@@ -262,6 +265,8 @@ function embedCanvasOptions() {
       rpm: true,
       volume: true,
       crossfader: true,
+      scratchPreset: true,
+      scratchClicks: true,
       seek: true,
       labels: true,
       strobeLamp: true,
@@ -354,7 +359,9 @@ const elements = {
   volume: playerRoot.querySelector("#volume"),
   xfade: playerRoot.querySelector("#xfade"),
   scratchPreset: playerRoot.querySelector("#scratch-preset"),
+  scratchPresetNext: playerRoot.querySelector("#scratch-preset-next"),
   scratchClicks: playerRoot.querySelector("#scratch-clicks"),
+  scratchClicksNext: playerRoot.querySelector("#scratch-clicks-next"),
   scratchClicksValue: playerRoot.querySelector("#scratch-clicks-value"),
   highFrequencyAccelerationLimit: playerRoot.querySelector("#hf-acceleration-limit"),
   highFrequencyAccelerationLimitValue: playerRoot.querySelector("#hf-acceleration-limit-value"),
@@ -3962,8 +3969,20 @@ elements.rpm45?.addEventListener("click", () => void setRpm(45));
 elements.rpm?.addEventListener("input", () => void setRpm(elements.rpm.value));
 elements.volume?.addEventListener("input", () => void setVolume(elements.volume.value));
 elements.xfade?.addEventListener("input", () => void setCrossfader(elements.xfade.value));
-elements.scratchPreset?.addEventListener("change", () => setScratchPreset(elements.scratchPreset.value));
+const applyScratchPresetControl = () => {
+  if (!elements.scratchPreset || elements.scratchPreset.value === state.scratchPreset) return;
+  setScratchPreset(elements.scratchPreset.value);
+};
+elements.scratchPreset?.addEventListener("input", applyScratchPresetControl);
+elements.scratchPreset?.addEventListener("change", applyScratchPresetControl);
+elements.scratchPresetNext?.addEventListener("click", () => {
+  const currentIndex = Math.max(0, SCRATCH_PRESETS.indexOf(state.scratchPreset));
+  setScratchPreset(SCRATCH_PRESETS[(currentIndex + 1) % SCRATCH_PRESETS.length]);
+});
 elements.scratchClicks?.addEventListener("input", () => setScratchClicks(elements.scratchClicks.value));
+elements.scratchClicksNext?.addEventListener("click", () => {
+  setScratchClicks(state.scratchClicks === 8 ? 1 : state.scratchClicks + 1);
+});
 elements.highFrequencyAccelerationLimit?.addEventListener("input", () => {
   setHighFrequencyAccelerationLimit(elements.highFrequencyAccelerationLimit.value);
 });

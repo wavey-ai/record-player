@@ -139,7 +139,7 @@ measured audio-thread reason to make either change.
 ## Automated evidence
 
 - `cargo test --workspace`: 87 tests.
-- `node --test test/*.test.mjs`: 64 tests.
+- `node --test test/*.test.mjs`: 65 tests.
 - The canvas regression anchors the visible platter to audio-owned phase and
   covers half-speed forward motion, full-speed reverse motion and zero-rate
   hold. It rejects nominal-RPM animation.
@@ -162,6 +162,11 @@ measured audio-thread reason to make either change.
 - It restored the pre-replay Rust state.
 - A second trusted touch moved and released XFADE.
 - The record touch remained active until its own release.
+- Programmatic, trusted mouse, trusted touch and trusted keyboard controls each
+  selected all eight presets and all eight click counts without moving the
+  manual fader from `0.37`.
+- The default embed showed the canvas technique selectors and collapsed
+  advanced dropdown in its initial viewport.
 - Three independent Chrome runs sampled Web Audio render capacity during
   lead-in, normal playback, a PCM window swap, all presets and replay.
 - The three-run stress batch had a worst sampled render capacity of `13.33%`
