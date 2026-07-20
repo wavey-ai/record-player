@@ -24,6 +24,30 @@ player.seekRatio(0.5);
 await player.setNeedleLifted(false);
 ```
 
+Authoring and presave surfaces can load a conventional audio file before a
+Bitneedle PNG exists. It is decoded to PCM and sent through the same Rust
+transport, AudioWorklet and acoustic scratch renderer as a published record:
+
+```js
+await player.loadAudioFile(audioFile, {
+  artworkUrl: URL.createObjectURL(artworkFile),
+  title: "Afterglow",
+  artist: "Mara Vela",
+});
+```
+
+To combine the rendered player audio with a canvas or camera track, request the
+player's capture stream. This is the post-gain output from the existing player
+graph, including acoustic scratch and surface sound:
+
+```js
+const audioStream = await player.getCaptureStream();
+const socialStream = new MediaStream([
+  ...socialCanvas.captureStream(30).getVideoTracks(),
+  ...audioStream.getAudioTracks(),
+]);
+```
+
 ## Deck controls
 
 ```js

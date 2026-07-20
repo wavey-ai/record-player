@@ -316,9 +316,10 @@ const IS_IOS_WEBKIT =
 const IS_MOBILE_DEVICE = /Mobi|Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || "") || IS_IOS_WEBKIT;
 // Original resolveNeedleSurfaceGain: surface foley is 2.25× louder on mobile speakers.
 const MOBILE_SURFACE_GAIN_MULTIPLIER = 2.25;
-// Original profile_turns(): lead-in and deadwax both traverse 2 revolutions.
+// Keep the physical lead-in, but end the programme cleanly. Presave previews
+// and social clips should not add two revolutions of deadwax surface noise
+// after the music finishes.
 const LEAD_IN_TURNS = 2;
-const DEADWAX_TURNS = 2;
 
 const elements = {
   file: playerRoot.querySelector("#file"),
@@ -381,6 +382,7 @@ const state = {
   seekInFlight: false,
   queuedSeekSeconds: null,
   gainNode: null,
+  captureNode: null,
   packetGain: 1,
   mixerGain: 1,
   volume: 1,
@@ -792,6 +794,99 @@ async function loadDecodedPcm({ sampleRate, audioLength, s16ChannelBuffers }) {
     channelBuffers: sourceBuffers
   }, sourceBuffers);
   state.streamDecodedFrames = endFrame;
+}
+
+function audioBufferChannelToS16Buffer(channel) {
+  const source = channel instanceof Float32Array ? channel : new Float32Array(channel || 0);
+  const output = new Int16Array(source.length);
+  for (let index = 0; index < source.length; index += 1) {
+    const sample = Math.max(-1, Math.min(1, Number(source[index]) || 0));
+    output[index] = sample < 0 ? Math.round(sample * 32768) : Math.round(sample * 32767);
+  }
+  return output.buffer;
+}
+
+// Presave and authoring surfaces already have a conventional audio file before
+// they have a published Bitneedle PNG. Feed that decoded PCM through the same
+// Rust transport, AudioWorklet and acoustic scratch renderer used for records so
+// previews never need a parallel scratch implementation.
+async function loadAudioFile(file, { artworkUrl = "", title = "", artist = "" } = {}) {
+  if (!(file instanceof Blob)) throw new TypeError("An audio File or Blob is required");
+  await initialiseAudio();
+  await state.context.resume();
+  const audioBuffer = await state.context.decodeAudioData((await file.arrayBuffer()).slice(0));
+  if (!audioBuffer?.length || !audioBuffer.numberOfChannels) throw new Error("The audio file decoded empty");
+
+  state.loadSequence += 1;
+  state.decoder?.close();
+  state.decoder = null;
+  state.streamInitialised = false;
+  state.streamReady = false;
+  state.streamDecodedFrames = 0;
+  state.streamAppendChain = Promise.resolve();
+  state.decodeProgressText = "";
+  state.metadataDuration = audioBuffer.duration;
+  state.duration = audioBuffer.duration;
+  state.positionFrames = 0;
+  state.lastReportedPosition = 0;
+  state.baseRpm = 33.3333333333;
+  state.rpm = state.baseRpm;
+  state.recordHash = `audio:${file.name || "preview"}:${file.size || 0}:${file.lastModified || 0}`;
+  state.recordReleaseId = "";
+  state.recordHeaderProof = null;
+  state.recordDescriptorJson = "";
+  state.programmeMap = {
+    sampleRate: audioBuffer.sampleRate,
+    durationMs: Math.round(audioBuffer.duration * 1000),
+    totalSamples: audioBuffer.length,
+    tracks: [{ title: String(title || file.name || "Preview"), artist: String(artist || "") }],
+  };
+  resetTapeState();
+  updateRpmButtons();
+  state.node.port.postMessage({ type: "reset" });
+
+  const channelCount = Math.min(2, audioBuffer.numberOfChannels);
+  const s16ChannelBuffers = Array.from({ length: channelCount }, (_, index) => (
+    audioBufferChannelToS16Buffer(audioBuffer.getChannelData(index))
+  ));
+  storeBasePcmSource({
+    sampleRate: audioBuffer.sampleRate,
+    audioLength: audioBuffer.length,
+    s16ChannelBuffers,
+  });
+  await loadDecodedPcm({
+    sampleRate: audioBuffer.sampleRate,
+    audioLength: audioBuffer.length,
+    s16ChannelBuffers,
+  });
+  state.node.port.postMessage({ type: "stream-complete" });
+  await markLoadedReady();
+  state.streamReady = true;
+  state.streamReadyResolve?.();
+  state.streamReadyResolve = null;
+
+  state.recordObjectUrl = String(artworkUrl || "");
+  if (elements.recordImage) {
+    elements.recordImage.src = state.recordObjectUrl;
+    elements.recordImage.alt = String(title || file.name || "Audio preview");
+  }
+  if (elements.metadata) elements.metadata.hidden = true;
+  if (elements.metaProfile) elements.metaProfile.textContent = "audio-preview";
+  if (elements.metaContainer) elements.metaContainer.textContent = file.type || "audio";
+  if (elements.metaRelease) elements.metaRelease.textContent = String(title || file.name || "Preview");
+  setStatus(`${file.name || "Audio preview"} · ${audioBuffer.duration.toFixed(1)}s · ${audioBuffer.sampleRate} Hz`);
+  publishState();
+  return publicState();
+}
+
+async function getCaptureStream() {
+  await initialiseAudio();
+  await state.context.resume();
+  if (!state.captureNode) {
+    state.captureNode = state.context.createMediaStreamDestination();
+    state.gainNode.connect(state.captureNode);
+  }
+  return state.captureNode.stream;
 }
 
 async function markLoadedReady() {
@@ -1493,19 +1588,9 @@ function handleWorkletMessage(event) {
     state.positionFrames = message.position;
     void (async () => {
       await dispatch({ type: "playback_ended", deck: "a" });
-      // Original: programme end runs the stylus into the deadwax for
-      // 2 revolutions of surface bed before playback is considered over
-      // (player.js 11267–11273). The engine rejects it when the needle is
-      // lifted, a scratch is active, or a clip loop runs — same guards as
-      // the original startDeadwaxPlayback.
-      const durationSeconds = timedRegionDurationSeconds(DEADWAX_TURNS);
-      if (durationSeconds > 0) {
-        try {
-          await dispatch({ type: "start_timed_region", region: "deadwax", now_ms: performance.now(), duration_seconds: durationSeconds });
-        } catch {
-          // Needle lifted / not ready: no deadwax traversal, as in the original.
-        }
-      }
+      state.surfaceRegion = null;
+      state.node?.port.postMessage({ type: "surface-region", action: "stop", region: "deadwax" });
+      publishState();
     })();
   } else if (message.type === "scratch-replay-ended") {
     const request = state.scratchReplayRequests.get(message.id);
@@ -2052,6 +2137,8 @@ const api = Object.freeze({
   createRemoteOpusPrecache,
   loadRecord: loadFile,
   loadRecordFromUrl,
+  loadAudioFile,
+  getCaptureStream,
   activateAudio: async () => {
     await initialiseAudio();
     await state.context.resume();
@@ -2102,9 +2189,11 @@ const api = Object.freeze({
     state.node?.port.postMessage({ type: "reset" });
     state.node?.disconnect();
     state.gainNode?.disconnect();
+    state.captureNode?.disconnect?.();
     await state.context?.close().catch?.(() => {});
     state.node = null;
     state.gainNode = null;
+    state.captureNode = null;
     state.context = null;
     const canvas = playerRoot.querySelector("#player-canvas");
     const context = canvas?.getContext("2d");

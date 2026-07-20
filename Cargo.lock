@@ -359,7 +359,7 @@ dependencies = [
 
 [[package]]
 name = "encodec-rs"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -787,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "record-render"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "base64",
@@ -803,7 +803,7 @@ dependencies = [
 
 [[package]]
 name = "record-sidecar"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "base64",
