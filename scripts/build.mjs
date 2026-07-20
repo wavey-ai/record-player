@@ -43,3 +43,18 @@ await cp(vendorSoundkitDir, resolve(distDir, "soundkit-wasm"), { recursive: true
 
 buildWasm(rootDir, resolve(distDir, "record-player"), "record_player", ["--features", "wasm"]);
 buildWasm(resolve(rootDir, "player-wasm"), resolve(distDir, "player-wasm"), "player_wasm");
+
+function gitResult(args) {
+  const result = spawnSync("git", args, { cwd: rootDir, encoding: "utf8" });
+  return {
+    ok: result.status === 0,
+    output: result.status === 0 ? String(result.stdout || "").trim() : "",
+  };
+}
+
+const gitCommit = gitResult(["rev-parse", "HEAD"]);
+const gitStatus = gitResult(["status", "--porcelain"]);
+await writeFile(resolve(distDir, "player-build-info.json"), `${JSON.stringify({
+  commit: gitCommit.ok && /^[0-9a-f]{40}$/i.test(gitCommit.output) ? gitCommit.output : null,
+  worktreeDirty: gitCommit.ok && gitStatus.ok ? gitStatus.output.length > 0 : null,
+}, null, 2)}\n`);

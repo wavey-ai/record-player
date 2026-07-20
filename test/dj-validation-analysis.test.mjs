@@ -100,6 +100,7 @@ function passingResults() {
     schemaVersion: 2,
     candidate: {
       commit: "29e7746",
+      worktreeDirty: false,
       settings: {
         highFrequencyAccelerationLimit: 0.35,
         stylusTracingLimit: 0.72,
@@ -259,6 +260,14 @@ test("rejects broken blinding or level calibration", () => {
   assert.equal(analysis.criteria.preflight.pass, false);
 });
 
+test("rejects evidence collected from a dirty candidate worktree", () => {
+  const results = passingResults();
+  results.candidate.worktreeDirty = true;
+  const analysis = analyzeFixture(results);
+  assert.equal(analysis.accepted, false);
+  assert.equal(analysis.criteria.pinnedCandidate.pass, false);
+});
+
 test("rejects a physical audio path outside the registered latency bound", () => {
   const results = passingResults();
   results.environment.acousticLoopback.medianMs = 31;
@@ -295,6 +304,7 @@ test("generates a schema-two collection template with pinned settings", () => {
   assert.equal(template.candidate.settings.highFrequencyAccelerationLimit, 0.35);
   assert.equal(template.candidate.settings.stylusTracingLimit, 0.72);
   assert.equal(template.candidate.settings.faderCurve, 0.08);
+  assert.equal(template.candidate.worktreeDirty, null);
   assert.equal(template.participants.length, 1);
   assert.equal(template.participants[0].trials.length, 1);
   assert.equal(template.participants[0].routines.length, 1);

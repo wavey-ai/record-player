@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VIN.YL DJ validation console</title>
+  <link rel="stylesheet" href="./dj-validation.css">
+</head>
+<body>
+  <header class="validation-header">
+    <div>
+      <span class="eyebrow">VIN.YL.PLAYER</span>
+      <h1>DJ validation console</h1>
+      <p>Collect physical-path and blinded-study evidence for one tested build.</p>
+    </div>
+    <output id="console-status" role="status">Starting the player…</output>
+  </header>
+
+  <main class="validation-layout">
+    <section class="player-panel" aria-label="Test player">
+      <iframe
+        id="validation-player"
+        title="Record player under test"
+        src="./embed.html?theme=hifi-white&amp;status=1"
+        allow="autoplay; microphone"
+      ></iframe>
+      <dl class="live-state">
+        <div><dt>Build</dt><dd id="build-state">Loading…</dd></div>
+        <div><dt>Player</dt><dd id="player-state">Starting…</dd></div>
+        <div><dt>Collection</dt><dd id="collection-summary">No participants</dd></div>
+      </dl>
+    </section>
+
+    <section class="collection-panel" aria-label="Validation collection">
+      <nav class="collection-actions" aria-label="Collection actions">
+        <label class="file-action">Open draft<input id="import-results" type="file" accept="application/json,.json"></label>
+        <button id="restore-draft" type="button">Restore local draft</button>
+        <button id="export-results" type="button">Export results</button>
+        <button id="clear-draft" type="button" class="danger">Clear draft</button>
+      </nav>
+
+      <details open>
+        <summary>1. Hardware and room</summary>
+        <form id="environment-form" class="field-grid">
+          <label>Input device<input name="inputDevice" required autocomplete="off"></label>
+          <label>Audio interface<input name="audioInterface" required autocomplete="off"></label>
+          <label>Display rate (Hz)<input name="displaySampleRateHz" type="number" min="1" step="1" required></label>
+          <label>Interface buffer (frames)<input name="interfaceBufferFrames" type="number" min="1" step="1" required></label>
+          <label class="check"><input name="headphones" type="checkbox" checked> Headphones tested</label>
+          <label class="check"><input name="monitors" type="checkbox" checked> Monitors tested</label>
+          <label class="check"><input name="quietRoom" type="checkbox"> Quiet room confirmed</label>
+          <button type="submit">Save hardware details</button>
+        </form>
+        <div class="inline-actions">
+          <label>Loopback input<select id="loopback-input"><option value="">Default input</option></select></label>
+          <button id="refresh-inputs" type="button">Refresh inputs</button>
+          <button id="measure-loopback" type="button">Measure physical loopback</button>
+        </div>
+        <output id="loopback-result">No physical loopback result.</output>
+      </details>
+
+      <details open>
+        <summary>2. Participants and audio blocks</summary>
+        <form id="participant-form" class="field-grid">
+          <label>Anonymized ID<input name="id" required autocomplete="off" placeholder="dj-01"></label>
+          <label>Experience<select name="experienceBand">
+            <option value="under-2-years">Under 2 years</option>
+            <option value="2-5-years">2–5 years</option>
+            <option value="6-10-years">6–10 years</option>
+            <option value="over-10-years">Over 10 years</option>
+          </select></label>
+          <label class="check"><input name="currentlyActiveDj" type="checkbox" checked> Currently active DJ</label>
+          <label class="check"><input name="regularlyScratches" type="checkbox"> Regularly scratches</label>
+          <label class="check"><input name="trainingCompleted" type="checkbox"> Training completed</label>
+          <button type="submit">Add participant</button>
+        </form>
+
+        <div class="inline-actions">
+          <label>Participant<select id="block-participant"></select></label>
+          <label>Block<select id="block-kind"><option value="abx">ABX listening</option><option value="live">Live control</option></select></label>
+          <button id="start-block" type="button">Start audio block</button>
+          <button id="end-block" type="button" disabled>End audio block</button>
+          <button id="cancel-block" type="button" disabled>Cancel block</button>
+        </div>
+        <output id="block-result">No audio block is active.</output>
+      </details>
+
+      <details>
+        <summary>3. Post-unblinding ABX entry</summary>
+        <p class="notice">Enter conditions only after responses and cue coding are frozen.</p>
+        <form id="trial-form" class="field-grid compact">
+          <label>Participant<select name="participantId"></select></label>
+          <label>Excerpt ID<input name="excerptId" required autocomplete="off"></label>
+          <label>Gesture family<select name="gestureFamily">
+            <option value="baby-drag-cue">Baby, drag and cue</option>
+            <option value="stab-transform">Stab and transform</option>
+            <option value="chirp-flare">Chirp and flare</option>
+            <option value="crab-orbit">Crab and orbit</option>
+            <option value="fast-release">Fast release</option>
+            <option value="motor-runout">Motor and run-out</option>
+          </select></label>
+          <label>A condition<select name="aCondition"><option value="physical">Physical</option><option value="player">Player</option></select></label>
+          <label>B condition<select name="bCondition"><option value="player">Player</option><option value="physical">Physical</option></select></label>
+          <label>X condition<select name="xCondition"><option value="physical">Physical</option><option value="player">Player</option></select></label>
+          <label>Response<select name="responseCondition"><option value="physical">Physical</option><option value="player">Player</option></select></label>
+          <label>Confidence (1–5)<input name="confidence" type="number" min="1" max="5" step="1" required></label>
+          <label>Realism (1–7)<input name="realism" type="number" min="1" max="7" step="1" required></label>
+          <label>Transient sharpness (1–7)<input name="transientSharpness" type="number" min="1" max="7" step="1" required></label>
+          <label>Timing naturalness (1–7)<input name="timingNaturalness" type="number" min="1" max="7" step="1" required></label>
+          <label>Audible cue<input name="audibleCue" autocomplete="off"></label>
+          <label>Cue code<input name="cueCode" pattern="[a-z0-9]+(?:-[a-z0-9]+)*" autocomplete="off"></label>
+          <button type="submit">Add ABX trial</button>
+        </form>
+      </details>
+
+      <details>
+        <summary>4. Live-control routine</summary>
+        <form id="routine-form" class="field-grid compact">
+          <label>Participant<select name="participantId"></select></label>
+          <label>Preset<select name="assistancePreset">
+            <option>baby</option><option>stab</option><option>chirp</option><option>transform</option>
+            <option>flare</option><option>crab</option><option>orbit</option><option>drum</option>
+          </select></label>
+          <label>Duration (seconds)<input name="durationSeconds" type="number" min="60" step="1" value="60" required></label>
+          <label>Instructed attempts<input name="instructedAttempts" type="number" min="0" step="1" required></label>
+          <label>Successful attempts<input name="successfulAttempts" type="number" min="0" step="1" required></label>
+          <label>Missed grabs<input name="missedGrabs" type="number" min="0" step="1" value="0" required></label>
+          <label>Unintended cuts<input name="unintendedCuts" type="number" min="0" step="1" value="0" required></label>
+          <label>Pointer losses<input name="pointerLosses" type="number" min="0" step="1" value="0" required></label>
+          <label>Stuck scratches<input name="stuckScratchIncidents" type="number" min="0" step="1" value="0" required></label>
+          <label>Post-release mutes<input name="postReleaseMutes" type="number" min="0" step="1" value="0" required></label>
+          <label>Timing corrections<input name="timingCorrections" type="number" min="0" step="1" value="0" required></label>
+          <label>Ownership (1–7)<input name="ownershipRating" type="number" min="1" max="7" step="1" required></label>
+          <label>Timing (1–7)<input name="timingRating" type="number" min="1" max="7" step="1" required></label>
+          <label class="check"><input name="assistanceFollowedIntent" type="checkbox"> Assistance followed intent</label>
+          <label class="check"><input name="useInRecordedSet" type="checkbox"> Would use in a recorded set</label>
+          <label class="check"><input name="useInLiveSet" type="checkbox"> Would use in a live set</label>
+          <label class="wide">First requested change<input name="firstChange" required autocomplete="off"></label>
+          <button type="submit">Add routine</button>
+        </form>
+      </details>
+
+      <details>
+        <summary>5. Preflight and study controls</summary>
+        <form id="preflight-form" class="field-grid compact">
+          <label class="check"><input name="level-and-delay-calibration" type="checkbox"> Level and delay calibrated</label>
+          <label class="check"><input name="mechanics" type="checkbox"> Mechanics covered</label>
+          <label class="check"><input name="transport-rates" type="checkbox"> Transport rates covered</label>
+          <label class="check"><input name="presets" type="checkbox"> Presets covered</label>
+          <label class="check"><input name="clocks-and-windows" type="checkbox"> Clocks and windows covered</label>
+          <label class="check"><input name="multi-pointer" type="checkbox"> Multi-pointer covered</label>
+          <label class="check"><input name="limiter-cells" type="checkbox"> Limiter cells covered</label>
+          <label>Level mismatch (dB)<input name="levelMismatchDb" type="number" min="0" step="0.001" required></label>
+          <label>Fixed path delay (ms)<input name="fixedPathDelayMs" type="number" min="0" step="0.001" required></label>
+          <label>De-click bound<input name="declickBound" type="number" min="0" step="0.000001" required></label>
+          <label>Maximum adjacent delta<input name="maximumAdjacentDiscontinuity" type="number" min="0" step="0.000001" required></label>
+          <label>Unexpected clips<input name="unexpectedClips" type="number" min="0" step="1" value="0" required></label>
+          <label>Undecoded zero excursions<input name="undecodedZeroExcursions" type="number" min="0" step="1" value="0" required></label>
+          <label>Discontinuities above bound<input name="discontinuitiesAboveBound" type="number" min="0" step="1" value="0" required></label>
+          <button type="submit">Save preflight</button>
+        </form>
+
+        <form id="protocol-form" class="field-grid compact">
+          <label class="check"><input name="participantConditionLabelsHidden" type="checkbox"> Participant labels hidden</label>
+          <label class="check"><input name="operatorConditionLabelsHidden" type="checkbox"> Operator labels hidden</label>
+          <label class="check"><input name="assistancePresetHidden" type="checkbox"> Assistance preset hidden</label>
+          <label class="check"><input name="randomizationGeneratedBeforeSession" type="checkbox"> Randomization generated first</label>
+          <label class="check"><input name="decodedAfterResultsFrozen" type="checkbox"> Conditions decoded after freeze</label>
+          <label>Cue coders<input name="coderCount" type="number" min="0" step="1" value="0" required></label>
+          <label class="check"><input name="conditionLabelsHidden" type="checkbox"> Cue coders were blinded</label>
+          <label class="check"><input name="differencesResolvedBeforeUnblinding" type="checkbox"> Cue differences resolved before unblinding</label>
+          <button type="submit">Save study controls</button>
+        </form>
+
+        <form id="exclusion-form" class="field-grid compact">
+          <label>Excluded ID<input name="id" required autocomplete="off"></label>
+          <label class="wide">Reason<input name="reason" required autocomplete="off"></label>
+          <label class="check"><input name="decidedBeforeUnblinding" type="checkbox"> Decided before unblinding</label>
+          <button type="submit">Add exclusion</button>
+        </form>
+      </details>
+
+      <details>
+        <summary>6. Evidence artifacts</summary>
+        <p class="notice">Use paths relative to the exported results file. Add SHA-256 values before analysis.</p>
+        <form id="artifact-form" class="artifact-grid"></form>
+        <button id="save-artifacts" type="button">Save artifact paths</button>
+      </details>
+    </section>
+  </main>
+
+  <script type="module" src="./dj-validation-console.js"></script>
+</body>
+</html>

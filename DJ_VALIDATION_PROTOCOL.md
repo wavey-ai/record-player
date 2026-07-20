@@ -152,7 +152,32 @@ trial blocks to be rerun.
 
 ## Executable analysis
 
-Generate a version-2 JSON collection template:
+Use the dedicated console for a hardware session. Start from a committed, clean
+candidate, then build and run the player:
+
+```sh
+npm run build
+npm run dev
+```
+
+Open `http://localhost:5193/dj-validation.html`. The console embeds the tested
+player and reads `player-build-info.json`. It refuses physical-loopback
+measurements and audio blocks if the build is dirty, the draft commit does not
+match the running build, or the `0.35` HF, `0.72` stylus and `0.08` fader settings
+are not pinned.
+
+Use the console to record the hardware chain, participants, browser audio blocks,
+physical loopback, ABX trials, live routines, preflight results, study controls,
+exclusions and artifact metadata. It keeps a local draft. Export the results
+after each session. A live block also produces a separate movement-trace JSON
+file and records its browser-computed SHA-256 digest.
+
+The console does not perform the randomization or reveal hidden condition labels.
+Follow the blinding procedure above. Enter decoded A/B/X conditions only after
+responses and exclusions are frozen.
+
+The command-line template remains available for an offline workflow. Generate a
+version-2 JSON collection template:
 
 ```sh
 npm run validation:template > dj-validation-results.json
@@ -166,9 +191,9 @@ Use a new `excerptId` for each scored trial. Record all exclusions before
 unblinding. Complete the blinding and cue-coding declarations only after their
 conditions are true.
 
-The template contains one example participant, trial and routine. Duplicate the
-records to meet the registered counts. Replace all placeholder and `null`
-values. An exclusion record requires `id`, `reason` and
+The command-line template contains one example participant, trial and routine.
+Duplicate the records to meet the registered counts. Replace all placeholder and
+`null` values. An exclusion record requires `id`, `reason` and
 `decidedBeforeUnblinding: true`.
 
 Analyze the frozen file:

@@ -1,54 +1,29 @@
-export const DJ_VALIDATION_SCHEMA_VERSION = 2;
+import {
+  createDjValidationTemplate,
+  DJ_BLOCK_KINDS,
+  DJ_CONDITIONS,
+  DJ_EXPERIENCE_BANDS,
+  DJ_GESTURE_FAMILIES,
+  DJ_REQUIRED_ARTIFACT_ROLES,
+  DJ_REQUIRED_PREFLIGHT_CHECKS,
+  DJ_REQUIRED_SETTINGS,
+  DJ_SCRATCH_PRESETS,
+  DJ_VALIDATION_SCHEMA_VERSION,
+} from "../web/dj-validation-template.js";
 
-export const DJ_GESTURE_FAMILIES = Object.freeze([
-  "baby-drag-cue",
-  "stab-transform",
-  "chirp-flare",
-  "crab-orbit",
-  "fast-release",
-  "motor-runout",
-]);
+export {
+  createDjValidationTemplate,
+  DJ_GESTURE_FAMILIES,
+  DJ_VALIDATION_SCHEMA_VERSION,
+} from "../web/dj-validation-template.js";
 
-const SCRATCH_PRESETS = new Set([
-  "baby",
-  "stab",
-  "chirp",
-  "transform",
-  "flare",
-  "crab",
-  "orbit",
-  "drum",
-]);
-const CONDITIONS = new Set(["physical", "player"]);
-const BLOCK_KINDS = new Set(["abx", "live"]);
-const EXPERIENCE_BANDS = new Set([
-  "under-2-years",
-  "2-5-years",
-  "6-10-years",
-  "over-10-years",
-]);
-const REQUIRED_ARTIFACT_ROLES = Object.freeze([
-  "source-master",
-  "physical-capture",
-  "player-capture",
-  "movement-trace",
-  "randomization-manifest",
-  "cue-codebook",
-]);
-const REQUIRED_PREFLIGHT_CHECKS = Object.freeze([
-  "level-and-delay-calibration",
-  "mechanics",
-  "transport-rates",
-  "presets",
-  "clocks-and-windows",
-  "multi-pointer",
-  "limiter-cells",
-]);
-const REQUIRED_SETTINGS = Object.freeze({
-  highFrequencyAccelerationLimit: 0.35,
-  stylusTracingLimit: 0.72,
-  faderCurve: 0.08,
-});
+const SCRATCH_PRESETS = new Set(DJ_SCRATCH_PRESETS);
+const CONDITIONS = new Set(DJ_CONDITIONS);
+const BLOCK_KINDS = new Set(DJ_BLOCK_KINDS);
+const EXPERIENCE_BANDS = new Set(DJ_EXPERIENCE_BANDS);
+const REQUIRED_ARTIFACT_ROLES = DJ_REQUIRED_ARTIFACT_ROLES;
+const REQUIRED_PREFLIGHT_CHECKS = DJ_REQUIRED_PREFLIGHT_CHECKS;
+const REQUIRED_SETTINGS = DJ_REQUIRED_SETTINGS;
 const EXACT_TEST_ALPHA = 0.05;
 const MAX_IDENTIFICATION_UPPER_BOUND = 0.60;
 const MAX_REPEATABLE_CUE_FRACTION = 0.25;
@@ -391,6 +366,7 @@ export function analyzeDjValidation(input, { sourceSha256 = null, verifiedArtifa
   const candidate = object(data.candidate, "candidate");
   const commit = string(candidate.commit, "candidate.commit");
   assertion(/^[0-9a-f]{7,40}$/i.test(commit), "candidate.commit must be a Git commit hash");
+  const worktreeDirty = boolean(candidate.worktreeDirty, "candidate.worktreeDirty");
   const settings = object(candidate.settings, "candidate.settings");
   for (const [field] of Object.entries(REQUIRED_SETTINGS)) {
     number(settings[field], `candidate.settings.${field}`, { minimum: 0, maximum: 1 });
@@ -572,7 +548,7 @@ export function analyzeDjValidation(input, { sourceSha256 = null, verifiedArtifa
   const artifactRoles = new Set(artifacts.map(artifact => artifact.role));
   const verifiedRoles = new Set(verifiedArtifactRoles);
   const artifactHashesPass = REQUIRED_ARTIFACT_ROLES.every(role => artifactRoles.has(role) && verifiedRoles.has(role));
-  const settingsPinned = Object.entries(REQUIRED_SETTINGS)
+  const settingsPinned = !worktreeDirty && Object.entries(REQUIRED_SETTINGS)
     .every(([field, expected]) => closeTo(settings[field], expected))
     && nativeRpmValues.some(value => closeTo(value, 100 / 3))
     && nativeRpmValues.some(value => closeTo(value, 45))
@@ -599,7 +575,7 @@ export function analyzeDjValidation(input, { sourceSha256 = null, verifiedArtifa
     && cueCoding.differencesResolvedBeforeUnblinding;
 
   const criteria = Object.freeze({
-    pinnedCandidate: criterion(settingsPinned, settings, "Use the shipped 0.35/0.72/0.08 settings, both RPM values, and both end policies."),
+    pinnedCandidate: criterion(settingsPinned, { commit, worktreeDirty, settings }, "Use a clean commit with the shipped 0.35/0.72/0.08 settings, both RPM values, and both end policies."),
     artifactHashes: criterion(artifactHashesPass, { declared: [...artifactRoles], verified: [...verifiedRoles] }, "Verify each required source, capture, trace, manifest, and cue-codebook SHA-256 digest."),
     preflight: criterion(preflightPass, preflight, "Pass all mechanical and signal checks with no rejection event."),
     studyControls: criterion(studyControlsPass, { blinding, cueCoding, allTrained, fixedPathDelayMs }, "Use the registered double-blind, training, cue-coding, and room controls."),
@@ -671,139 +647,4 @@ export function analyzeDjValidation(input, { sourceSha256 = null, verifiedArtifa
     }),
     criteria,
   });
-}
-
-export function createDjValidationTemplate() {
-  const emptyStats = {
-    supported: null,
-    api: "",
-    underrunEvents: null,
-    underrunDurationMs: null,
-    totalDurationMs: null,
-    averageLatencyMs: null,
-    minimumLatencyMs: null,
-    maximumLatencyMs: null,
-  };
-  const participantId = "replace-with-participant-id";
-  return {
-    schemaVersion: DJ_VALIDATION_SCHEMA_VERSION,
-    candidate: {
-      commit: "replace-with-tested-commit",
-      settings: {
-        highFrequencyAccelerationLimit: REQUIRED_SETTINGS.highFrequencyAccelerationLimit,
-        stylusTracingLimit: REQUIRED_SETTINGS.stylusTracingLimit,
-        faderCurve: REQUIRED_SETTINGS.faderCurve,
-        acousticEffects: true,
-        surfaceEffects: true,
-        nativeRpmValues: [100 / 3, 45],
-        endPolicies: ["runout", "clean"],
-      },
-    },
-    environment: {
-      browser: "",
-      os: "",
-      inputDevice: "",
-      audioInterface: "",
-      listeningTransducers: ["headphones", "monitors"],
-      quietRoom: false,
-      displaySampleRateHz: null,
-      audioContextSampleRateHz: null,
-      baseLatencyMs: null,
-      outputLatencyMs: null,
-      interfaceBufferFrames: null,
-      pointerCommandLatencyMs: { p50: null, p95: null, maximum: null },
-      acousticLoopback: {
-        samples: null,
-        sampleRate: null,
-        repetitionsRequested: null,
-        medianMs: null,
-        p95Ms: null,
-        maximumMs: null,
-        minimumMs: null,
-        jitterMs: null,
-        minimumCorrelation: null,
-        maximumLatencyMs: 500,
-        amplitude: 0.08,
-        inputDeviceLabel: "",
-        inputDeviceSettings: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-        },
-        outputDeviceId: null,
-      },
-    },
-    artifacts: REQUIRED_ARTIFACT_ROLES.map(role => ({ role, path: "", sha256: "" })),
-    preflight: {
-      checks: Object.fromEntries(REQUIRED_PREFLIGHT_CHECKS.map(check => [check, false])),
-      unexpectedClips: 0,
-      undecodedZeroExcursions: 0,
-      discontinuitiesAboveBound: 0,
-      levelMismatchDb: null,
-      fixedPathDelayMs: null,
-      declickBound: null,
-      maximumAdjacentDiscontinuity: null,
-    },
-    blinding: {
-      participantConditionLabelsHidden: false,
-      operatorConditionLabelsHidden: false,
-      assistancePresetHidden: false,
-      randomizationGeneratedBeforeSession: false,
-      decodedAfterResultsFrozen: false,
-    },
-    cueCoding: {
-      coderCount: 0,
-      conditionLabelsHidden: false,
-      differencesResolvedBeforeUnblinding: false,
-    },
-    exclusions: [],
-    blocks: ["abx", "live"].map(kind => ({
-      id: `${participantId}-${kind}`,
-      participantId,
-      kind,
-      before: { ...emptyStats },
-      after: { ...emptyStats },
-    })),
-    participants: [{
-      id: participantId,
-      currentlyActiveDj: false,
-      regularlyScratches: false,
-      experienceBand: "under-2-years",
-      trainingCompleted: false,
-      trials: [{
-        id: `${participantId}-trial-1`,
-        excerptId: `${participantId}-excerpt-1`,
-        gestureFamily: DJ_GESTURE_FAMILIES[0],
-        aCondition: "physical",
-        bCondition: "player",
-        xCondition: "physical",
-        responseCondition: "physical",
-        confidence: null,
-        realism: null,
-        transientSharpness: null,
-        timingNaturalness: null,
-        audibleCue: "",
-        cueCode: null,
-      }],
-      routines: [{
-        id: `${participantId}-routine-1`,
-        assistancePreset: "baby",
-        durationSeconds: null,
-        instructedAttempts: null,
-        successfulAttempts: null,
-        missedGrabs: null,
-        unintendedCuts: null,
-        pointerLosses: null,
-        stuckScratchIncidents: null,
-        postReleaseMutes: null,
-        timingCorrections: null,
-        ownershipRating: null,
-        timingRating: null,
-        assistanceFollowedIntent: null,
-        useInRecordedSet: null,
-        useInLiveSet: null,
-        firstChange: "",
-      }],
-    }],
-  };
 }

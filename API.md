@@ -210,6 +210,7 @@ const unsubscribe = player.subscribe(state => {
   state.highFrequencyAccelerationLimit;
   state.stylusTracingLimit;
   state.pointerToAudioLatencyMs;
+  state.pointerAppliedCommandId;
   state.audioBaseLatencyMs;
   state.audioOutputLatencyMs;
   state.audioPlaybackStats;
@@ -745,11 +746,11 @@ The decoder and tape/cache paths use `player-wasm` for record/ECDC parsing and
 the required cache encryption helpers; the real-time AudioWorklet does not
 import that crate.
 
-The current real-WASM timing smoke measured p95 render calls of `0.0389 ms`
-(`1.46%` of budget) for normal playback and `0.2100 ms` (`7.87%`) for
+The current real-WASM timing smoke measured p95 render calls of `0.0388 ms`
+(`1.45%` of budget) for normal playback and `0.2127 ms` (`7.97%`) for
 alternating `±8×` `crab`/8-click scratching. Applying a fresh six-second stereo
-PCM window measured p95 `0.0740 ms` (`2.77%`) and maximum `0.2569 ms`
-(`9.63%`). For comparison, a 128-frame quantum at 48 kHz lasts `2.667 ms`.
+PCM window measured p95 `0.1020 ms` (`3.83%`) and maximum `0.2696 ms`
+(`10.11%`). For comparison, a 128-frame quantum at 48 kHz lasts `2.667 ms`.
 Those measurements cover engine timing, not subjective feel or sound quality.
 
 Run `npm run bench:worklet` to rebuild release WASM before timing it. The figures
@@ -798,9 +799,12 @@ Automated checks do not establish subjective vinyl similarity or tactile
 quality. The outstanding blind listening, control-task and free-performance
 procedure is specified in
 [`DJ_VALIDATION_PROTOCOL.md`](./DJ_VALIDATION_PROTOCOL.md); this API reference
-does not claim results from that human validation. Create the versioned results
-file with `npm run validation:template`. Apply the pre-registered acceptance
-rules with `npm run validation:analyze -- <file>`.
+does not claim results from that human validation. The build includes
+`/dj-validation.html`, which binds a collection session to a clean candidate and
+records the public latency and playback-statistics APIs. Create an offline
+versioned results file with `npm run validation:template`. Apply the
+pre-registered acceptance rules with
+`npm run validation:analyze -- <file>`.
 
 
 ## Transport motor

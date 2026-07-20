@@ -32,6 +32,7 @@ This is a focused standalone player rather than a copy of the legacy play applic
 - adaptive band-limited interpolation for high-speed playback
 - a default-on Rust HF acceleration limiter, kept distinct from stylus tracing,
   with both strengths in a collapsed Advanced Controls panel
+- a build-bound DJ validation console for hardware and blinded-study evidence
 - IndexedDB PCM caching
 - frame-timed scratch-performance capture, persistence and replay
 - a configurable radial canvas UI with a stylus, concentric turntable, Technics-style pitch control, strobe rows and lamp.
@@ -133,10 +134,11 @@ The build:
 
 1. clears `dist`
 2. copies `web` into `dist`
-3. builds the root `record-player` crate into `dist/wasm/record-player`
-4. builds `player-wasm` into `dist/wasm/player-wasm`
-5. copies the shared decoder scripts
-6. copies ONNX Runtime Web and the EnCodec bundles.
+3. writes `dist/player-build-info.json` with the Git commit and worktree state
+4. builds the root `record-player` crate into `dist/wasm/record-player`
+5. builds `player-wasm` into `dist/wasm/player-wasm`
+6. copies the shared decoder scripts
+7. copies ONNX Runtime Web and the EnCodec bundles.
 
 Generated browser modules:
 
@@ -211,10 +213,10 @@ Language placement follows measured real-time cost: engine policy defaults to
 Rust unless the browser boundary would add work or latency.
 
 In the current real-WASM timing smoke benchmark, p95 render-call time was
-`0.0389 ms` (`1.46%` of budget) for normal playback and `0.2100 ms` (`7.87%`)
+`0.0388 ms` (`1.45%` of budget) for normal playback and `0.2127 ms` (`7.97%`)
 for alternating `±8×` scratching with `crab`/8 clicks. Applying a fresh
-six-second stereo PCM window measured p95 `0.0740 ms` (`2.77%`) and maximum
-`0.2569 ms` (`9.63%`). A 128-frame quantum at 48 kHz is `2.667 ms`. These are
+six-second stereo PCM window measured p95 `0.1020 ms` (`3.83%`) and maximum
+`0.2696 ms` (`10.11%`). A 128-frame quantum at 48 kHz is `2.667 ms`. These are
 engine timing measurements, not perceptual-validation results.
 
 `npm run bench:worklet` first rebuilds release WASM, then runs the deterministic
@@ -912,18 +914,41 @@ blind listening, control-task and free-performance procedure is defined in
 [`DJ_VALIDATION_PROTOCOL.md`](./DJ_VALIDATION_PROTOCOL.md), including hardware,
 level matching, failure reporting and acceptance criteria.
 
-The repository includes a versioned collection template and an exact acceptance
-analyzer. Generate a template and analyze a frozen result file with:
+The repository includes a build-bound collection console. Build from a clean
+worktree, start the development server, and open the console:
+
+```sh
+npm run build
+npm run dev
+```
+
+```text
+http://localhost:5193/dj-validation.html
+```
+
+The console embeds the real player. It records the hardware chain, physical
+loopback, participant blocks, browser playback statistics, pointer-command
+latency, ABX trials, live routines, preflight declarations and artifact hashes.
+It saves a local draft and exports schema-version-2 JSON. It also exports the
+captured movement trace with a browser-computed SHA-256 hash.
+
+The console refuses release measurements and audio blocks if the build came
+from a dirty worktree, if the draft commit differs from the running build, or
+if the pinned HF, stylus or fader settings have changed. This prevents an
+unidentified candidate from contributing release evidence.
+
+The command-line template remains available for offline collection. Generate a
+template and analyze a frozen result file with:
 
 ```sh
 npm run validation:template > dj-validation-results.json
 npm run validation:analyze -- dj-validation-results.json
 ```
 
-The analyzer validates pinned engine settings, streams and verifies artifact hashes, preflight
-results and zero-underrun audio blocks. It also checks trial balance, exact ABX
-statistics, repeated cues and live-control criteria. Its report includes the
-SHA-256 digest of the input file.
+The analyzer validates pinned engine settings, streams and verifies artifact
+hashes, preflight results and zero-underrun audio blocks. It also checks trial
+balance, exact ABX statistics, repeated cues and live-control criteria. Its
+report includes the SHA-256 digest of the input file.
 
 The player also includes a physical-loopback latency probe. Stop the transport,
 route output to the selected interface input or microphone and run:

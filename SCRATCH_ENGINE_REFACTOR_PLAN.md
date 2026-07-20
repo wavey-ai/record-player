@@ -9,12 +9,12 @@ is made.
 Current automated evidence:
 
 - `cargo test --workspace`: 81 tests (76 `record-player`, 5 `player-wasm`).
-- `node --test test/*.test.mjs`: 42 tests.
+- `node --test test/*.test.mjs`: 51 tests.
 - `npm run build`: both browser WASM packages build in release mode.
 - `npm run bench:worklet`: real release WASM in the deterministic worklet harness;
-  p95 `0.0389 ms` (`1.46%`) normal and `0.2100 ms` (`7.87%`) alternating
-  `±8×` crab/8. A fresh six-second stereo PCM window measured p95 `0.0740 ms`
-  (`2.77%`) and maximum `0.2569 ms` (`9.63%`) against a `2.667 ms` quantum.
+  p95 `0.0388 ms` (`1.45%`) normal and `0.2127 ms` (`7.97%`) alternating
+  `±8×` crab/8. A fresh six-second stereo PCM window measured p95 `0.1020 ms`
+  (`3.83%`) and maximum `0.2696 ms` (`10.11%`) against a `2.667 ms` quantum.
 - `npm run test:browser`: Chrome 150 loaded real release WASM at 44.1 kHz.
   It exercised all eight gates in both directions and captured rendered audio.
   It recorded, replayed and restored a take with more than 400 events.
@@ -36,6 +36,9 @@ Current automated evidence:
 - `npm run validation:template` creates the versioned DJ-study data shape.
   `npm run validation:analyze -- <file>` applies the pinned preflight, ABX and
   live-control acceptance rules. Unit tests cover passing and failing studies.
+- `/dj-validation.html` embeds the real player and collects build-bound hardware,
+  loopback, audio-block, participant, trial, routine and artifact evidence. It
+  refuses release measurements from a dirty or mismatched build.
 - The public acoustic-loopback probe emits a bounded diagnostic sweep and uses
   AudioWorklet frame tags for input correlation. Chrome passed a three-probe
   software loopback. Target hardware must supply the physical result.

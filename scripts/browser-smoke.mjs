@@ -539,6 +539,11 @@ async function runBrowserScenario() {
     /Stop the transport/.test(String(liveMeasurementError?.message || "")),
     "The public acoustic-loopback API did not reject an active transport",
   );
+  const pointerAppliedCommandId = player.getState().pointerAppliedCommandId;
+  assert(
+    Number.isInteger(pointerAppliedCommandId) && pointerAppliedCommandId > 0,
+    "The public player state did not identify the applied pointer command",
+  );
 
   return {
     chrome: navigator.userAgent,
@@ -550,6 +555,7 @@ async function runBrowserScenario() {
     audioPlaybackStats,
     softwareLoopback,
     maximumPointerToAudioLatencyMs: maximumLatencyMs,
+    pointerAppliedCommandId,
     captureBytes,
     continuity,
     replay: {
@@ -825,11 +831,59 @@ try {
       meanPercent: values.reduce((sum, value) => sum + value, 0) / values.length * 100,
     }])),
   };
+  await session.send("Page.navigate", {
+    url: `http://127.0.0.1:${serverPort}/dj-validation.html`,
+  });
+  await pause(500);
+  const validationConsoleResult = await session.send("Runtime.evaluate", {
+    expression: `(async () => {
+      const deadline = performance.now() + 10000;
+      while (
+        (!globalThis.__VINYL_DJ_VALIDATION__?.getPlayer()
+          || !globalThis.__VINYL_DJ_VALIDATION__?.getBuildInfo()?.commit)
+        && performance.now() < deadline
+      ) await new Promise(resolve => setTimeout(resolve, 25));
+      const consoleApi = globalThis.__VINYL_DJ_VALIDATION__;
+      if (!consoleApi?.getPlayer()) throw new Error("Validation console player did not start");
+      const form = document.querySelector("#participant-form");
+      form.elements.id.value = "browser-dj-01";
+      form.elements.currentlyActiveDj.checked = true;
+      form.elements.regularlyScratches.checked = true;
+      form.elements.trainingCompleted.checked = true;
+      form.elements.experienceBand.value = "over-10-years";
+      form.requestSubmit();
+      await new Promise(resolve => setTimeout(resolve, 50));
+      return {
+        schemaVersion: consoleApi.getSession().snapshot().schemaVersion,
+        summary: consoleApi.getSession().summary(),
+        buildInfo: consoleApi.getBuildInfo(),
+        playerApiPublished: typeof consoleApi.getPlayer().measureAcousticLoopbackLatency === "function",
+        status: document.querySelector("#console-status").textContent,
+      };
+    })()`,
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  if (validationConsoleResult.exceptionDetails) {
+    throw new Error(
+      validationConsoleResult.exceptionDetails.exception?.description
+        || validationConsoleResult.exceptionDetails.text
+        || "Validation console failed",
+    );
+  }
+  const validationConsole = validationConsoleResult.result?.value;
+  if (validationConsole?.schemaVersion !== 2) throw new Error("Validation console did not use schema version 2");
+  if (validationConsole?.summary?.participants !== 1) throw new Error("Validation console did not record a participant");
+  if (!validationConsole?.playerApiPublished) throw new Error("Validation console did not expose the real player API");
+  if (typeof validationConsole?.buildInfo?.worktreeDirty !== "boolean") {
+    throw new Error("Validation console did not load Git build metadata");
+  }
   if (pageErrors.length) throw new Error(`Browser page errors:\n${pageErrors.join("\n")}`);
   process.stdout.write(`Real Chrome AudioWorklet smoke passed:\n${JSON.stringify({
     ...result.result?.value,
     multiPointer,
     webAudioRealtime,
+    validationConsole,
   }, null, 2)}\n`);
 } finally {
   session?.close();

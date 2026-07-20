@@ -79,6 +79,7 @@ The audit compared those files with:
 | Device underrun telemetry | Not public | Normalized browser playback statistics | Beyond reference |
 | Acoustic-loopback latency | Not present | Frame-tagged output-to-input correlation probe | Beyond reference |
 | DJ-study analysis | Not present | Versioned exact acceptance analyzer | Beyond reference |
+| DJ evidence collection | Not present | Build-bound browser session console | Beyond reference |
 
 ## Important deliberate differences
 
@@ -134,11 +135,11 @@ measured audio-thread reason to make either change.
 ## Automated evidence
 
 - `cargo test --workspace`: 81 tests.
-- `node --test test/*.test.mjs`: 42 tests.
-- `npm run bench:worklet`: normal p95 `1.46%` of a quantum.
-- The same benchmark measured `7.87%` for alternating `±8×` Crab/8.
+- `node --test test/*.test.mjs`: 51 tests.
+- `npm run bench:worklet`: normal p95 `1.45%` of a quantum.
+- The same benchmark measured `7.97%` for alternating `±8×` Crab/8.
 - Direct copy into prepared Rust window storage reduced fresh six-second window
-  application to p95 `2.77%` and maximum `9.63%`.
+  application to p95 `3.83%` and maximum `10.11%`.
 - Regression gates now require window-application p95 below `25%` and maximum
   below `50%` of a quantum.
 - `npm run test:browser`: real Chrome 150 and real release WASM passed.
@@ -164,6 +165,9 @@ measured audio-thread reason to make either change.
 - The DJ validation analyzer computes the exact two-sided binomial test and a
   95% Clopper-Pearson interval. Tests reject identification, repeated cues and
   audio underruns. A complete synthetic study passes all registered rules.
+- Chrome opened the dedicated collection console, bound it to generated build
+  metadata and added a participant through the real form. The console refuses
+  release blocks from a dirty or mismatched candidate.
 - Chrome detected three software-loopback probes at `20.667 ms`. Minimum
   correlation was above `0.994`. This checks scheduling and correlation only;
   it is not a physical-path result.
@@ -176,8 +180,8 @@ measured audio-thread reason to make either change.
 2. Test actual touchscreens, pens, trackpads and mouse devices.
 3. Run the acoustic-loopback probe through each target interface and speaker or
    electrical-loopback path. Attach the result to the study file.
-4. Collect the frozen data for the pre-registered blind test. Analyze that data
-   with `npm run validation:analyze -- <file>`.
+4. Collect the frozen data in `/dj-validation.html` for the pre-registered blind
+   test. Analyze the exported data with `npm run validation:analyze -- <file>`.
 5. Tune only the variables that fail those tests.
 
 An exact JavaScript-to-Rust output hash is not a useful release gate. The target

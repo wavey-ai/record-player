@@ -439,6 +439,7 @@ const state = {
   stylusTracingLimit: DEFAULT_STYLUS_TRACING_LIMIT,
   pointerToAudioLatencyMs: null,
   pointerCommandId: 0,
+  pointerAppliedCommandId: null,
   lastDspRotationTurns: null,
   cleanEnd: false,
   canvasController: null,
@@ -1145,6 +1146,7 @@ async function initialiseProgressiveStream(
   state.lastCoreObservedAtMs = 0;
   state.lastDspRotationTurns = null;
   state.pointerToAudioLatencyMs = null;
+  state.pointerAppliedCommandId = null;
   state.streamDecodedFrames = 0;
   state.streamReadyMarking = false;
   initialisePcmWindowTransport(
@@ -2566,7 +2568,12 @@ function handleWorkletMessage(event) {
         state.stylusTracingLimit = message.stylusTracingLimit;
       }
     }
-    if (Number.isFinite(message.inputLatencyMs)) state.pointerToAudioLatencyMs = message.inputLatencyMs;
+    if (Number.isFinite(message.inputLatencyMs)) {
+      state.pointerToAudioLatencyMs = message.inputLatencyMs;
+      state.pointerAppliedCommandId = Number.isFinite(Number(message.commandId))
+        ? Number(message.commandId)
+        : null;
+    }
 
     const rotationTurns = Number(message.platterRotationTurns);
     if (!replayActive && Number.isFinite(rotationTurns)) {
@@ -3439,6 +3446,7 @@ function publicState() {
     highFrequencyAccelerationLimit: state.highFrequencyAccelerationLimit,
     stylusTracingLimit: state.stylusTracingLimit,
     pointerToAudioLatencyMs: state.pointerToAudioLatencyMs,
+    pointerAppliedCommandId: state.pointerAppliedCommandId,
     audioBaseLatencyMs: Number.isFinite(state.context?.baseLatency)
       ? state.context.baseLatency * 1000
       : null,
@@ -3642,6 +3650,7 @@ const api = Object.freeze({
     state.lastDspRotationTurns = null;
     state.replayScratching = false;
     state.pointerToAudioLatencyMs = null;
+    state.pointerAppliedCommandId = null;
     state.effectiveRate = 0;
     state.packetGain = 1;
     state.mixerGain = 1;
