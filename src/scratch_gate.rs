@@ -654,6 +654,41 @@ mod tests {
         assert_eq!(gate.direction(), sign(direction));
     }
 
+    fn count_target_runs(preset: ScratchPreset, clicks: u8, target: f64) -> usize {
+        let mut gate = ScratchGate::new(preset);
+        gate.set_clicks(clicks);
+        gate.contact_active = true;
+        gate.direction = 1;
+        gate.moving = true;
+
+        let rate = 1.0;
+        let mut previous = gate.compute_target(rate, rate);
+        let mut runs = usize::from(previous == target);
+        let frames = (gate.learned_span() * SAMPLE_RATE).floor() as usize;
+        for _ in 0..frames {
+            gate.process(1.0 / SAMPLE_RATE, true, rate, rate);
+            let current = gate.target();
+            if current == target && previous != target {
+                runs += 1;
+            }
+            previous = current;
+        }
+        runs
+    }
+
+    fn audio_fixture_sample(frame: usize, transient: bool) -> f64 {
+        if transient {
+            let age = frame % 257;
+            if age < 96 {
+                (-(age as f64) / 13.0).exp()
+            } else {
+                0.0
+            }
+        } else {
+            (std::f64::consts::TAU * 997.0 * frame as f64 / SAMPLE_RATE).sin()
+        }
+    }
+
     #[test]
     fn parses_every_preset_and_exposes_defaults() {
         let expected_clicks = [1, 1, 1, 2, 1, 4, 2, 1];
@@ -884,6 +919,26 @@ mod tests {
     }
 
     #[test]
+    fn click_driven_techniques_create_one_pulse_or_notch_per_selected_click() {
+        for clicks in [1, 4, 8] {
+            for preset in [ScratchPreset::Transform, ScratchPreset::Crab] {
+                assert_eq!(
+                    count_target_runs(preset, clicks, 1.0),
+                    usize::from(clicks),
+                    "{preset:?} at {clicks} clicks"
+                );
+            }
+            for preset in [ScratchPreset::Flare, ScratchPreset::Orbit] {
+                assert_eq!(
+                    count_target_runs(preset, clicks, 0.0),
+                    usize::from(clicks),
+                    "{preset:?} at {clicks} clicks"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn current_gate_ignores_click_count_for_non_click_techniques() {
         for preset in [
             ScratchPreset::Baby,
@@ -1089,6 +1144,72 @@ mod tests {
         for _ in 0..20_000 {
             let value = gate.process(1.0 / SAMPLE_RATE, true, -1.0, -1.0);
             assert!((0.0..=1.0).contains(&value));
+        }
+    }
+
+    #[test]
+    fn click_gate_envelope_bounds_added_discontinuity_on_audio_fixtures() {
+        let fastest_attack_alpha = 1.0 - (-(1.0 / SAMPLE_RATE) / 0.00035_f64).exp();
+
+        for transient in [false, true] {
+            for clicks in [1, 4, 8] {
+                for preset in [
+                    ScratchPreset::Transform,
+                    ScratchPreset::Flare,
+                    ScratchPreset::Crab,
+                    ScratchPreset::Orbit,
+                ] {
+                    let mut gate = ScratchGate::new(preset);
+                    gate.set_clicks(clicks);
+                    gate.contact_active = true;
+                    gate.direction = 1;
+                    gate.moving = true;
+
+                    let rate = 8.0;
+                    let frames = (gate.learned_span() / rate * SAMPLE_RATE).floor() as usize;
+                    let mut previous_input = audio_fixture_sample(0, transient);
+                    let mut previous_output = previous_input * gate.gate();
+                    for frame in 1..frames {
+                        let gain = gate.process(1.0 / SAMPLE_RATE, true, rate, rate);
+                        let input = audio_fixture_sample(frame, transient);
+                        let output = input * gain;
+                        let input_step = (input - previous_input).abs();
+                        let output_step = (output - previous_output).abs();
+                        assert!(
+                            output_step <= input_step + fastest_attack_alpha + 1e-12,
+                            "{preset:?} at {clicks} clicks added too much discontinuity: \
+                             output {output_step}, input {input_step}"
+                        );
+                        previous_input = input;
+                        previous_output = output;
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn stable_open_and_closed_gate_rms_is_bounded_on_audio_fixtures() {
+        let measure = |gate: &mut ScratchGate, direction: f64, transient: bool| {
+            run(gate, 0.020, true, direction, direction);
+            let frames = (0.012 * SAMPLE_RATE) as usize;
+            let mut input_energy = 0.0;
+            let mut output_energy = 0.0;
+            for frame in 0..frames {
+                let input = audio_fixture_sample(frame, transient);
+                let output = input * gate.process(1.0 / SAMPLE_RATE, true, direction, direction);
+                input_energy += input * input;
+                output_energy += output * output;
+            }
+            (output_energy / input_energy).sqrt()
+        };
+
+        for transient in [false, true] {
+            let mut gate = ScratchGate::new(ScratchPreset::Stab);
+            let closed_ratio = measure(&mut gate, -1.0, transient);
+            let open_ratio = measure(&mut gate, 1.0, transient);
+            assert!(closed_ratio < 1e-6, "closed RMS ratio was {closed_ratio}");
+            assert!(open_ratio > 0.999, "open RMS ratio was {open_ratio}");
         }
     }
 

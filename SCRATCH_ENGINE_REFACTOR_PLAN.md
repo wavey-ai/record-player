@@ -8,7 +8,12 @@ is made.
 
 Current automated evidence:
 
-- `cargo test --workspace`: 101 tests (96 `record-player`, 5 `player-wasm`).
+- `cargo test --workspace`: 104 tests (99 `record-player`, 5 `player-wasm`).
+- Rust gate conformance traverses one learned stroke for Transform, Flare, Crab
+  and Orbit. Click values 1, 4 and 8 produce exactly that many pulses or notches.
+  At `8x`, the de-click envelope stays within its analytical fastest-attack
+  adjacent-sample bound on sine and transient fixtures. Stable Stab closed/open
+  RMS ratios remain below `1e-6` and above `0.999`.
 - `node --test test/*.test.mjs`: 80 tests. Canvas tests check audio-owned phase
   at half-speed forward, full-speed reverse and rest, plus all eight preset and
   click-count selections through independent mouse and touch gestures. The
