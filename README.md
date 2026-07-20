@@ -524,7 +524,7 @@ manual-crossfader changes are frame-timed events. The essential shape is:
   outputSampleRate: 48000,
   durationFrames,
   replaySeed,
-  engine: { version: 5, gateAlgorithmVersion: 4 },
+  engine: { version: 5, gateAlgorithmVersion: 5 },
   initialState: {
     positionFrames,
     rotationDegrees,
@@ -856,9 +856,11 @@ is `state.effectiveCrossfader`, and `state.crossfaderOwner` reports `manual` or
 The gate runs inside `ScratchAcousticDsp`; it uses filtered
 hand intent for responsive direction changes. Confirmed-direction rendered
 travel controls pattern phase. Residual outgoing motion cannot spend the new
-stroke pattern before the audible groove reverses. Phase freezes at rest and
-resets on a confirmed reversal. It does not use `requestAnimationFrame` or wall
-clock time.
+stroke pattern before the audible groove reverses. Candidate-direction travel is
+buffered during the short intent-confirmation window. A confirmed onset or
+reversal keeps that audible distance; rejected jitter discards it. Phase freezes
+at rest and resets on a confirmed reversal. It does not use
+`requestAnimationFrame` or wall clock time.
 Its short speed-adaptive envelope removes discontinuities at gate edges. The
 gate is applied after programme and foley are mixed. During performance replay,
 frame-timed manual-fader events are converted through the recorded sharp curve.
@@ -880,8 +882,9 @@ The eight profiles and their click defaults are:
 Click counts are integer-clamped to `1..8`. Each preset restores its last click
 count. `Transform`, `flare`, `crab`, and `orbit` use that count in their
 travel-locked patterns. The other four patterns ignore it. Gate algorithm 4
-records this behavior. Replays recorded by gate algorithms 1–3 retain their
-original global click-phase behavior.
+introduced this behavior. Gate algorithm 5 also retains audible groove travel
+while it confirms an onset or reversal, so fast cuts stay aligned with the
+record. Historical replays retain the timing of their recorded gate version.
 
 ### Surface and handling layers
 

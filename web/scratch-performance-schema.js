@@ -1,5 +1,5 @@
 export const SCRATCH_PERFORMANCE_SCHEMA_VERSION = 2;
-export const SCRATCH_GATE_ALGORITHM_VERSION = 4;
+export const SCRATCH_GATE_ALGORITHM_VERSION = 5;
 
 export const SCRATCH_PRESETS = Object.freeze([
   "baby",

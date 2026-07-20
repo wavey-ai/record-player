@@ -607,7 +607,7 @@ async function runBrowserScenario() {
   assert(recordedTake?.events?.length > 10, "The browser scratch take did not record engine events");
   assert(recordedTake.schemaVersion === 2, "The browser scratch take did not use schema version 2");
   assert(recordedTake.engine?.version === 5, "The browser scratch take did not identify projected-input capture engine version 5");
-  assert(recordedTake.engine?.gateAlgorithmVersion === 4, "The browser scratch take did not identify gate algorithm version 4");
+  assert(recordedTake.engine?.gateAlgorithmVersion === 5, "The browser scratch take did not identify gate algorithm version 5");
   assert(Number.isInteger(recordedTake.replaySeed) && recordedTake.replaySeed > 0, "The browser scratch take did not store a replay seed");
   assert(Number.isFinite(recordedTake.initialState?.rotationDegrees), "The browser scratch take did not store its platter angle");
   const recordedGrip = recordedTake.events

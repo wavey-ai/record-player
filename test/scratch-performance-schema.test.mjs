@@ -71,8 +71,8 @@ test("schema v2 preserves equal-frame ordering and normalizes controls", () => {
   assert.equal(normalized.initialState.rotationDegrees, -725.5);
   assert.equal(normalized.initialState.highFrequencyAccelerationLimit, 1);
   assert.equal(normalized.initialState.stylusTracingLimit, 0);
-  assert.equal(SCRATCH_GATE_ALGORITHM_VERSION, 4);
-  assert.equal(normalized.engine.gateAlgorithmVersion, 4);
+  assert.equal(SCRATCH_GATE_ALGORITHM_VERSION, 5);
+  assert.equal(normalized.engine.gateAlgorithmVersion, 5);
   assert.ok(Number.isInteger(normalized.replaySeed));
   assert.ok(normalized.replaySeed > 0);
   assert.equal(normalizeScratchPerformance(normalized).replaySeed, normalized.replaySeed);

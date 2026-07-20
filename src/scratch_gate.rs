@@ -3,8 +3,9 @@ use std::str::FromStr;
 
 pub const MIN_SCRATCH_CLICKS: u8 = 1;
 pub const MAX_SCRATCH_CLICKS: u8 = 8;
-pub const SCRATCH_GATE_ALGORITHM_VERSION: u32 = 4;
+pub const SCRATCH_GATE_ALGORITHM_VERSION: u32 = 5;
 const TECHNIQUE_SCOPED_CLICKS_GATE_VERSION: u32 = 4;
+const CONFIRMED_TRAVEL_GATE_VERSION: u32 = 5;
 
 const MOTION_ONSET_RATE: f64 = 0.035;
 const REST_RATE: f64 = 0.018;
@@ -155,6 +156,7 @@ pub struct ScratchGate {
     moving: bool,
     pending_direction: i8,
     pending_seconds: f64,
+    pending_stroke_travel: f64,
     rest_seconds: f64,
     stroke_travel: f64,
     learned_span: f64,
@@ -187,6 +189,7 @@ impl ScratchGate {
             moving: false,
             pending_direction: 0,
             pending_seconds: 0.0,
+            pending_stroke_travel: 0.0,
             rest_seconds: 0.0,
             stroke_travel: 0.0,
             learned_span: preset.initial_stroke_span(),
@@ -308,11 +311,20 @@ impl ScratchGate {
             self.reset_phrase();
         }
 
-        let event = self.update_motion(dt, intent_rate, rendered_rate);
+        let (event, confirmed_travel) = self.update_motion(dt, intent_rate, rendered_rate);
+        let preserves_confirmed_travel = self.algorithm_version >= CONFIRMED_TRAVEL_GATE_VERSION;
         if event == MotionEvent::Reversal {
             self.learn_completed_stroke();
-            self.stroke_travel = 0.0;
+            self.stroke_travel = if preserves_confirmed_travel {
+                confirmed_travel
+            } else {
+                0.0
+            };
             self.phase = 0.0;
+        } else if preserves_confirmed_travel
+            && matches!(event, MotionEvent::Onset | MotionEvent::Resume)
+        {
+            self.stroke_travel += confirmed_travel;
         }
 
         let rendered_stroke_speed = if self.moving && sign(rendered_rate) == self.direction {
@@ -321,7 +333,14 @@ impl ScratchGate {
             0.0
         };
         if self.moving {
-            self.stroke_travel += rendered_stroke_speed * dt;
+            let current_frame_is_already_confirmed = preserves_confirmed_travel
+                && matches!(
+                    event,
+                    MotionEvent::Onset | MotionEvent::Resume | MotionEvent::Reversal
+                );
+            if !current_frame_is_already_confirmed {
+                self.stroke_travel += rendered_stroke_speed * dt;
+            }
             self.update_phase();
         }
 
@@ -346,6 +365,7 @@ impl ScratchGate {
         self.moving = false;
         self.pending_direction = 0;
         self.pending_seconds = 0.0;
+        self.pending_stroke_travel = 0.0;
         self.rest_seconds = 0.0;
         self.stroke_travel = 0.0;
         self.phase = 0.0;
@@ -356,28 +376,33 @@ impl ScratchGate {
         self.drum_refractory = DRUM_REFRACTORY_SECONDS;
     }
 
-    fn update_motion(&mut self, dt: f64, intent_rate: f64, rendered_rate: f64) -> MotionEvent {
+    fn update_motion(
+        &mut self,
+        dt: f64,
+        intent_rate: f64,
+        rendered_rate: f64,
+    ) -> (MotionEvent, f64) {
         let both_at_rest = intent_rate.abs() <= REST_RATE && rendered_rate.abs() <= REST_RATE;
         if both_at_rest {
             self.rest_seconds += dt;
             self.clear_pending_direction();
             if self.moving && self.rest_seconds >= REST_CONFIRM_SECONDS {
                 self.moving = false;
-                return MotionEvent::Rest;
+                return (MotionEvent::Rest, 0.0);
             }
-            return MotionEvent::None;
+            return (MotionEvent::None, 0.0);
         }
         self.rest_seconds = 0.0;
 
         let candidate = self.direction_candidate(intent_rate, rendered_rate);
         if candidate == 0 {
             self.clear_pending_direction();
-            return MotionEvent::None;
+            return (MotionEvent::None, 0.0);
         }
 
         if self.moving && candidate == self.direction {
             self.clear_pending_direction();
-            return MotionEvent::None;
+            return (MotionEvent::None, 0.0);
         }
 
         let confirmation_seconds = if self.direction != 0 && candidate != self.direction {
@@ -390,13 +415,18 @@ impl ScratchGate {
         } else {
             self.pending_direction = candidate;
             self.pending_seconds = dt;
+            self.pending_stroke_travel = 0.0;
+        }
+        if sign(rendered_rate) == candidate {
+            self.pending_stroke_travel += rendered_rate.abs() * dt;
         }
         if self.pending_seconds < confirmation_seconds {
-            return MotionEvent::None;
+            return (MotionEvent::None, 0.0);
         }
 
+        let confirmed_travel = self.pending_stroke_travel;
         self.clear_pending_direction();
-        if self.direction == 0 {
+        let event = if self.direction == 0 {
             self.direction = candidate;
             self.moving = true;
             MotionEvent::Onset
@@ -407,7 +437,8 @@ impl ScratchGate {
         } else {
             self.moving = true;
             MotionEvent::Resume
-        }
+        };
+        (event, confirmed_travel)
     }
 
     fn direction_candidate(&self, intent_rate: f64, rendered_rate: f64) -> i8 {
@@ -430,6 +461,7 @@ impl ScratchGate {
     fn clear_pending_direction(&mut self) {
         self.pending_direction = 0;
         self.pending_seconds = 0.0;
+        self.pending_stroke_travel = 0.0;
     }
 
     fn learn_completed_stroke(&mut self) {
@@ -714,6 +746,91 @@ mod tests {
     }
 
     #[test]
+    fn confirmed_reversal_keeps_audible_travel_from_the_confirmation_window() {
+        let trace = |version| {
+            let mut gate = ScratchGate::new(ScratchPreset::Transform);
+            gate.set_algorithm_version(version);
+            settle_direction(&mut gate, 1.0);
+            run(&mut gate, 0.030, true, 1.0, 1.0);
+            run(&mut gate, 0.0061, true, -8.0, -8.0);
+            assert_eq!(gate.direction(), -1);
+            (gate.phase(), gate.stroke_progress())
+        };
+
+        let historical = trace(4);
+        let current = trace(SCRATCH_GATE_ALGORITHM_VERSION);
+        assert!(
+            historical.1 < 0.02,
+            "historical progress was {}",
+            historical.1
+        );
+        assert!(current.1 > 0.25, "current progress was {}", current.1);
+        assert!(current.0 > historical.0 + 0.35);
+    }
+
+    #[test]
+    fn confirmed_onset_keeps_audible_travel_from_the_confirmation_window() {
+        let trace = |version| {
+            let mut gate = ScratchGate::new(ScratchPreset::Transform);
+            gate.set_algorithm_version(version);
+            run(&mut gate, 0.0041, true, 8.0, 8.0);
+            assert_eq!(gate.direction(), 1);
+            gate.stroke_progress()
+        };
+
+        let historical = trace(4);
+        let current = trace(SCRATCH_GATE_ALGORITHM_VERSION);
+        assert!(historical < 0.02, "historical progress was {historical}");
+        assert!(current > 0.15, "current progress was {current}");
+    }
+
+    #[test]
+    fn rejected_reversal_discards_its_buffered_travel() {
+        let mut gate = ScratchGate::new(ScratchPreset::Transform);
+        settle_direction(&mut gate, 1.0);
+        run(&mut gate, 0.030, true, 1.0, 1.0);
+        let travel_before_jitter = gate.stroke_travel;
+        let phase_before_jitter = gate.phase();
+
+        run(&mut gate, 0.003, true, -8.0, -8.0);
+        assert_eq!(gate.direction(), 1);
+        assert_eq!(gate.stroke_travel, travel_before_jitter);
+        assert_eq!(gate.phase(), phase_before_jitter);
+        assert!(gate.pending_stroke_travel > 0.02);
+
+        run(&mut gate, 0.001, true, 1.0, 1.0);
+        assert_eq!(gate.pending_stroke_travel, 0.0);
+        assert!(gate.stroke_travel > travel_before_jitter);
+        assert!(gate.stroke_travel < travel_before_jitter + 0.002);
+    }
+
+    #[test]
+    fn confirmed_reversal_travel_is_sample_rate_invariant() {
+        let trace = |sample_rate: f64| {
+            let run_at_rate = |gate: &mut ScratchGate, seconds: f64, rate: f64| {
+                let frames = (seconds * sample_rate).round() as usize;
+                for _ in 0..frames {
+                    gate.process(1.0 / sample_rate, true, rate, rate);
+                }
+            };
+            let mut gate = ScratchGate::new(ScratchPreset::Transform);
+            run_at_rate(&mut gate, 0.010, 1.0);
+            run_at_rate(&mut gate, 0.030, 1.0);
+            run_at_rate(&mut gate, 0.0065, -8.0);
+            assert_eq!(gate.direction(), -1);
+            (gate.phase(), gate.stroke_progress())
+        };
+
+        let at_44 = trace(44_100.0);
+        let at_48 = trace(48_000.0);
+        let at_96 = trace(96_000.0);
+        for (left, right) in [(at_44, at_48), (at_48, at_96)] {
+            assert!((left.0 - right.0).abs() < 0.004, "{left:?} != {right:?}");
+            assert!((left.1 - right.1).abs() < 0.002, "{left:?} != {right:?}");
+        }
+    }
+
+    #[test]
     fn rendered_rate_is_a_direction_fallback() {
         let mut gate = ScratchGate::new(ScratchPreset::Transform);
         run(&mut gate, 0.006, true, 0.0, -0.7);
@@ -744,7 +861,7 @@ mod tests {
         let initial_span = gate.learned_span();
         run(&mut gate, 0.0061, true, -1.0, -1.0);
         assert_eq!(gate.direction(), -1);
-        assert!(gate.phase() < 0.04);
+        assert!(gate.phase() > 0.04 && gate.phase() < 0.08);
         assert!(gate.learned_span() > initial_span);
     }
 

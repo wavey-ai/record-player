@@ -8,7 +8,7 @@ is made.
 
 Current automated evidence:
 
-- `cargo test --workspace`: 97 tests (92 `record-player`, 5 `player-wasm`).
+- `cargo test --workspace`: 101 tests (96 `record-player`, 5 `player-wasm`).
 - `node --test test/*.test.mjs`: 80 tests. Canvas tests check audio-owned phase
   at half-speed forward, full-speed reverse and rest, plus all eight preset and
   click-count selections through independent mouse and touch gestures. The
@@ -25,14 +25,14 @@ Current automated evidence:
   motor phase, automatic needle drop, all direct preset controls and every
   radial click value through API, mouse, touch and keyboard paths. It verified
   per-preset click memory and hid the control for non-click techniques. Chrome
-  reported zero underruns over `8.98 s`.
+  reported zero underruns over `9.02 s`.
 - `npm run bench:worklet`: three release-WASM runs measured p95 at `1.47%`
   normal and `8.10–8.14%` for alternating `±8×` crab/8. Fresh six-second
   stereo PCM window p95 was `2.90–3.08%` against a `2.667 ms` quantum.
 - Two current high-contention benchmark attempts exceeded the fresh-window
   threshold. The threshold was not relaxed. A later rerun passed with normal
-  p95 `0.3790 ms`, reversing Crab/8 p95 `0.8440 ms`, and fresh-window maximum
-  `0.3525 ms` against the `2.667 ms` quantum.
+  p95 `0.0573 ms`, reversing Crab/8 p95 `0.2599 ms`, and fresh-window maximum
+  `0.3707 ms` against the `2.667 ms` quantum after gate v5.
 - The post-calibration release run measured p95 `1.49%` normal, `8.70%` for
   alternating `±8×` crab/8 and `2.90%` for a fresh six-second window. Replay
   hashes remained unchanged, confirming that presentation calibration does not
@@ -41,8 +41,8 @@ Current automated evidence:
   when 2,176 live frames separate two runs of the same take. It verifies
   preset, click and manual-fader events at four exact sub-quantum offsets. A
   variable-grip take hashes to `0d44547b...`; its full-grip control hashes to
-  `d3bf7be0...` and must differ. The harness also proves that a version-3 replay
-  selects the historical Rust gate behavior and restores live version 4.
+  `d3bf7be0...` and must differ. The harness also proves that a version-4 replay
+  selects the historical Rust gate behavior and restores live version 5.
 - `npm run test:browser`: Chrome 150 loaded real release WASM at 48 kHz.
   It exercised all eight gates in both directions and captured rendered audio.
   It recorded, replayed and restored an engine-version-5 take with more than
@@ -253,6 +253,10 @@ Acceptance evidence:
 - Gate algorithm 4 applies click count only to Transform, Flare, Crab and Orbit.
   Each preset keeps its own setting. Versioned replay retains the version 1–3
   global phase multiplier for historical takes.
+- Gate algorithm 5 buffers candidate-direction rendered travel during onset and
+  reversal confirmation. It commits that distance only after intent is confirmed,
+  so fast patterns do not land late and false reversals cannot spend a stroke.
+  Tests cover 8× travel, rejected jitter and 44.1/48/96 kHz invariance.
 - Technique behavior:
   - Baby: assisted gate open; manual fader only.
   - Stab: forward stroke audible, return and hold cut.
