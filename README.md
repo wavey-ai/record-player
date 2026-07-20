@@ -925,6 +925,25 @@ results and zero-underrun audio blocks. It also checks trial balance, exact ABX
 statistics, repeated cues and live-control criteria. Its report includes the
 SHA-256 digest of the input file.
 
+The player also includes a physical-loopback latency probe. Stop the transport,
+route output to the selected interface input or microphone and run:
+
+```js
+const loopback = await player.measureAcousticLoopbackLatency({
+  inputDeviceId,
+  repetitions: 5,
+});
+```
+
+The probe uses an AudioWorklet frame clock and does not route microphone audio
+to the output. The study file records its full result as
+`environment.acousticLoopback`. The Chrome smoke covers a software loopback;
+only a physical run can supply release evidence.
+
+The result is round-trip output-to-input latency. It is not a one-way output
+latency estimate. The registered physical gate is p95 at or below `30 ms`, with
+jitter at or below `3 ms`.
+
 The current engineering gap audit is in
 [`REFERENCE_ENGINE_GAP_AUDIT.md`](./REFERENCE_ENGINE_GAP_AUDIT.md). It compares
 this engine with `../yl.vin/apps/play` and separates deliberate improvements

@@ -1,4 +1,4 @@
-export const DJ_VALIDATION_SCHEMA_VERSION = 1;
+export const DJ_VALIDATION_SCHEMA_VERSION = 2;
 
 export const DJ_GESTURE_FAMILIES = Object.freeze([
   "baby-drag-cue",
@@ -50,7 +50,6 @@ const REQUIRED_SETTINGS = Object.freeze({
   faderCurve: 0.08,
 });
 const EXACT_TEST_ALPHA = 0.05;
-const CI_ALPHA = 0.05;
 const MAX_IDENTIFICATION_UPPER_BOUND = 0.60;
 const MAX_REPEATABLE_CUE_FRACTION = 0.25;
 const MIN_RENDERED_REALISM = 6;
@@ -60,6 +59,10 @@ const MIN_PARTICIPANTS = 12;
 const MIN_REGULAR_SCRATCH_DJS = 6;
 const MIN_TRIALS_PER_PARTICIPANT = 24;
 const ROUTINES_PER_PARTICIPANT = 5;
+const MAX_POINTER_COMMAND_P95_MS = 20;
+const MAX_ACOUSTIC_LOOPBACK_P95_MS = 30;
+const MAX_ACOUSTIC_LOOPBACK_JITTER_MS = 3;
+const MIN_ACOUSTIC_LOOPBACK_CORRELATION = 0.15;
 
 function assertion(condition, message) {
   if (!condition) throw new TypeError(message);
@@ -258,11 +261,39 @@ function validatePlaybackStats(value, path) {
 
 function validateEnvironment(value) {
   const environment = object(value, "environment");
-  const pointerLatency = object(environment.measuredPointerToOutputLatencyMs, "environment.measuredPointerToOutputLatencyMs");
-  const p50 = number(pointerLatency.p50, "environment.measuredPointerToOutputLatencyMs.p50", { minimum: 0 });
-  const p95 = number(pointerLatency.p95, "environment.measuredPointerToOutputLatencyMs.p95", { minimum: 0 });
-  const maximum = number(pointerLatency.maximum, "environment.measuredPointerToOutputLatencyMs.maximum", { minimum: 0 });
+  const pointerLatency = object(environment.pointerCommandLatencyMs, "environment.pointerCommandLatencyMs");
+  const p50 = number(pointerLatency.p50, "environment.pointerCommandLatencyMs.p50", { minimum: 0 });
+  const p95 = number(pointerLatency.p95, "environment.pointerCommandLatencyMs.p95", { minimum: 0 });
+  const maximum = number(pointerLatency.maximum, "environment.pointerCommandLatencyMs.maximum", { minimum: 0 });
   assertion(p50 <= p95 && p95 <= maximum, "pointer latency percentiles must be monotonic");
+  const acoustic = object(environment.acousticLoopback, "environment.acousticLoopback");
+  const acousticSamples = number(acoustic.samples, "environment.acousticLoopback.samples", { minimum: 3, integer: true });
+  const acousticSampleRate = number(acoustic.sampleRate, "environment.acousticLoopback.sampleRate", { minimum: 1 });
+  const acousticMinimum = number(acoustic.minimumMs, "environment.acousticLoopback.minimumMs", { minimum: 0 });
+  const acousticMedian = number(acoustic.medianMs, "environment.acousticLoopback.medianMs", { minimum: 0 });
+  const acousticP95 = number(acoustic.p95Ms, "environment.acousticLoopback.p95Ms", { minimum: 0 });
+  const acousticMaximum = number(acoustic.maximumMs, "environment.acousticLoopback.maximumMs", { minimum: 0 });
+  const acousticJitter = number(acoustic.jitterMs, "environment.acousticLoopback.jitterMs", { minimum: 0 });
+  const acousticMinimumCorrelation = number(acoustic.minimumCorrelation, "environment.acousticLoopback.minimumCorrelation", { minimum: 0, maximum: 1 });
+  const repetitionsRequested = number(acoustic.repetitionsRequested, "environment.acousticLoopback.repetitionsRequested", { minimum: 3, integer: true });
+  const acousticSearchLimit = number(acoustic.maximumLatencyMs, "environment.acousticLoopback.maximumLatencyMs", { minimum: 1 });
+  number(acoustic.amplitude, "environment.acousticLoopback.amplitude", { minimum: 0.005, maximum: 0.25 });
+  assertion(repetitionsRequested >= acousticSamples, "acoustic loopback samples exceed requested repetitions");
+  assertion(acousticSearchLimit >= acousticMaximum, "acoustic loopback result exceeds its search limit");
+  assertion(
+    acousticMinimum <= acousticMedian && acousticMedian <= acousticP95 && acousticP95 <= acousticMaximum,
+    "acoustic loopback latency values must be monotonic",
+  );
+  assertion(
+    Math.abs(acousticJitter - (acousticMaximum - acousticMinimum)) <= 1_000 / acousticSampleRate + 1e-9,
+    "acoustic loopback jitter does not match the latency range",
+  );
+  string(acoustic.inputDeviceLabel, "environment.acousticLoopback.inputDeviceLabel");
+  const inputDeviceSettings = object(acoustic.inputDeviceSettings, "environment.acousticLoopback.inputDeviceSettings");
+  for (const field of ["echoCancellation", "noiseSuppression", "autoGainControl"]) {
+    assertion(inputDeviceSettings[field] !== true, `environment.acousticLoopback.inputDeviceSettings.${field} must not be enabled`);
+  }
+  if (acoustic.outputDeviceId !== null) string(acoustic.outputDeviceId, "environment.acousticLoopback.outputDeviceId", { allowEmpty: true });
   string(environment.browser, "environment.browser");
   string(environment.os, "environment.os");
   string(environment.inputDevice, "environment.inputDevice");
@@ -273,10 +304,17 @@ function validateEnvironment(value) {
   assertion(listeningTransducers.includes("monitors"), "environment.listeningTransducers must include monitors");
   boolean(environment.quietRoom, "environment.quietRoom");
   number(environment.displaySampleRateHz, "environment.displaySampleRateHz", { minimum: 1 });
-  number(environment.audioContextSampleRateHz, "environment.audioContextSampleRateHz", { minimum: 1 });
+  const audioContextSampleRateHz = number(environment.audioContextSampleRateHz, "environment.audioContextSampleRateHz", { minimum: 1 });
+  assertion(acousticSampleRate === audioContextSampleRateHz, "acoustic loopback and AudioContext sample rates must match");
   number(environment.baseLatencyMs, "environment.baseLatencyMs", { minimum: 0 });
   optionalNonNegative(environment.outputLatencyMs, "environment.outputLatencyMs");
   number(environment.interfaceBufferFrames, "environment.interfaceBufferFrames", { minimum: 1, integer: true });
+  return {
+    pointerP95Ms: p95,
+    acousticP95Ms: acousticP95,
+    acousticJitterMs: acousticJitter,
+    acousticMinimumCorrelation,
+  };
 }
 
 function validateTrial(trial, path) {
@@ -340,6 +378,11 @@ function closeTo(value, expected) {
 
 export function analyzeDjValidation(input, { sourceSha256 = null, verifiedArtifactRoles = [] } = {}) {
   const data = object(input, "results");
+  if (data.schemaVersion === 1) {
+    throw new RangeError(
+      "DJ validation schema version 1 lacks physical-loopback evidence; generate a version 2 template",
+    );
+  }
   assertion(data.schemaVersion === DJ_VALIDATION_SCHEMA_VERSION, `Unsupported DJ validation schema version: ${data.schemaVersion}`);
   if (sourceSha256 !== null) {
     assertion(/^[0-9a-f]{64}$/i.test(sourceSha256), "sourceSha256 must be a SHA-256 digest");
@@ -358,7 +401,7 @@ export function analyzeDjValidation(input, { sourceSha256 = null, verifiedArtifa
   nativeRpmValues.forEach((value, index) => number(value, `candidate.settings.nativeRpmValues[${index}]`, { minimum: 1 }));
   const endPolicies = array(settings.endPolicies, "candidate.settings.endPolicies");
   endPolicies.forEach((value, index) => string(value, `candidate.settings.endPolicies[${index}]`));
-  validateEnvironment(data.environment);
+  const environmentMetrics = validateEnvironment(data.environment);
 
   const artifacts = array(data.artifacts, "artifacts");
   const artifactPaths = new Set();
@@ -560,6 +603,18 @@ export function analyzeDjValidation(input, { sourceSha256 = null, verifiedArtifa
     artifactHashes: criterion(artifactHashesPass, { declared: [...artifactRoles], verified: [...verifiedRoles] }, "Verify each required source, capture, trace, manifest, and cue-codebook SHA-256 digest."),
     preflight: criterion(preflightPass, preflight, "Pass all mechanical and signal checks with no rejection event."),
     studyControls: criterion(studyControlsPass, { blinding, cueCoding, allTrained, fixedPathDelayMs }, "Use the registered double-blind, training, cue-coding, and room controls."),
+    controlLatency: criterion(
+      environmentMetrics.pointerP95Ms <= MAX_POINTER_COMMAND_P95_MS,
+      environmentMetrics.pointerP95Ms,
+      "Keep pointer-command p95 latency at or below 20 ms.",
+    ),
+    acousticLatency: criterion(
+      environmentMetrics.acousticP95Ms <= MAX_ACOUSTIC_LOOPBACK_P95_MS
+        && environmentMetrics.acousticJitterMs <= MAX_ACOUSTIC_LOOPBACK_JITTER_MS
+        && environmentMetrics.acousticMinimumCorrelation >= MIN_ACOUSTIC_LOOPBACK_CORRELATION,
+      environmentMetrics,
+      "Keep physical-loopback p95 at or below 30 ms, jitter at or below 3 ms, and correlation at or above 0.15.",
+    ),
     participants: criterion(participants.length >= MIN_PARTICIPANTS && allCurrentlyActive, participants.length, "Use at least 12 currently active DJs."),
     scratchExperience: criterion(regularScratchDjs >= MIN_REGULAR_SCRATCH_DJS, regularScratchDjs, "Include at least six DJs who regularly scratch."),
     trialPlan: criterion(trialPlanPass, participantSummaries.map(summary => ({ id: summary.id, pass: summary.trialPlanPass, routines: summary.routines })), "Give each DJ at least 24 balanced trials and exactly five routines."),
@@ -583,7 +638,7 @@ export function analyzeDjValidation(input, { sourceSha256 = null, verifiedArtifa
     environment: Object.freeze({
       ...data.environment,
       listeningTransducers: Object.freeze([...data.environment.listeningTransducers]),
-      measuredPointerToOutputLatencyMs: Object.freeze({ ...data.environment.measuredPointerToOutputLatencyMs }),
+      pointerCommandLatencyMs: Object.freeze({ ...data.environment.pointerCommandLatencyMs }),
     }),
     exclusions: Object.freeze(exclusions.map(exclusion => Object.freeze({ ...exclusion }))),
     participants: Object.freeze(participantSummaries),
@@ -656,7 +711,27 @@ export function createDjValidationTemplate() {
       baseLatencyMs: null,
       outputLatencyMs: null,
       interfaceBufferFrames: null,
-      measuredPointerToOutputLatencyMs: { p50: null, p95: null, maximum: null },
+      pointerCommandLatencyMs: { p50: null, p95: null, maximum: null },
+      acousticLoopback: {
+        samples: null,
+        sampleRate: null,
+        repetitionsRequested: null,
+        medianMs: null,
+        p95Ms: null,
+        maximumMs: null,
+        minimumMs: null,
+        jitterMs: null,
+        minimumCorrelation: null,
+        maximumLatencyMs: 500,
+        amplitude: 0.08,
+        inputDeviceLabel: "",
+        inputDeviceSettings: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        },
+        outputDeviceId: null,
+      },
     },
     artifacts: REQUIRED_ARTIFACT_ROLES.map(role => ({ role, path: "", sha256: "" })),
     preflight: {

@@ -97,7 +97,7 @@ function passingResults() {
     "cue-codebook",
   ];
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     candidate: {
       commit: "29e7746",
       settings: {
@@ -122,7 +122,27 @@ function passingResults() {
       baseLatencyMs: 5,
       outputLatencyMs: 20,
       interfaceBufferFrames: 128,
-      measuredPointerToOutputLatencyMs: { p50: 18, p95: 24, maximum: 31 },
+      pointerCommandLatencyMs: { p50: 6, p95: 12, maximum: 18 },
+      acousticLoopback: {
+        samples: 5,
+        sampleRate: 48_000,
+        repetitionsRequested: 5,
+        medianMs: 24,
+        p95Ms: 24.8,
+        maximumMs: 25,
+        minimumMs: 23,
+        jitterMs: 2,
+        minimumCorrelation: 0.82,
+        maximumLatencyMs: 500,
+        amplitude: 0.08,
+        inputDeviceLabel: "Test loopback input",
+        inputDeviceSettings: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        },
+        outputDeviceId: "test-output",
+      },
     },
     artifacts: artifactRoles.map((role, index) => ({
       role,
@@ -239,6 +259,18 @@ test("rejects broken blinding or level calibration", () => {
   assert.equal(analysis.criteria.preflight.pass, false);
 });
 
+test("rejects a physical audio path outside the registered latency bound", () => {
+  const results = passingResults();
+  results.environment.acousticLoopback.medianMs = 31;
+  results.environment.acousticLoopback.p95Ms = 34;
+  results.environment.acousticLoopback.maximumMs = 35;
+  results.environment.acousticLoopback.minimumMs = 30;
+  results.environment.acousticLoopback.jitterMs = 5;
+  const analysis = analyzeFixture(results);
+  assert.equal(analysis.accepted, false);
+  assert.equal(analysis.criteria.acousticLatency.pass, false);
+});
+
 test("rejects reuse of a supposedly fresh ABX excerpt", () => {
   const results = passingResults();
   results.participants[1].trials[0].excerptId = results.participants[0].trials[0].excerptId;
@@ -251,9 +283,15 @@ test("requires frozen cue coding when a participant reports a cue", () => {
   assert.throws(() => analyzeFixture(results), /cueCode is required/);
 });
 
-test("generates a schema-one collection template with pinned settings", () => {
+test("rejects schema one because it cannot contain registered physical-loopback evidence", () => {
+  const results = passingResults();
+  results.schemaVersion = 1;
+  assert.throws(() => analyzeFixture(results), /schema version 1 lacks physical-loopback evidence/);
+});
+
+test("generates a schema-two collection template with pinned settings", () => {
   const template = createDjValidationTemplate();
-  assert.equal(template.schemaVersion, 1);
+  assert.equal(template.schemaVersion, 2);
   assert.equal(template.candidate.settings.highFrequencyAccelerationLimit, 0.35);
   assert.equal(template.candidate.settings.stylusTracingLimit, 0.72);
   assert.equal(template.candidate.settings.faderCurve, 0.08);

@@ -1,5 +1,6 @@
 import { createLogger, setPlayerLoggingEnabled, isPlayerLoggingEnabled, isPlayerVerboseLoggingEnabled, setPlayerLogLevel, getPlayerLogLevel, setPlayerTelemetryInterval } from "./player-message-logger.js";
 import { readAudioPlaybackStats } from "./audio-playback-stats.js";
+import { measureAcousticLoopbackLatency } from "./audio-loopback-latency.js";
 import { createVinylPlayerCanvas } from "./player-canvas.js";
 import { RecordDecoderClient } from "./record-decoder-client.js";
 import { createPcmChunkCacheHandler, recordCacheKey } from "./pcm-cache.js";
@@ -1492,6 +1493,15 @@ async function getCaptureStream() {
     state.gainNode.connect(state.captureNode);
   }
   return state.captureNode.stream;
+}
+
+async function measurePhysicalLoopbackLatency(options = {}) {
+  await initialiseAudio();
+  const snapshot = publicState();
+  if (snapshot.playing || snapshot.motorRunning || snapshot.scratching) {
+    throw new Error("Stop the transport before you measure acoustic loopback latency");
+  }
+  return measureAcousticLoopbackLatency(state.context, options);
 }
 
 async function markLoadedReady(loadSequence = state.loadSequence) {
@@ -3552,6 +3562,7 @@ const api = Object.freeze({
   loadRecordFromUrl,
   loadAudioFile,
   getCaptureStream,
+  measureAcousticLoopbackLatency: measurePhysicalLoopbackLatency,
   activateAudio: async () => {
     await initialiseAudio();
     await state.context.resume();

@@ -77,6 +77,7 @@ The audit compared those files with:
 | Manual fader | Mixer automation | Independent Rust post-gate gain | Beyond reference |
 | Advanced controls | Not present as this pair | HF limit and stylus limit dropdown | Beyond reference |
 | Device underrun telemetry | Not public | Normalized browser playback statistics | Beyond reference |
+| Acoustic-loopback latency | Not present | Frame-tagged output-to-input correlation probe | Beyond reference |
 | DJ-study analysis | Not present | Versioned exact acceptance analyzer | Beyond reference |
 
 ## Important deliberate differences
@@ -133,7 +134,7 @@ measured audio-thread reason to make either change.
 ## Automated evidence
 
 - `cargo test --workspace`: 81 tests.
-- `node --test test/*.test.mjs`: 36 tests.
+- `node --test test/*.test.mjs`: 42 tests.
 - `npm run bench:worklet`: normal p95 `1.46%` of a quantum.
 - The same benchmark measured `7.87%` for alternating `±8×` Crab/8.
 - Direct copy into prepared Rust window storage reduced fresh six-second window
@@ -163,6 +164,9 @@ measured audio-thread reason to make either change.
 - The DJ validation analyzer computes the exact two-sided binomial test and a
   95% Clopper-Pearson interval. Tests reject identification, repeated cues and
   audio underruns. A complete synthetic study passes all registered rules.
+- Chrome detected three software-loopback probes at `20.667 ms`. Minimum
+  correlation was above `0.994`. This checks scheduling and correlation only;
+  it is not a physical-path result.
 
 ## Remaining proof gaps
 
@@ -170,7 +174,8 @@ measured audio-thread reason to make either change.
    physical hardware matrix. The current Chrome result uses a headless output
    device.
 2. Test actual touchscreens, pens, trackpads and mouse devices.
-3. Measure end-to-end acoustic latency through the interface and speakers.
+3. Run the acoustic-loopback probe through each target interface and speaker or
+   electrical-loopback path. Attach the result to the study file.
 4. Collect the frozen data for the pre-registered blind test. Analyze that data
    with `npm run validation:analyze -- <file>`.
 5. Tune only the variables that fail those tests.

@@ -144,6 +144,29 @@ async function runBrowserScenario() {
   }
   const player = globalThis.vin?.yl?.player;
   assert(player, "The public player API was not published");
+  assert(
+    typeof player.measureAcousticLoopbackLatency === "function",
+    "The public acoustic-loopback diagnostic API was not published",
+  );
+  const { measureAcousticLoopbackLatency } = await import("./audio-loopback-latency.js");
+  const loopbackContext = new AudioContext({ sampleRate: 48_000 });
+  const loopbackDestination = loopbackContext.createMediaStreamDestination();
+  let softwareLoopback;
+  try {
+    softwareLoopback = await measureAcousticLoopbackLatency(loopbackContext, {
+      inputStream: loopbackDestination.stream,
+      outputDestination: loopbackDestination,
+      repetitions: 3,
+      maximumLatencyMs: 100,
+      minimumCorrelation: 0.1,
+      leadInMs: 250,
+    });
+    assert(softwareLoopback.samples === 3, "The browser software loopback missed a probe");
+    assert(softwareLoopback.maximumMs < 100, "The browser software loopback exceeded its search range");
+  } finally {
+    for (const track of loopbackDestination.stream.getTracks()) track.stop();
+    await loopbackContext.close();
+  }
 
   function createWaveFile(seconds = 12, sampleRate = 48_000) {
     const frameCount = Math.round(seconds * sampleRate);
@@ -506,6 +529,16 @@ async function runBrowserScenario() {
     audioPlaybackStats.underrunDurationMs === 0,
     `Chrome reported ${audioPlaybackStats.underrunDurationMs} ms of audio underruns`,
   );
+  let liveMeasurementError = null;
+  try {
+    await player.measureAcousticLoopbackLatency();
+  } catch (error) {
+    liveMeasurementError = error;
+  }
+  assert(
+    /Stop the transport/.test(String(liveMeasurementError?.message || "")),
+    "The public acoustic-loopback API did not reject an active transport",
+  );
 
   return {
     chrome: navigator.userAgent,
@@ -515,6 +548,7 @@ async function runBrowserScenario() {
     audioBaseLatencyMs: player.getState().audioBaseLatencyMs,
     audioOutputLatencyMs: player.getState().audioOutputLatencyMs,
     audioPlaybackStats,
+    softwareLoopback,
     maximumPointerToAudioLatencyMs: maximumLatencyMs,
     captureBytes,
     continuity,

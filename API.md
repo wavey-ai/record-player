@@ -63,6 +63,44 @@ const socialStream = new MediaStream([
 ]);
 ```
 
+## Acoustic-loopback latency
+
+Stop the transport before this measurement. Route the selected output through
+the test interface or speakers to the selected input. Keep the microphone path
+muted in all other software.
+
+```js
+await player.stopTransport();
+
+const loopback = await player.measureAcousticLoopbackLatency({
+  inputDeviceId: "selected-input-device-id",
+  repetitions: 5,
+  amplitude: 0.08,
+  maximumLatencyMs: 500,
+});
+
+console.log(loopback.medianMs, loopback.p95Ms, loopback.maximumMs);
+```
+
+The method requests a raw microphone stream when `inputStream` is not supplied.
+It requests disabled echo cancellation, noise suppression and automatic gain.
+The browser can still override these constraints. The method stops a stream
+that it creates. The caller must stop a supplied stream.
+
+The measurement emits short logarithmic sweeps through the selected browser
+output. A muted AudioWorklet captures the input and tags each packet with the
+AudioContext frame clock. The analyzer requires at least three correlated
+probes. The result includes latency values, jitter, correlation, sample rate
+and input-device data.
+
+The value is round-trip output-to-input latency. It includes the selected input
+path. Do not treat it as one-way output latency. Keep it separate from the
+pointer-command-apply measurement.
+
+This is a diagnostic path. It does not change player DSP or route microphone
+audio to the output. Start with a low monitor level. Do not run the measurement
+during playback or scratching.
+
 ## Deck controls
 
 ```js

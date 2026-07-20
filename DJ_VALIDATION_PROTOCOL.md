@@ -27,7 +27,13 @@ been completed and its raw results retained.
   randomization. Do not normalize individual scratch excerpts after capture.
 - Record browser, OS, input device, display sampling rate, AudioContext sample
   rate, `baseLatency`, `outputLatency` (where exposed), interface buffer and the
-  measured pointer-to-output latency distribution.
+  measured pointer-command-apply latency distribution.
+- Stop the transport and run `player.measureAcousticLoopbackLatency()` through
+  the selected physical output and input path. Keep all probe results in
+  `environment.acousticLoopback`. Reject fewer than three correlated probes.
+- Require pointer-command p95 latency at or below `20 ms`. Require physical
+  loopback p95 at or below `30 ms` and jitter at or below `3 ms`. Require
+  minimum probe correlation of at least `0.15`.
 - Record `audioPlaybackStats` before and after each block. Require supported
   device statistics, zero `underrunEvents` and zero `underrunDurationMs`. Keep
   total duration and latency fields with the raw session data.
@@ -146,7 +152,7 @@ trial blocks to be rerun.
 
 ## Executable analysis
 
-Generate a versioned JSON collection template:
+Generate a version-2 JSON collection template:
 
 ```sh
 npm run validation:template > dj-validation-results.json
