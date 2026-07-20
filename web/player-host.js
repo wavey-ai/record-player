@@ -105,6 +105,19 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
+function normalizeScratchGrip(value, fallback = 1) {
+  const grip = Number(value);
+  return Number.isFinite(grip) ? clamp(grip, 0, 1) : fallback;
+}
+
+function resolveScratchGrip({ grip, pressure, pointerType } = {}, fallback = 1) {
+  if (Number.isFinite(Number(grip))) return normalizeScratchGrip(grip, fallback);
+  if (pointerType === "pen" && Number.isFinite(Number(pressure))) {
+    return normalizeScratchGrip(pressure, fallback);
+  }
+  return fallback;
+}
+
 function uint8View(value) {
   if (value instanceof Uint8Array) return value;
   if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
@@ -387,6 +400,7 @@ const state = {
   acknowledgedSeekGeneration: 0,
   draggingSeek: false,
   scratching: false,
+  scratchGrip: 0,
   scratchPointerId: null,
   scratchStartAngle: 0,
   scratchStartPosition: 0,
@@ -2334,7 +2348,14 @@ function executeCommand(command) {
   } else if (command.type === "seek_packet_playback") {
     seekWorklet(secondsToFrames(command.offset_seconds));
   } else if (command.type === "set_scratch_transport") {
-    state.node.port.postMessage({ type: "scratch-transport", handContact: Boolean(command.hand_contact), motorRate: Number(command.motor_rate) || 0 });
+    const handContact = Boolean(command.hand_contact);
+    state.scratchGrip = handContact ? normalizeScratchGrip(command.grip, 1) : 0;
+    state.node.port.postMessage({
+      type: "scratch-transport",
+      handContact,
+      motorRate: Number(command.motor_rate) || 0,
+      grip: state.scratchGrip,
+    });
   } else if (command.type === "set_scratch_target") {
     state.node.port.postMessage({ type: "scratch", active: true, position: command.position_frames, rate: command.rate, impulse: command.impulse });
   } else if (command.type === "set_scratch_position") {
@@ -3182,7 +3203,7 @@ function createScratchRecorder({ name = "" } = {}) {
         durationMs: durationFrames / outputSampleRate * 1000,
         engine: {
           name: "vin.yl.player.acoustic",
-          version: 3,
+          version: 4,
           gateAlgorithmVersion: SCRATCH_GATE_ALGORITHM_VERSION,
           recordProfile: elements.metaProfile?.textContent || "",
           nativeRpm: state.baseRpm
@@ -3357,14 +3378,16 @@ async function beginScratch(event) {
   state.scratchLastAngle = angle;
   state.scratchLastTime = event.timeStamp;
   state.scratchStartPosition = state.positionFrames;
-  recordScratchEvent({ type: "scratch-start", positionFrames: state.positionFrames, rate: 0, impulse: 0.22 });
+  state.scratchGrip = resolveScratchGrip(event);
+  recordScratchEvent({ type: "scratch-start", positionFrames: state.positionFrames, rate: 0, impulse: 0.22, grip: state.scratchGrip });
   await dispatch(
     {
       type: "begin_scratch",
       deck: "a",
       pointer_id: event.pointerId,
       playback_seconds: framesToSeconds(state.positionFrames),
-      rotation_degrees: state.rotation
+      rotation_degrees: state.rotation,
+      grip: state.scratchGrip,
     },
     { loadSequence },
   );
@@ -3383,8 +3406,9 @@ function moveScratch(event) {
   state.rotation += localDelta * 180 / Math.PI;
   elements.platter.style.setProperty("--rotation", `${state.rotation}deg`);
   const impulse = Math.min(1, Math.abs(rate) / 3);
-  recordScratchEvent({ type: "scratch-motion", positionFrames: position, rate, impulse });
-  state.node.port.postMessage({ type: "scratch", active: true, position, rate, impulse });
+  state.scratchGrip = resolveScratchGrip(event, state.scratchGrip);
+  recordScratchEvent({ type: "scratch-motion", positionFrames: position, rate, impulse, grip: state.scratchGrip });
+  state.node.port.postMessage({ type: "scratch", active: true, position, rate, impulse, grip: state.scratchGrip });
   publishState();
   state.scratchLastAngle = angle;
   state.scratchLastTime = event.timeStamp;
@@ -3393,7 +3417,8 @@ function moveScratch(event) {
 async function endScratch(event) {
   if (state.scratchReplayRequests.size || !state.scratching || event.pointerId !== state.scratchPointerId) return;
   state.scratching = false;
-  recordScratchEvent({ type: "scratch-end", positionFrames: state.positionFrames, rate: 0, impulse: 0, resumePlayback: true });
+  state.scratchGrip = 0;
+  recordScratchEvent({ type: "scratch-end", positionFrames: state.positionFrames, rate: 0, impulse: 0, grip: 0, resumePlayback: true });
   await dispatch({
     type: "end_scratch",
     deck: "a",
@@ -3445,6 +3470,7 @@ function publicState() {
     motorRunning: Boolean(view?.transport_on),
     needleLifted: Boolean(view?.needle_lifted),
     scratching: state.scratching || state.replayScratching,
+    scratchGrip: state.scratchGrip,
     scratchReplayActive: state.scratchReplayRequests.size > 0,
     buffering: state.buffering,
     positionSeconds: framesToSeconds(state.positionFrames),
@@ -3757,49 +3783,58 @@ const api = Object.freeze({
     // stylus re-placement with needle-drop foley, never a brake/restart.
     if (lowering && view?.transport_on) state.node?.port.postMessage({ type: "needle-drop" });
   },
-  beginScratch: ({ pointerId = 0, rotationDegrees = state.rotation, positionFrames = state.positionFrames, rate = 0, impulse = 0.22, inputTimeMs } = {}) => {
+  beginScratch: ({ pointerId = 0, rotationDegrees = state.rotation, positionFrames = state.positionFrames, rate = 0, impulse = 0.22, pressure, grip, pointerType, inputTimeMs } = {}) => {
     if (!grooveInteractionReady() || state.scratching || state.scratchReplayRequests.size) {
       return Promise.resolve(false);
     }
     const loadSequence = state.loadSequence;
     invalidateEndTransition();
     const position = Number(positionFrames) || 0;
+    const nextGrip = resolveScratchGrip({ pressure, grip, pointerType });
     // The hand owns the record from the first touch: publish the scratching
     // state immediately so the canvas stops advancing the motor's visual
     // rotation — otherwise the drawn record fights the hand.
     state.scratching = true;
+    state.scratchGrip = nextGrip;
     if (Number.isFinite(Number(rotationDegrees))) state.rotation = Number(rotationDegrees);
     publishState();
-    recordScratchEvent({ type: "scratch-start", positionFrames: position, rate: Number(rate) || 0, impulse: Number(impulse) || 0 });
+    recordScratchEvent({ type: "scratch-start", positionFrames: position, rate: Number(rate) || 0, impulse: Number(impulse) || 0, grip: nextGrip });
     state.node?.port.postMessage({
       type: "scratch",
       active: true,
       position,
       rate: Number(rate) || 0,
       impulse: Number(impulse) || 0,
+      grip: nextGrip,
       ...pointerAudioTiming(inputTimeMs),
     });
     return dispatch(
-      { type: "begin_scratch", deck: "a", pointer_id: pointerId, playback_seconds: framesToSeconds(position), rotation_degrees: rotationDegrees },
+      { type: "begin_scratch", deck: "a", pointer_id: pointerId, playback_seconds: framesToSeconds(position), rotation_degrees: rotationDegrees, grip: nextGrip },
       { loadSequence },
     );
   },
-  updateScratch: ({ positionFrames, rate = 0, rotationDegrees = state.rotation, impulse = 0, inputTimeMs } = {}) => {
+  updateScratch: ({ positionFrames, rate = 0, rotationDegrees = state.rotation, impulse = 0, pressure, grip, pointerType, inputTimeMs } = {}) => {
     if (!grooveInteractionReady() || !state.scratching || state.scratchReplayRequests.size) {
       return Promise.resolve(false);
     }
     const position = Number(positionFrames) || 0;
     const nextRate = Number(rate) || 0;
     const nextImpulse = Number(impulse) || 0;
+    const nextGrip = resolveScratchGrip(
+      { pressure, grip, pointerType },
+      state.scratchGrip,
+    );
     state.scratching = true;
+    state.scratchGrip = nextGrip;
     if (Number.isFinite(Number(rotationDegrees))) state.rotation = Number(rotationDegrees);
     state.positionFrames = position;
-    recordScratchEvent({ type: "scratch-motion", positionFrames: position, rate: nextRate, impulse: nextImpulse });
+    recordScratchEvent({ type: "scratch-motion", positionFrames: position, rate: nextRate, impulse: nextImpulse, grip: nextGrip });
     state.node?.port.postMessage({
       type: "motion",
       position,
       rate: nextRate,
       impulse: nextImpulse,
+      grip: nextGrip,
       ...pointerAudioTiming(inputTimeMs),
     });
     publishState();
@@ -3808,10 +3843,11 @@ const api = Object.freeze({
   endScratch: ({ rotationDegrees = state.rotation, resumePlayback = true } = {}) => {
     if (!state.scratching || state.scratchReplayRequests.size) return Promise.resolve(false);
     state.scratching = false;
+    state.scratchGrip = 0;
     if (Number.isFinite(Number(rotationDegrees))) state.rotation = Number(rotationDegrees);
     publishState();
-    recordScratchEvent({ type: "scratch-end", positionFrames: state.positionFrames, rate: 0, impulse: 0, resumePlayback: Boolean(resumePlayback) });
-    state.node?.port.postMessage({ type: "scratch", active: false, position: state.positionFrames, rate: 0, impulse: 0 });
+    recordScratchEvent({ type: "scratch-end", positionFrames: state.positionFrames, rate: 0, impulse: 0, grip: 0, resumePlayback: Boolean(resumePlayback) });
+    state.node?.port.postMessage({ type: "scratch", active: false, position: state.positionFrames, rate: 0, impulse: 0, grip: 0 });
     return dispatch({ type: "end_scratch", deck: "a", rendered_position_frames: state.positionFrames, rotation_degrees: rotationDegrees, resume_playback: Boolean(resumePlayback), save_sample: false, can_platter_handoff: true });
   },
   createScratchRecorder,

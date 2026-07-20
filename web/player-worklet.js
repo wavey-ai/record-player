@@ -45,6 +45,11 @@ const REPLAY_POSITION_REPLACING_MESSAGE_TYPES = new Set([
   "motion",
 ]);
 
+function normalizeScratchGrip(value, fallback = 1) {
+  const grip = Number(value);
+  return Number.isFinite(grip) ? Math.max(0, Math.min(1, grip)) : fallback;
+}
+
 function ensureDspWasm(module) {
   if (!wasm) {
     wasm = initSync({ module });
@@ -66,6 +71,7 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
     this.motorRunning = false;
     this.needleLifted = true;
     this.scratching = false;
+    this.scratchGrip = 0;
     this.playbackRate = 1;
     this.length = 0;
     this.sourceSampleRate = 48000;
@@ -128,6 +134,7 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
         this.active = false;
         this.playing = false;
         this.scratching = false;
+        this.scratchGrip = 0;
         this.waitingForData = false;
         this.windowRequestPending = false;
         this.pendingWindowRequest = null;
@@ -248,8 +255,12 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
         const motorRate = this.motorRunning
           ? (Number.isFinite(message.motorRate) ? message.motorRate : this.playbackRate)
           : 0;
+        const grip = handContact
+          ? normalizeScratchGrip(message.grip, this.scratching ? this.scratchGrip : 1)
+          : 0;
         this.scratching = handContact;
-        this.dsp.setTransport(handContact, motorRate, 0);
+        this.scratchGrip = grip;
+        this.dsp.setTransport(handContact, motorRate, 0, grip);
         break;
       }
       case "play": {
@@ -308,7 +319,11 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
         const rate = Number.isFinite(message.rate) ? message.rate : 0;
         const impulse = Number.isFinite(message.impulse) ? message.impulse : 0;
         const wasScratching = this.scratching;
+        const grip = active
+          ? normalizeScratchGrip(message.grip, wasScratching ? this.scratchGrip : 1)
+          : 0;
         this.scratching = active;
+        this.scratchGrip = grip;
         if (active) {
           if (!this.active) {
             this.active = true;
@@ -316,11 +331,11 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
             this.dsp.setPosition(position, 0);
             this.dsp.setNeedleLifted(this.needleLifted);
           }
-          this.dsp.setTransport(true, this.motorRate(), rate);
+          this.dsp.setTransport(true, this.motorRate(), rate, grip);
           this.dsp.setMotion(position, rate, wasScratching ? impulse : Math.max(impulse, 0.22));
           this.ensureWindowForPosition(position);
         } else {
-          this.dsp.setTransport(false, this.motorRate(), 0);
+          this.dsp.setTransport(false, this.motorRate(), 0, 0);
           if (!this.playing && !this.motorRunning) {
             this.active = false;
             this.dsp.stop();
@@ -336,9 +351,11 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
         const position = this.clampPosition(message.position);
         const rate = Number.isFinite(message.rate) ? message.rate : 0;
         const impulse = Number.isFinite(message.impulse) ? message.impulse : 0;
+        const grip = normalizeScratchGrip(message.grip, this.scratching ? this.scratchGrip : 1);
         this.scratching = true;
+        this.scratchGrip = grip;
         this.active = true;
-        this.dsp.setTransport(true, this.motorRate(), rate);
+        this.dsp.setTransport(true, this.motorRate(), rate, grip);
         this.dsp.setMotion(position, rate, impulse);
         this.ensureWindowForPosition(position);
         break;
@@ -465,7 +482,8 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
         this.active = true;
         this.lastPosition = position;
         this.dsp.setNeedleLifted(this.needleLifted);
-        this.dsp.setTransport(false, this.motorRate(), 0);
+        this.scratchGrip = 0;
+        this.dsp.setTransport(false, this.motorRate(), 0, 0);
         this.ensureWindowForPosition(position, { resetPosition: true, pauseFrame: currentFrame });
         break;
       }
@@ -540,6 +558,7 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
       playing: this.playing,
       active: this.active,
       scratching: this.scratching,
+      scratchGrip: this.scratchGrip,
       position: this.clampPosition(this.dsp.position),
       nativeRpm: this.dsp.nativeRpm,
       highFrequencyAccelerationLimit: this.dsp.highFrequencyAccelerationLimit,
@@ -565,8 +584,9 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
       this.active = true;
       this.playing = false;
       this.scratching = false;
+      this.scratchGrip = 0;
       this.dsp.setNeedleLifted(this.needleLifted);
-      this.dsp.setTransport(false, this.motorRate(), 0);
+      this.dsp.setTransport(false, this.motorRate(), 0, 0);
       if (this.surfaceRegion.completed) {
         this.sendSurfaceRegionEnded(this.surfaceRegion, this.surfaceRegion.endFrame);
       }
@@ -604,10 +624,11 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
     this.active = true;
     this.playing = false;
     this.scratching = false;
+    this.scratchGrip = 0;
     if (!preservePlatter) this.dsp.start();
     this.dsp.setNeedleLifted(this.needleLifted);
     this.dsp.startSurfaceRegion(region === "deadwax" ? 1 : 0, resolvedDurationSeconds);
-    this.dsp.setTransport(false, this.motorRate(), 0);
+    this.dsp.setTransport(false, this.motorRate(), 0, 0);
     log.state(region === "deadwax" ? "deadwax" : "lead-in", {
       durationSeconds: resolvedDurationSeconds,
       durationFrames,
@@ -650,7 +671,8 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
       this.dsp.stopSurfaceRegion();
       this.playing = true;
       this.active = true;
-      this.dsp.setTransport(false, this.motorRate(), 0);
+      this.scratchGrip = 0;
+      this.dsp.setTransport(false, this.motorRate(), 0, 0);
     }
   }
 
@@ -919,7 +941,12 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
   }
 
   applyTransport() {
-    this.dsp.setTransport(this.scratching, this.motorRate(), 0);
+    this.dsp.setTransport(
+      this.scratching,
+      this.motorRate(),
+      0,
+      this.scratching ? this.scratchGrip : 0,
+    );
   }
 
   clampPosition(position) {
@@ -959,22 +986,28 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
     const position = this.clampPosition(event.positionFrames);
     const rate = Number.isFinite(event.rate) ? event.rate : 0;
     const impulse = Number.isFinite(event.impulse) ? event.impulse : 0;
+    const grip = event.type === "scratch-end"
+      ? 0
+      : normalizeScratchGrip(event.grip, 1);
     if (event.type === "scratch-start") {
       this.scratching = true;
+      this.scratchGrip = grip;
       this.active = true;
-      this.dsp.setTransport(true, this.motorRate(), rate);
+      this.dsp.setTransport(true, this.motorRate(), rate, grip);
       this.dsp.setMotion(position, rate, impulse);
       this.ensureWindowForPosition(position, { pauseFrame: outputFrame });
     } else if (event.type === "scratch-motion") {
       this.scratching = true;
+      this.scratchGrip = grip;
       this.active = true;
-      this.dsp.setTransport(true, this.motorRate(), rate);
+      this.dsp.setTransport(true, this.motorRate(), rate, grip);
       this.dsp.setMotion(position, rate, impulse);
       this.ensureWindowForPosition(position, { pauseFrame: outputFrame });
     } else if (event.type === "scratch-end") {
       this.scratching = false;
+      this.scratchGrip = 0;
       this.playing = event.resumePlayback !== false;
-      this.dsp.setTransport(false, this.motorRate(), 0);
+      this.dsp.setTransport(false, this.motorRate(), 0, 0);
       if (!this.playing && !this.motorRunning) {
         this.active = false;
         this.dsp.stop();
@@ -997,6 +1030,10 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
     this.playbackRate = restoreState.playbackRate;
     this.playing = restoreState.playing;
     this.scratching = restoreState.scratching;
+    this.scratchGrip = normalizeScratchGrip(
+      restoreState.scratchGrip,
+      this.scratching ? 1 : 0,
+    );
     this.active = restoreState.active;
     this.lastPosition = restoreState.position;
     this.restoreCapturedReplayDsp(restoreState);
@@ -1055,7 +1092,12 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
     if (this.active) this.dsp.start();
     this.dsp.setPosition(restoreState.position, 0);
     this.dsp.setNeedleLifted(this.needleLifted);
-    this.dsp.setTransport(this.scratching, this.motorRate(), 0);
+    this.dsp.setTransport(
+      this.scratching,
+      this.motorRate(),
+      0,
+      this.scratching ? this.scratchGrip : 0,
+    );
     if (!this.active) this.dsp.stop();
   }
 

@@ -108,6 +108,7 @@ pub struct ScratchState {
     pub target_position_frames: f64,
     pub rendered_position_frames: f64,
     pub target_rate: f32,
+    pub grip: f32,
     pub base_rotation_degrees: f64,
 }
 impl Default for ScratchState {
@@ -120,6 +121,7 @@ impl Default for ScratchState {
             target_position_frames: 0.0,
             rendered_position_frames: 0.0,
             target_rate: 0.0,
+            grip: 0.0,
             base_rotation_degrees: 0.0,
         }
     }

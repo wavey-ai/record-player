@@ -378,14 +378,16 @@ await player.beginScratch({
   positionFrames: player.getState().positionFrames,
   rotationDegrees: 0,
   rate: 0,
-  impulse: 0.22
+  impulse: 0.22,
+  grip: 0.65
 });
 
 await player.updateScratch({
   positionFrames: 120000,
   rotationDegrees: -18,
   rate: -0.8,
-  impulse: 0.2
+  impulse: 0.2,
+  grip: 0.9
 });
 
 await player.endScratch({
@@ -394,7 +396,11 @@ await player.endScratch({
 });
 ```
 
-Pointer geometry belongs in the UI layer. The player API accepts normalized engine commands expressed in source frames, rates and rotation degrees.
+Pointer geometry belongs in the UI layer. The player API accepts normalized
+engine commands expressed in source frames, rates, rotation degrees and a
+`0..1` grip. Grip controls slipmat coupling: light contact lets the powered
+platter bleed through; firm contact gives the hand record ownership. Rust owns
+the smoothing and physical blend.
 
 ### State subscription
 
@@ -505,7 +511,7 @@ manual-crossfader changes are frame-timed events. The essential shape is:
   outputSampleRate: 48000,
   durationFrames,
   replaySeed,
-  engine: { version: 3, gateAlgorithmVersion: 3 },
+  engine: { version: 4, gateAlgorithmVersion: 3 },
   initialState: {
     positionFrames,
     rotationDegrees,
@@ -516,7 +522,7 @@ manual-crossfader changes are frame-timed events. The essential shape is:
     stylusTracingLimit: 0.72
   },
   events: [
-    { type: "scratch-motion", frameOffset, positionFrames, rate, impulse },
+    { type: "scratch-motion", frameOffset, positionFrames, rate, impulse, grip },
     { type: "manual-crossfader", frameOffset, value }
   ]
 }
@@ -691,8 +697,11 @@ Record motion is processed by the DOM-free tracker in
 gesture can span any number of turns. It uses a 4 ms differentiation floor,
 approximately 35 ms steady-state smoothing with a faster reversal path,
 direction hysteresis and a near-spindle guard. A lifted needle permits visual
-rotation without advancing the groove readhead. Pressure and derived grip are
-retained as gesture telemetry.
+rotation without advancing the groove readhead. Grip reaches Rust slipmat
+mechanics and is stored in deterministic takes. Explicit grip wins; pen
+pressure supplies it when available. Mouse and finger touch, including iPhone
+Haptic Touch, default to full grip because generic touch pressure is not a
+reliable force signal.
 
 Canvas pointer ownership is keyed by pointer ID rather than a single global
 gesture. One pointer can therefore hold the record while another adjusts XFADE,

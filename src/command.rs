@@ -31,6 +31,7 @@ pub enum HostCommand {
         deck: DeckId,
         hand_contact: bool,
         motor_rate: f32,
+        grip: f32,
     },
     SetScratchTarget {
         deck: DeckId,

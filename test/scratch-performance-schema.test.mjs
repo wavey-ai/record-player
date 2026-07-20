@@ -131,4 +131,21 @@ test("missing scratch motion rates normalize to rest, never maximum reverse", ()
     events: [{ type: "scratch-motion", frameOffset: 0, positionFrames: 120 }],
   });
   assert.equal(normalized.events[0].rate, 0);
+  assert.equal(normalized.events[0].grip, 1);
+});
+
+test("scratch grip is bounded and old takes default to full contact", () => {
+  const normalized = normalizeScratchPerformance({
+    schemaVersion: 2,
+    sourceSampleRate: 48_000,
+    outputSampleRate: 48_000,
+    events: [
+      { type: "scratch-start", frameOffset: 0, positionFrames: 100, grip: -1 },
+      { type: "scratch-motion", frameOffset: 64, positionFrames: 120, grip: 0.37 },
+      { type: "scratch-motion", frameOffset: 128, positionFrames: 140 },
+      { type: "scratch-end", frameOffset: 192, positionFrames: 140, grip: 1 },
+    ],
+  });
+
+  assert.deepEqual(normalized.events.map(event => event.grip), [0, 0.37, 1, 0]);
 });

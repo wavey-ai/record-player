@@ -143,11 +143,13 @@ function pointerTelemetry(sample, defaultGrip, active = true) {
   const handContact = active && sample.handContact !== false;
   const hasPressure = Number.isFinite(Number(sample.pressure));
   const pressure = hasPressure ? clamp01(Number(sample.pressure)) : 0;
+  const pointerType = typeof sample.pointerType === "string" ? sample.pointerType : "";
+  const explicitGrip = Number(sample.grip);
   const grip = handContact
     ? clamp01(
-      Number.isFinite(Number(sample.grip))
-        ? Number(sample.grip)
-        : pressure > 0
+      Number.isFinite(explicitGrip)
+        ? explicitGrip
+        : pointerType === "pen" && hasPressure
           ? pressure
           : defaultGrip,
     )
@@ -157,7 +159,7 @@ function pointerTelemetry(sample, defaultGrip, active = true) {
     pressureAvailable: hasPressure,
     grip,
     handContact,
-    pointerType: typeof sample.pointerType === "string" ? sample.pointerType : "",
+    pointerType,
   };
 }
 

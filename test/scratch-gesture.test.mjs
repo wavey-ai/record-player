@@ -241,6 +241,22 @@ test("lifted-needle movement is visual-only and retains pressure/grip telemetry"
   assert.equal(end.grip, 0);
 });
 
+test("only pen pressure changes implicit grip", () => {
+  const mouse = beginTracker({}, { pressure: 0.5, pointerType: "mouse" }).start;
+  const touch = beginTracker({}, { pressure: 0.35, pointerType: "touch" }).start;
+  const pen = beginTracker({}, { pressure: 0.35, pointerType: "pen" }).start;
+  const explicit = beginTracker({}, {
+    pressure: 0.9,
+    grip: 0.2,
+    pointerType: "touch",
+  }).start;
+
+  assert.equal(mouse.grip, 1);
+  assert.equal(touch.grip, 1);
+  assert.equal(pen.grip, 0.35);
+  assert.equal(explicit.grip, 0.2);
+});
+
 test("near-spindle samples cannot create angular or rate spikes", () => {
   const { tracker } = beginTracker({ minimumRadius: 10 });
   const ignored = tracker.update({

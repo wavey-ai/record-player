@@ -176,6 +176,7 @@ impl PlayerEngine {
                         deck,
                         hand_contact: self.deck(deck).scratch.active,
                         motor_rate: rate,
+                        grip: self.deck(deck).scratch.grip,
                     });
                 }
                 if self.deck(deck).playback.playing {
@@ -208,7 +209,8 @@ impl PlayerEngine {
                 pointer_id,
                 playback_seconds,
                 rotation_degrees,
-            } => self.begin_scratch(deck, pointer_id, playback_seconds, rotation_degrees)?,
+                grip,
+            } => self.begin_scratch(deck, pointer_id, playback_seconds, rotation_degrees, grip)?,
             PlayerEvent::MoveScratch {
                 deck,
                 position_frames,
@@ -216,6 +218,7 @@ impl PlayerEngine {
                 rate,
                 rotation_degrees,
                 impulse,
+                grip,
             } => self.move_scratch(
                 deck,
                 position_frames,
@@ -223,6 +226,7 @@ impl PlayerEngine {
                 rate,
                 rotation_degrees,
                 impulse,
+                grip,
             )?,
             PlayerEvent::ScratchRenderedPosition {
                 deck,
@@ -292,6 +296,7 @@ impl PlayerEngine {
             deck,
             hand_contact: false,
             motor_rate: rate,
+            grip: 0.0,
         });
         if running {
             let should_play = self.deck(deck).playback.load_status == LoadStatus::Ready
@@ -537,6 +542,7 @@ impl PlayerEngine {
             deck,
             hand_contact: false,
             motor_rate: self.deck(deck).playback.playback_rate,
+            grip: 0.0,
         });
         self.deck_mut(deck).needle.lifted = false;
         let target = match region {
@@ -621,8 +627,9 @@ impl PlayerEngine {
         pointer_id: i32,
         seconds: f64,
         rotation: f64,
+        grip: f32,
     ) -> Result<(), PlayerError> {
-        if !seconds.is_finite() || !rotation.is_finite() {
+        if !seconds.is_finite() || !rotation.is_finite() || !grip.is_finite() {
             return Err(PlayerError::InvalidNumber);
         }
         if self.deck(deck).scratch.active {
@@ -647,6 +654,7 @@ impl PlayerEngine {
             target_position_frames: frames,
             rendered_position_frames: frames,
             target_rate: 0.0,
+            grip: grip.clamp(0.0, 1.0),
             base_rotation_degrees: rotation,
         };
         self.commands.push(HostCommand::SetPacketGain {
@@ -662,6 +670,7 @@ impl PlayerEngine {
             } else {
                 0.0
             },
+            grip: grip.clamp(0.0, 1.0),
         });
         self.commands.push(HostCommand::SetScratchTarget {
             deck,
@@ -686,12 +695,14 @@ impl PlayerEngine {
         rate: f32,
         rotation: f64,
         impulse: f32,
+        grip: f32,
     ) -> Result<(), PlayerError> {
         if !position.is_finite()
             || !rendered.is_finite()
             || !rate.is_finite()
             || !rotation.is_finite()
             || !impulse.is_finite()
+            || !grip.is_finite()
         {
             return Err(PlayerError::InvalidNumber);
         }
@@ -703,8 +714,19 @@ impl PlayerEngine {
         d.scratch.target_position_frames = position.max(0.0);
         d.scratch.rendered_position_frames = rendered.max(0.0);
         d.scratch.target_rate = rate;
+        d.scratch.grip = grip.clamp(0.0, 1.0);
         d.scratch.base_rotation_degrees = rotation;
         d.playback.current_seconds = position.max(0.0) / sample_rate;
+        self.commands.push(HostCommand::SetScratchTransport {
+            deck,
+            hand_contact: true,
+            motor_rate: if self.deck(deck).transport.motor_on {
+                self.deck(deck).playback.playback_rate
+            } else {
+                0.0
+            },
+            grip: grip.clamp(0.0, 1.0),
+        });
         self.commands.push(HostCommand::SetScratchTarget {
             deck,
             position_frames: position.max(0.0),
@@ -753,6 +775,7 @@ impl PlayerEngine {
             } else {
                 0.0
             },
+            grip: 0.0,
         });
         if should_resume {
             if !handoff {
@@ -987,6 +1010,7 @@ mod tests {
             pointer_id: 1,
             playback_seconds: 2.0,
             rotation_degrees: 40.0,
+            grip: 1.0,
         })
         .unwrap();
         e.drain_commands();
@@ -997,6 +1021,7 @@ mod tests {
             rate: 1.0,
             rotation_degrees: 80.0,
             impulse: 0.0,
+            grip: 1.0,
         })
         .unwrap();
         e.drain_commands();
@@ -1034,6 +1059,7 @@ mod tests {
                 pointer_id: 1,
                 playback_seconds: 2.0,
                 rotation_degrees: 0.0,
+                grip: 1.0,
             })
             .unwrap();
             let expected_start = source_rate * 2.0;
@@ -1062,6 +1088,7 @@ mod tests {
             pointer_id: 7,
             playback_seconds: 2.0,
             rotation_degrees: 0.0,
+            grip: 1.0,
         })
         .unwrap();
         let commands = e.drain_commands();
@@ -1069,6 +1096,42 @@ mod tests {
         assert!(commands.iter().any(
             |command| matches!(command, HostCommand::SetPacketGain { gain, .. } if *gain == 0.0)
         ));
+    }
+    #[test]
+    fn scratch_grip_is_clamped_and_forwarded_to_the_audio_engine() {
+        let mut e = PlayerEngine::default();
+        ready(&mut e);
+        e.dispatch(PlayerEvent::BeginScratch {
+            deck: DeckId::A,
+            pointer_id: 7,
+            playback_seconds: 2.0,
+            rotation_degrees: 0.0,
+            grip: 0.25,
+        })
+        .unwrap();
+        assert!((e.state().decks[0].scratch.grip - 0.25).abs() < f32::EPSILON);
+        assert!(e.drain_commands().iter().any(|command| matches!(
+            command,
+            HostCommand::SetScratchTransport { hand_contact: true, grip, .. }
+                if (*grip - 0.25).abs() < f32::EPSILON
+        )));
+
+        e.dispatch(PlayerEvent::MoveScratch {
+            deck: DeckId::A,
+            position_frames: 96_000.0,
+            rendered_position_frames: 96_000.0,
+            rate: 0.5,
+            rotation_degrees: 20.0,
+            impulse: 0.0,
+            grip: 2.0,
+        })
+        .unwrap();
+        assert_eq!(e.state().decks[0].scratch.grip, 1.0);
+        assert!(e.drain_commands().iter().any(|command| matches!(
+            command,
+            HostCommand::SetScratchTransport { hand_contact: true, grip, .. }
+                if (*grip - 1.0).abs() < f32::EPSILON
+        )));
     }
     #[test]
     fn scratch_release_restarts_from_rendered_position_without_handoff() {
@@ -1082,6 +1145,7 @@ mod tests {
             pointer_id: 1,
             playback_seconds: 2.0,
             rotation_degrees: 0.0,
+            grip: 1.0,
         })
         .unwrap();
         e.drain_commands();
@@ -1110,6 +1174,7 @@ mod tests {
             pointer_id: 1,
             playback_seconds: 2.0,
             rotation_degrees: 0.0,
+            grip: 1.0,
         })
         .unwrap();
         e.drain_commands();
@@ -1167,6 +1232,7 @@ mod tests {
                                 pointer_id: 1,
                                 playback_seconds: 1.0,
                                 rotation_degrees: 0.0,
+                                grip: 1.0,
                             })
                             .unwrap();
                             e.drain_commands();
@@ -1304,6 +1370,7 @@ mod tests {
             pointer_id: 1,
             playback_seconds: 0.0,
             rotation_degrees: 0.0,
+            grip: 1.0,
         })
         .unwrap();
         assert!(!e.state().lead_in.active);

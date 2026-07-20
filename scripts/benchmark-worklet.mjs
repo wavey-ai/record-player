@@ -736,12 +736,12 @@ function verifyDeterministicReplay() {
       stylusTracingLimit: 0.72,
     },
     events: [
-      { type: "scratch-start", frameOffset: 0, positionFrames: WINDOW_CENTER, rate: 1.4, impulse: 0.4 },
-      { type: "scratch-motion", frameOffset: 37, positionFrames: WINDOW_CENTER + 420, rate: 1.7, impulse: 0 },
+      { type: "scratch-start", frameOffset: 0, positionFrames: WINDOW_CENTER, rate: 1.4, impulse: 0.4, grip: 0.65 },
+      { type: "scratch-motion", frameOffset: 37, positionFrames: WINDOW_CENTER + 420, rate: 1.7, impulse: 0, grip: 0.75 },
       { type: "scratch-preset", frameOffset: 83, preset: "crab" },
       { type: "scratch-clicks", frameOffset: 91, clicks: 8 },
       { type: "manual-crossfader", frameOffset: 155, value: 1 },
-      { type: "scratch-motion", frameOffset: 233, positionFrames: WINDOW_CENTER - 360, rate: -2.1, impulse: 0.25 },
+      { type: "scratch-motion", frameOffset: 233, positionFrames: WINDOW_CENTER - 360, rate: -2.1, impulse: 0.25, grip: 0.91 },
       { type: "manual-crossfader", frameOffset: 301, value: 0 },
       { type: "scratch-end", frameOffset: 447, positionFrames: WINDOW_CENTER - 120, rate: 0, impulse: 0, resumePlayback: true },
     ],
@@ -756,6 +756,20 @@ function verifyDeterministicReplay() {
   assert.match(first.outputHash, /^[0-9a-f]{64}$/);
   assert.equal(second.outputHash, first.outputHash, "identical replays produced different output hashes");
   assert.deepEqual(second.gateTrace, first.gateTrace, "identical replays produced different gate traces");
+  const fullGripPerformance = {
+    ...scratchPerformance,
+    events: scratchPerformance.events.map(event => (
+      event.type === "scratch-start" || event.type === "scratch-motion"
+        ? { ...event, grip: 1 }
+        : event
+    )),
+  };
+  const fullGrip = captureReplayEvidence(processor, 103, fullGripPerformance);
+  assert.notEqual(
+    fullGrip.outputHash,
+    first.outputHash,
+    "variable grip did not change the deterministic Rust replay",
+  );
   assert.deepEqual(first.controlTrace, [
     { type: "scratch-preset", frameOffset: 83, value: "crab" },
     { type: "scratch-clicks", frameOffset: 91, value: 8 },
@@ -770,6 +784,7 @@ function verifyDeterministicReplay() {
     outputHash: first.outputHash,
     gateSegments: first.gateTrace.length,
     controlEvents: first.controlTrace.length,
+    gripContrastHash: fullGrip.outputHash,
     interveningPlaybackFrames: 17 * FRAME_COUNT,
   };
 }
@@ -870,6 +885,7 @@ console.log(
   `Deterministic replay        | SHA-256 ${deterministicReplay.outputHash}`
   + ` | ${deterministicReplay.gateSegments} gate segments`
   + ` | ${deterministicReplay.controlEvents} sub-quantum controls`
+  + ` | variable-grip contrast ${deterministicReplay.gripContrastHash.slice(0, 12)}`
   + ` | ${deterministicReplay.interveningPlaybackFrames} live frames between runs`,
 );
 console.log(

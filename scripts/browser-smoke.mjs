@@ -464,9 +464,11 @@ async function runBrowserScenario() {
     pointerId: 41,
     positionFrames,
     rotationDegrees: 0,
+    grip: 0.25,
     inputTimeMs: performance.now(),
   });
   assert(began !== false, "The browser scratch gesture did not start");
+  assert(Math.abs(player.getState().scratchGrip - 0.25) < 1e-9, "The browser did not expose begin grip");
 
   for (const preset of presetNames) {
     activePreset = preset;
@@ -483,6 +485,7 @@ async function runBrowserScenario() {
         rate,
         rotationDegrees: direction * step * 3,
         impulse: step === 24 ? 0.063 : 0,
+        grip: direction > 0 ? 0.35 : 0.85,
         inputTimeMs: performance.now(),
       });
       if (step === 8) {
@@ -495,15 +498,21 @@ async function runBrowserScenario() {
   }
 
   await player.endScratch({ rotationDegrees: 0, resumePlayback: false });
+  assert(player.getState().scratchGrip === 0, "The browser did not release scratch grip");
   await wait(120);
   unsubscribe();
   const recordedTake = await player.stopScratchRecording({ save: false });
   assert(recordedTake?.events?.length > 10, "The browser scratch take did not record engine events");
   assert(recordedTake.schemaVersion === 2, "The browser scratch take did not use schema version 2");
-  assert(recordedTake.engine?.version === 3, "The browser scratch take did not use deterministic replay engine version 3");
+  assert(recordedTake.engine?.version === 4, "The browser scratch take did not use variable-grip replay engine version 4");
   assert(recordedTake.engine?.gateAlgorithmVersion === 3, "The browser scratch take did not identify gate algorithm version 3");
   assert(Number.isInteger(recordedTake.replaySeed) && recordedTake.replaySeed > 0, "The browser scratch take did not store a replay seed");
   assert(Number.isFinite(recordedTake.initialState?.rotationDegrees), "The browser scratch take did not store its platter angle");
+  const recordedGrip = recordedTake.events
+    .filter(event => event.type === "scratch-start" || event.type === "scratch-motion")
+    .map(event => event.grip);
+  assert(recordedGrip.includes(0.25), "The browser take did not record begin grip");
+  assert(recordedGrip.includes(0.35) && recordedGrip.includes(0.85), "The browser take did not record motion grip");
   let replayObserved = false;
   const unsubscribeReplay = player.subscribe(snapshot => {
     replayObserved ||= Boolean(snapshot.scratchReplayActive);

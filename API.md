@@ -114,8 +114,8 @@ RPM accepts a continuous value from 16 through 90. Volume and crossfader accept 
 ## Scratch controls
 
 ```js
-await player.beginScratch({ pointerId, rotationDegrees });
-await player.updateScratch({ positionFrames, rate, rotationDegrees, impulse });
+await player.beginScratch({ pointerId, rotationDegrees, grip: 0.65 });
+await player.updateScratch({ positionFrames, rate, rotationDegrees, impulse, grip: 0.9 });
 await player.endScratch({ rotationDegrees, resumePlayback: true });
 
 player.setScratchPreset("flare");
@@ -173,9 +173,13 @@ The bundled canvas feeds `getCoalescedEvents()` samples to the canonical
 `web/scratch-gesture.js` tracker in timestamp order. The tracker performs
 incremental multi-turn angle unwrap, a 4 ms differentiation floor, adaptive
 35 ms/fast-reversal smoothing, direction hysteresis, source-position clamping
-and lifted-needle visual-only motion. Pressure and grip are additive telemetry;
-callers using the programmatic methods remain responsible for deriving their own
-pointer geometry.
+and lifted-needle visual-only motion. Grip is a normalized `0..1` slipmat
+coupling command. Rust smooths it and blends the free platter rate with the hand
+rate. An explicit `grip` wins; pen pressure supplies it when no explicit value
+is present. Mouse and finger touch default to full grip because their generic
+pressure values do not reliably represent force. This includes iPhone Haptic
+Touch, which is not used as a force input. Callers using the programmatic
+methods remain responsible for deriving their own pointer geometry.
 
 ## State
 
@@ -189,6 +193,7 @@ const unsubscribe = player.subscribe(state => {
   state.deadwaxProgress;
   state.needleLifted;
   state.scratching;
+  state.scratchGrip;
   state.scratchReplayActive;
   state.buffering;
   state.positionSeconds;

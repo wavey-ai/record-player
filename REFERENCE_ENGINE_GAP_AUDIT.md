@@ -47,7 +47,7 @@ The audit compared those files with:
 | Playback and scratch clock | One varispeed worklet clock | One Rust DSP clock | Covered |
 | Rate spring | `70 rad/s`, damping `0.85` | Same | Covered |
 | Motor start and brake | `0.30 s` start, `0.32 s` brake | Same | Covered |
-| Hand grip | `0.100 s` attack | `0.012 s` attack | Deliberate improvement |
+| Hand grip | Binary contact, `0.100 s` attack | `0..1` slipmat coupling, `0.012 s` attack | Beyond reference |
 | Hand release | `0.045 s` | Same | Covered |
 | Cue position chase | `0.28 s`, bounded correction | Same | Covered |
 | Motion hold | `0.05 s` plus `0.06 s` release | Same | Covered |
@@ -88,7 +88,11 @@ The audit compared those files with:
 
 The `0.012 s` grip attack replaces the reference `0.100 s` value. A deliberate
 grab reaches platter ownership in about 20 ms. This prevents a long motor bleed
-through the first part of a scratch. Native tests cover this response.
+through the first part of a scratch. The target also accepts continuous grip:
+light contact preserves powered slipmat motion while firm contact gives the hand
+record ownership. Rust smooths the coupling. Pen pressure or explicit API input
+can drive it; mouse and finger touch default to full grip. Native tests cover
+both response and coupling.
 
 The automatic gate does not copy the reference time oscillator. Travel controls
 its phase. Faster hand motion creates faster cuts over the same groove distance.
@@ -138,27 +142,30 @@ measured audio-thread reason to make either change.
 
 ## Automated evidence
 
-- `cargo test --workspace`: 87 tests.
-- `node --test test/*.test.mjs`: 65 tests.
+- `cargo test --workspace`: 90 tests.
+- `node --test test/*.test.mjs`: 67 tests.
 - The canvas regression anchors the visible platter to audio-owned phase and
   covers half-speed forward motion, full-speed reverse motion and zero-rate
   hold. It rejects nominal-RPM animation.
-- Two current worklet runs measured normal p95 at `1.44–1.45%` of a quantum.
-- They measured `7.80–7.86%` for alternating `±8×` Crab/8.
+- Three current worklet runs measured normal p95 at `1.47%` of a quantum.
+- They measured `8.10–8.14%` for alternating `±8×` Crab/8.
 - Direct copy into prepared Rust window storage reduced fresh six-second window
-  application to p95 `2.55–3.52%` across the same runs.
+  application to p95 `2.90–3.08%` across the same runs.
 - Regression gates now require window-application p95 below `25%` and maximum
   below `50%` of a quantum.
 - Release WASM replays the same mixed preset/click/fader take twice with 2,176
   live playback frames between runs. It requires identical SHA-256 output and
   gate traces. It also verifies controls at frame offsets `83`, `91`, `155` and
-  `301`.
+  `301`. The variable-grip take hashes to `5cada29f...`; a full-grip control
+  hashes to the prior `890df8bd...` output and must differ.
 - `npm run test:browser`: real Chrome 150 and real release WASM passed.
 - The Chrome run exercised every preset in both directions.
 - Chrome intercepted the actual worklet seek messages. It verified that active
   playback used one `50–140 ms` early landing and never exposed the exact visual
   aim before that landing.
-- It captured rendered output and replayed a take with more than 400 events.
+- It captured rendered output and replayed an engine-version-4 take with more
+  than 400 events. Capture preserved grip values `0.25`, `0.35` and `0.85`, and
+  public grip returned to zero on release.
 - It restored the pre-replay Rust state.
 - A second trusted touch moved and released XFADE.
 - The record touch remained active until its own release.

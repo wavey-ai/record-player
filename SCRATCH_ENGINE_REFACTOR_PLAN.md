@@ -8,27 +8,31 @@ is made.
 
 Current automated evidence:
 
-- `cargo test --workspace`: 87 tests (82 `record-player`, 5 `player-wasm`).
-- `node --test test/*.test.mjs`: 65 tests. Canvas tests check audio-owned phase
+- `cargo test --workspace`: 90 tests (85 `record-player`, 5 `player-wasm`).
+- `node --test test/*.test.mjs`: 67 tests. Canvas tests check audio-owned phase
   at half-speed forward, full-speed reverse and rest, plus all eight preset and
   click-count selections through independent mouse and touch gestures.
 - `npm run build`: both browser WASM packages build in release mode.
-- `npm run bench:worklet`: two release-WASM runs measured p95 at `1.44–1.45%`
-  normal and `7.80–7.86%` for alternating `±8×` crab/8. Fresh six-second
-  stereo PCM window p95 was `2.55–3.52%` against a `2.667 ms` quantum.
+- `npm run bench:worklet`: three release-WASM runs measured p95 at `1.47%`
+  normal and `8.10–8.14%` for alternating `±8×` crab/8. Fresh six-second
+  stereo PCM window p95 was `2.90–3.08%` against a `2.667 ms` quantum.
 - The release-WASM harness requires identical output SHA-256 and gate traces
   when 2,176 live frames separate two runs of the same take. It verifies
-  preset, click and manual-fader events at four exact sub-quantum offsets.
+  preset, click and manual-fader events at four exact sub-quantum offsets. A
+  variable-grip take hashes to `5cada29f...`; its full-grip control retains the
+  prior `890df8bd...` output and must differ.
 - `npm run test:browser`: Chrome 150 loaded real release WASM at 48 kHz.
   It exercised all eight gates in both directions and captured rendered audio.
-  It recorded, replayed and restored a take with more than 400 events.
+  It recorded, replayed and restored an engine-version-4 take with more than
+  400 events. The take retained begin/motion grip values `0.25`, `0.35` and
+  `0.85`; public grip returned to zero on release.
   It kept a trusted record touch active while a second touch moved XFADE. The
   API, trusted mouse, trusted touch and trusted keyboard paths each selected
   all eight presets and all eight click counts while XFADE remained at `0.37`.
   The embed exposed both canvas selectors and its collapsed advanced dropdown
   in the initial viewport.
-- The browser run measured less than `6 ms` maximum pointer-to-apply latency in
-  this synthetic trace. It reported `5.80 ms` base latency and `32 ms` output
+- The browser run measured less than `5.38 ms` maximum pointer-to-apply latency
+  in this synthetic trace. It reported `5.33 ms` base latency and `32 ms` output
   latency. These are headless host results, not hardware population data.
 - Three independent browser runs sampled Chrome's Web Audio render capacity by
   phase. The worst maximum was `13.33%`, and the worst run-level p95 was
@@ -57,6 +61,12 @@ Current automated evidence:
   software loopback. Target hardware must supply the physical result.
 - Physical output-device xrun measurements, physical controller runs and the
   human protocol in `DJ_VALIDATION_PROTOCOL.md` remain outstanding.
+
+Grip now crosses the complete Phase 1 protocol. Explicit `0..1` API grip and
+pen pressure reach Rust slipmat coupling, public state and deterministic
+capture/replay. Missing historical values, mouse input and finger touch default
+to full grip. iPhone Haptic Touch is not treated as force input; any
+intent-derived touch grip needs target-device measurements before tuning.
 
 ## Objective and proof standard
 

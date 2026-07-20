@@ -1,6 +1,10 @@
 use crate::{DeckId, LoadStatus, SurfaceRegion};
 use serde::{Deserialize, Serialize};
 
+fn default_scratch_grip() -> f32 {
+    1.0
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PlayerEvent {
@@ -80,6 +84,8 @@ pub enum PlayerEvent {
         pointer_id: i32,
         playback_seconds: f64,
         rotation_degrees: f64,
+        #[serde(default = "default_scratch_grip")]
+        grip: f32,
     },
     MoveScratch {
         deck: DeckId,
@@ -88,6 +94,8 @@ pub enum PlayerEvent {
         rate: f32,
         rotation_degrees: f64,
         impulse: f32,
+        #[serde(default = "default_scratch_grip")]
+        grip: f32,
     },
     ScratchRenderedPosition {
         deck: DeckId,
@@ -114,4 +122,34 @@ pub enum PlayerEvent {
     Tick {
         now_ms: f64,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn historical_scratch_events_default_to_full_grip() {
+        let begin: PlayerEvent = serde_json::from_value(serde_json::json!({
+            "type": "begin_scratch",
+            "deck": "a",
+            "pointer_id": 1,
+            "playback_seconds": 2.0,
+            "rotation_degrees": 0.0
+        }))
+        .unwrap();
+        let movement: PlayerEvent = serde_json::from_value(serde_json::json!({
+            "type": "move_scratch",
+            "deck": "a",
+            "position_frames": 96_000.0,
+            "rendered_position_frames": 96_000.0,
+            "rate": -1.0,
+            "rotation_degrees": -20.0,
+            "impulse": 0.0
+        }))
+        .unwrap();
+
+        assert!(matches!(begin, PlayerEvent::BeginScratch { grip, .. } if grip == 1.0));
+        assert!(matches!(movement, PlayerEvent::MoveScratch { grip, .. } if grip == 1.0));
+    }
 }

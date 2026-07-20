@@ -354,6 +354,7 @@ struct AcousticReplaySnapshot {
     needle_lifted: bool,
     hand_contact: bool,
     grip: f64,
+    grip_target: f64,
     motor_rate: f64,
     motor_delivered_rate: f64,
     unpowered_throw_rate: f64,
@@ -401,6 +402,7 @@ pub struct ScratchAcousticDsp {
     needle_lifted: bool,
     hand_contact: bool,
     grip: f64,
+    grip_target: f64,
     motor_rate: f64,
     motor_delivered_rate: f64,
     unpowered_throw_rate: f64,
@@ -485,6 +487,7 @@ impl ScratchAcousticDsp {
             needle_lifted: false,
             hand_contact: false,
             grip: 0.0,
+            grip_target: 0.0,
             motor_rate: 0.0,
             motor_delivered_rate: 0.0,
             unpowered_throw_rate: 0.0,
@@ -718,6 +721,7 @@ impl ScratchAcousticDsp {
     pub fn start(&mut self) {
         self.active = true;
         self.grip = 0.0;
+        self.grip_target = 1.0;
         self.motor_delivered_rate = 0.0;
         self.hand_contact = true;
         // Original: `this.position || this.targetPosition || 0` — first non-zero wins.
@@ -744,6 +748,7 @@ impl ScratchAcousticDsp {
     pub fn stop(&mut self) {
         self.active = false;
         self.hand_contact = false;
+        self.grip_target = 0.0;
         self.scratch_gate.release();
         self.target_rate = 0.0;
         self.unpowered_throw_rate = 0.0;
@@ -844,6 +849,7 @@ impl ScratchAcousticDsp {
             needle_lifted: self.needle_lifted,
             hand_contact: self.hand_contact,
             grip: self.grip,
+            grip_target: self.grip_target,
             motor_rate: self.motor_rate,
             motor_delivered_rate: self.motor_delivered_rate,
             unpowered_throw_rate: self.unpowered_throw_rate,
@@ -889,6 +895,7 @@ impl ScratchAcousticDsp {
         self.needle_lifted = snapshot.needle_lifted;
         self.hand_contact = snapshot.hand_contact;
         self.grip = snapshot.grip;
+        self.grip_target = snapshot.grip_target;
         self.motor_rate = snapshot.motor_rate;
         self.motor_delivered_rate = snapshot.motor_delivered_rate;
         self.unpowered_throw_rate = snapshot.unpowered_throw_rate;
@@ -944,6 +951,7 @@ impl ScratchAcousticDsp {
         self.high_frequency_acceleration_limiter.reset();
         self.hand_contact = false;
         self.grip = 0.0;
+        self.grip_target = 0.0;
         self.motor_rate = 0.0;
         self.motor_delivered_rate = 0.0;
         self.unpowered_throw_rate = 0.0;
@@ -1090,7 +1098,13 @@ impl ScratchAcousticDsp {
     }
 
     #[wasm_bindgen(js_name = setTransport)]
-    pub fn set_transport(&mut self, hand_contact: bool, motor_rate: f64, hand_rate: f64) {
+    pub fn set_transport(
+        &mut self,
+        hand_contact: bool,
+        motor_rate: f64,
+        hand_rate: f64,
+        grip: f64,
+    ) {
         let released_hand = self.hand_contact && !hand_contact;
         let motor_rate =
             finite_or_zero(motor_rate).clamp(-self.config.max_rate, self.config.max_rate);
@@ -1102,6 +1116,15 @@ impl ScratchAcousticDsp {
             self.unpowered_throw_rate = 0.0;
         }
         self.hand_contact = hand_contact;
+        self.grip_target = if hand_contact {
+            if grip.is_finite() {
+                grip.clamp(0.0, 1.0)
+            } else {
+                1.0
+            }
+        } else {
+            0.0
+        };
         if !hand_contact {
             self.scratch_gate.release();
         }
@@ -1170,8 +1193,7 @@ impl ScratchAcousticDsp {
         let hold_frames = (self.output_sample_rate * MOTION_HOLD_SECONDS).max(1.0) as usize;
         let hold_release_frames = (self.output_sample_rate * MOTION_HOLD_RELEASE_SECONDS).max(1.0);
         let still_snap_alpha = 1.0 - (-1.0 / (self.output_sample_rate * STILL_SNAP_SECONDS)).exp();
-        let grip_target = if self.hand_contact { 1.0 } else { 0.0 };
-        let grip_seconds = if self.hand_contact {
+        let grip_seconds = if self.grip_target > self.grip {
             GRIP_ATTACK_SECONDS
         } else {
             GRIP_RELEASE_SECONDS
@@ -1189,7 +1211,7 @@ impl ScratchAcousticDsp {
         let mut ended_this_render = false;
         for frame in 0..frame_count {
             self.frames_since_motion = self.frames_since_motion.saturating_add(1);
-            self.grip += (grip_target - self.grip) * grip_alpha;
+            self.grip += (self.grip_target - self.grip) * grip_alpha;
             if self.motor_rate.abs() > self.motor_delivered_rate.abs() {
                 self.motor_delivered_rate +=
                     (self.motor_rate - self.motor_delivered_rate) * motor_spin_alpha;
@@ -2205,7 +2227,7 @@ mod tests {
         dsp.set_scratch_preset(preset.as_str()).unwrap();
         dsp.start();
         dsp.set_position(24_000.0, 0.0);
-        dsp.set_transport(true, 0.0, rate);
+        dsp.set_transport(true, 0.0, rate, 1.0);
         dsp.set_motion(24_000.0, rate, 0.0);
         dsp.grip = 1.0;
         dsp.rate = rate;
@@ -2396,7 +2418,7 @@ mod tests {
         let mut dsp = simulation_dsp();
         dsp.start();
         dsp.set_position(2_400_000.0, 0.0);
-        dsp.set_transport(false, 1.0, 0.0);
+        dsp.set_transport(false, 1.0, 0.0, 0.0);
         for _ in 0..375 {
             dsp.render(128, 2); // 1 s: motor reaches nominal speed
         }
@@ -2406,12 +2428,12 @@ mod tests {
             dsp.last_effective_rate
         );
         let grab_position = dsp.position;
-        dsp.set_transport(true, 1.0, 0.0);
+        dsp.set_transport(true, 1.0, 0.0, 1.0);
         let mut hand_position = grab_position;
         let mut min_rate = f64::MAX;
         for step in 0..60 {
             hand_position -= 768.0; // −1× for 16 ms
-            dsp.set_transport(true, 1.0, -1.0);
+            dsp.set_transport(true, 1.0, -1.0, 1.0);
             dsp.set_motion(hand_position, -1.0, 0.0);
             for _ in 0..6 {
                 dsp.render(128, 2);
@@ -2439,12 +2461,46 @@ mod tests {
         let mut dsp = simulation_dsp();
         dsp.start();
         dsp.set_position(2_400_000.0, 0.0);
-        dsp.set_transport(false, 1.0, 0.0);
+        dsp.set_transport(false, 1.0, 0.0, 0.0);
         dsp.render(48_000, 1);
-        dsp.set_transport(true, 1.0, -1.0);
+        dsp.set_transport(true, 1.0, -1.0, 1.0);
         dsp.set_motion(dsp.position - 960.0, -1.0, 0.0);
         dsp.render(960, 1);
         assert!(dsp.grip > 0.80, "20 ms grab grip was {}", dsp.grip);
+    }
+
+    #[test]
+    fn commanded_grip_controls_slipmat_coupling() {
+        fn drag_with_grip(grip: f64) -> ScratchAcousticDsp {
+            let mut dsp = simulation_dsp();
+            dsp.start();
+            dsp.set_position(2_400_000.0, 0.0);
+            dsp.set_transport(false, 1.0, 0.0, 0.0);
+            dsp.render(48_000, 1);
+            let mut hand_position = dsp.position;
+            for _ in 0..40 {
+                hand_position -= 768.0;
+                dsp.set_transport(true, 1.0, -1.0, grip);
+                dsp.set_motion(hand_position, -1.0, 0.0);
+                dsp.render(768, 1);
+            }
+            dsp
+        }
+
+        let light = drag_with_grip(0.2);
+        let firm = drag_with_grip(1.0);
+        assert!(
+            light.last_effective_rate > 0.25,
+            "light contact should let the powered platter slip forward, got {}",
+            light.last_effective_rate,
+        );
+        assert!(
+            firm.last_effective_rate < -0.65,
+            "firm contact should reverse the record, got {}",
+            firm.last_effective_rate,
+        );
+        assert!((light.grip_target - 0.2).abs() < f64::EPSILON);
+        assert!((firm.grip_target - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -2463,12 +2519,12 @@ mod tests {
         let mut thrown = simulation_dsp();
         thrown.start();
         thrown.set_position(2_400_000.0, 0.0);
-        thrown.set_transport(true, 0.0, 1.0);
+        thrown.set_transport(true, 0.0, 1.0, 1.0);
         thrown.set_motion(thrown.position + 24_000.0, 1.0, 0.0);
         thrown.grip = 1.0;
         thrown.rate = 1.0;
         thrown.last_effective_rate = 1.0;
-        thrown.set_transport(false, 0.0, 0.0);
+        thrown.set_transport(false, 0.0, 0.0, 0.0);
         thrown.render(9_600, 1);
         assert!(
             thrown.last_effective_rate > 0.55,
@@ -2479,9 +2535,9 @@ mod tests {
         let mut braked = simulation_dsp();
         braked.start();
         braked.set_position(2_400_000.0, 0.0);
-        braked.set_transport(false, 1.0, 0.0);
+        braked.set_transport(false, 1.0, 0.0, 0.0);
         braked.render(48_000, 1);
-        braked.set_transport(false, 0.0, 0.0);
+        braked.set_transport(false, 0.0, 0.0, 0.0);
         braked.render(19_200, 1);
         assert!(
             braked.last_effective_rate.abs() < 0.05,
@@ -2504,7 +2560,7 @@ mod tests {
     #[test]
     fn surface_only_render_spins_platter_without_advancing_or_leaking_programme() {
         let mut dsp = scratch_signal_dsp(ScratchPreset::Baby, 0.0);
-        dsp.set_transport(false, 1.0, 0.0);
+        dsp.set_transport(false, 1.0, 0.0, 0.0);
         let programme_position = dsp.position;
         dsp.render_surface(48_000, 1);
         assert_eq!(dsp.position, programme_position);
@@ -2801,7 +2857,7 @@ mod tests {
         dsp.set_effects(false, false);
         dsp.start();
         dsp.set_position(472.0, 0.0);
-        dsp.set_transport(false, 1.0, 0.0);
+        dsp.set_transport(false, 1.0, 0.0, 0.0);
         dsp.motor_delivered_rate = 1.0;
         dsp.rate = 1.0;
         dsp.rate_velocity = 0.0;
@@ -2834,7 +2890,7 @@ mod tests {
         dsp.set_effects(false, false);
         dsp.start();
         dsp.set_position(2_400_000.0, 0.0);
-        dsp.set_transport(false, 1.0, 0.0);
+        dsp.set_transport(false, 1.0, 0.0, 0.0);
         dsp.motor_delivered_rate = 1.0;
         dsp.rate = 1.0;
         dsp.last_effective_rate = 1.0;
@@ -2844,7 +2900,7 @@ mod tests {
 
         dsp.start();
         dsp.set_position(10.0, 0.0);
-        dsp.set_transport(true, 0.0, -4.0);
+        dsp.set_transport(true, 0.0, -4.0, 1.0);
         dsp.platter_rotation_turns = -3.0;
         dsp.manual_fader_gain = 0.0;
 
@@ -2866,7 +2922,7 @@ mod tests {
         let mut dsp = simulation_dsp();
         dsp.start();
         dsp.set_position(2_400_000.0, 0.0);
-        dsp.set_transport(false, 1.0, 0.0);
+        dsp.set_transport(false, 1.0, 0.0, 0.0);
         dsp.motor_delivered_rate = 0.81;
         dsp.rate = 0.77;
         dsp.wow_phase = 0.63;
@@ -2901,7 +2957,7 @@ mod tests {
         assert!(dsp.needle_thump.is_none());
         assert!(dsp.needle_burst.is_none());
 
-        dsp.set_transport(true, 0.0, -4.0);
+        dsp.set_transport(true, 0.0, -4.0, 1.0);
         dsp.set_motion(23_000.0, -4.0, 0.8);
         dsp.render(2_048, 2);
         assert_ne!(dsp.noise_seed, first.4);
@@ -3169,7 +3225,7 @@ mod tests {
         dsp.render(1024, 1);
         assert!(dsp.scratch_gate() < 0.01);
 
-        dsp.set_transport(false, 1.0, 0.0);
+        dsp.set_transport(false, 1.0, 0.0, 0.0);
         dsp.render(1024, 1);
         assert!(dsp.scratch_gate() > 0.99);
         assert!(output_rms(&dsp) > 0.25);
