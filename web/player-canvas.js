@@ -3,12 +3,12 @@ import {
   CANVAS_THEME,
   buildCanvasGeometry,
   clamp,
-  localPointer,
-  pointerPolar
+  localPointer
 } from "./player-canvas-geometry.js";
 import { controlAt, drawRadialControls, updateArcControl } from "./player-canvas-controls.js";
 import { drawStrobe, strobeLampGeometry } from "./player-canvas-strobe.js";
 import { drawStylus, resolveStylusGeometry } from "./player-canvas-stylus.js";
+import { createScratchGestureTracker } from "./scratch-gesture.js";
 
 const UI_IDLE_DELAY_MS = 10000;
 const UI_FADE_IN_MS = 140;
@@ -29,12 +29,6 @@ function easeIncandescentFade(value) {
   return 1 - Math.pow(1 - t, 4);
 }
 
-function unwrapRadians(delta) {
-  if (delta > Math.PI) return delta - Math.PI * 2;
-  if (delta < -Math.PI) return delta + Math.PI * 2;
-  return delta;
-}
-
 export function createVinylPlayerCanvas(player, canvas, options = {}) {
   if (!(canvas instanceof HTMLCanvasElement)) throw new TypeError("A canvas element is required");
   let components = { ...CANVAS_COMPONENTS, ...(options.components || {}) };
@@ -48,7 +42,7 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
   let imageUrl = "";
   let frame = 0;
   let destroyed = false;
-  let activeGesture = null;
+  const activeGestures = new Map();
   let hitRegions = [];
   let lastTimestamp = performance.now();
   let visualRotation = Number(snapshot.rotationDegrees) || 0;
@@ -71,7 +65,7 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
 
   function shouldAnimate() {
     return Boolean(
-      activeGesture ||
+      activeGestures.size > 0 ||
       snapshot.playing ||
       snapshot.motorRunning ||
       snapshot.scratching ||
@@ -361,28 +355,61 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
     player.seekRatio(typeof options.inverseStylusProgress === "function" ? options.inverseStylusProgress(visualRatio) : visualRatio);
   }
 
+  function coalescedSamples(event) {
+    if (typeof event.getCoalescedEvents !== "function") return [event];
+    try {
+      const samples = Array.from(event.getCoalescedEvents() || []);
+      return samples.length ? samples : [event];
+    } catch {
+      return [event];
+    }
+  }
+
+  function hasRecordGesture() {
+    return Array.from(activeGestures.values()).some(gesture => gesture.kind === "record");
+  }
+
+  function scratchPointerSample(event, point, needleLifted) {
+    const sample = {
+      pointerId: event.pointerId,
+      angleRadians: Math.atan2(point.y - latestGeometry.cy, point.x - latestGeometry.cx),
+      timeMs: Number.isFinite(Number(event.timeStamp)) ? Number(event.timeStamp) : performance.now(),
+      radius: Math.hypot(point.x - latestGeometry.cx, point.y - latestGeometry.cy),
+      pressure: event.pressure,
+      pointerType: event.pointerType,
+      handContact: true,
+    };
+    if (typeof needleLifted === "boolean") sample.needleLifted = needleLifted;
+    return sample;
+  }
+
+  function captureGesture(event, gesture) {
+    activeGestures.set(event.pointerId, gesture);
+    canvas.setPointerCapture(event.pointerId);
+  }
+
   function pointerDown(event) {
     noteActivity();
-    if (!latestGeometry) return;
+    if (!latestGeometry || activeGestures.has(event.pointerId)) return;
     const point = localPointer(canvas, event);
     const region = regionAt(point);
     if (!region) return;
-    canvas.setPointerCapture(event.pointerId);
     if (region.kind === "lamp") {
       strobeLightOn = !strobeLightOn;
+      scheduleRender();
       return;
     }
     if (region.kind === "sector-button" || region.kind === "round-button") {
-      activeGesture = { kind: "button", region, pointerId: event.pointerId };
+      captureGesture(event, { kind: "button", region, pointerId: event.pointerId });
       return;
     }
     if (region.kind === "arc-slider") {
-      activeGesture = { kind: "arc-slider", region, pointerId: event.pointerId };
+      captureGesture(event, { kind: "arc-slider", region, pointerId: event.pointerId });
       updateArcControl(region, latestGeometry, point);
       return;
     }
     if (region.kind === "needle-point" || region.kind === "needle-arc") {
-      activeGesture = { kind: "needle", pointerId: event.pointerId };
+      captureGesture(event, { kind: "needle", pointerId: event.pointerId });
       seekFromStylusPoint(point);
       return;
     }
@@ -392,71 +419,128 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
       }
       return;
     }
-    const angle = Math.atan2(point.y - latestGeometry.cy, point.x - latestGeometry.cx);
-    activeGesture = {
+    if (snapshot.scratchReplayActive) return;
+    if (hasRecordGesture()) return;
+    const sampleRate = Math.max(1, Number(snapshot.sampleRate) || 48000);
+    const nativeRpm = Math.max(1, Number(snapshot.nativeRpm) || 33.3333333333);
+    const durationFrames = (Number(snapshot.durationSeconds) || 0) * sampleRate;
+    const positionFrames = Number.isFinite(Number(snapshot.positionFrames))
+      ? Number(snapshot.positionFrames)
+      : Math.round((Number(snapshot.positionSeconds) || 0) * sampleRate);
+    const tracker = createScratchGestureTracker({
+      sampleRate,
+      secondsPerTurn: 60 / nativeRpm,
+      minPositionFrames: 0,
+      maxPositionFrames: durationFrames > 0 ? durationFrames : Number.MAX_SAFE_INTEGER,
+      minimumRadius: Math.max(8, latestGeometry.recordRadius * 0.06),
+    });
+    const motion = tracker.begin({
+      ...scratchPointerSample(event, point, Boolean(snapshot.needleLifted)),
+      positionFrames,
+      rotationDegrees: visualRotation,
+    });
+    captureGesture(event, {
       kind: "record",
       pointerId: event.pointerId,
-      lastAngle: angle,
-      lastTime: event.timeStamp,
-      positionFrames: Math.round((Number(snapshot.positionSeconds) || 0) * (Number(snapshot.sampleRate) || 48000))
-    };
+      tracker,
+    });
     player.beginScratch({
       pointerId: event.pointerId,
-      rotationDegrees: visualRotation,
-      positionFrames: activeGesture.positionFrames
+      rotationDegrees: motion.rotationDegrees,
+      positionFrames: motion.positionFrames,
+      rate: motion.rate,
+      impulse: motion.impulse,
+      pressure: motion.pressure,
+      grip: motion.grip,
+      handContact: motion.handContact,
+      needleLifted: motion.needleLifted,
+      inputTimeMs: Number(event.timeStamp) || performance.now(),
     });
   }
 
   function pointerMove(event) {
     noteActivity();
-    if (!activeGesture || activeGesture.pointerId !== event.pointerId || !latestGeometry) return;
-    const point = localPointer(canvas, event);
-    if (activeGesture.kind === "arc-slider") {
-      updateArcControl(activeGesture.region, latestGeometry, point);
+    const gesture = activeGestures.get(event.pointerId);
+    if (!gesture || !latestGeometry) return;
+    const samples = coalescedSamples(event);
+    if (gesture.kind === "arc-slider") {
+      for (const sample of samples) {
+        updateArcControl(gesture.region, latestGeometry, localPointer(canvas, sample));
+      }
       return;
     }
-    if (activeGesture.kind === "needle") {
-      seekFromStylusPoint(point);
+    if (gesture.kind === "needle") {
+      for (const sample of samples) seekFromStylusPoint(localPointer(canvas, sample));
       return;
     }
-    if (activeGesture.kind !== "record") return;
-    const angle = Math.atan2(point.y - latestGeometry.cy, point.x - latestGeometry.cx);
-    const delta = unwrapRadians(angle - activeGesture.lastAngle);
-    const dt = Math.max(0.001, (event.timeStamp - activeGesture.lastTime) / 1000);
-    const sampleRate = Number(snapshot.sampleRate) || 48000;
-    const framesPerTurn = sampleRate * 60 / Math.max(1, Number(snapshot.nativeRpm) || 33.3333333333);
-    const frameDelta = delta / (Math.PI * 2) * framesPerTurn;
-    activeGesture.positionFrames = Math.max(0, activeGesture.positionFrames + frameDelta);
-    const rate = frameDelta / (sampleRate * dt);
-    visualRotation = (visualRotation + delta * 180 / Math.PI) % 360;
-    player.updateScratch({
-      positionFrames: activeGesture.positionFrames,
-      rate,
-      rotationDegrees: visualRotation,
-      impulse: Math.min(1, Math.abs(rate) / 3)
-    });
-    activeGesture.lastAngle = angle;
-    activeGesture.lastTime = event.timeStamp;
+    if (gesture.kind !== "record") return;
+    for (const sample of samples) {
+      const point = localPointer(canvas, sample);
+      const motion = gesture.tracker.update(scratchPointerSample(sample, point));
+      visualRotation = motion.rotationDegrees;
+      player.updateScratch({
+        positionFrames: motion.positionFrames,
+        rate: motion.rate,
+        rotationDegrees: motion.rotationDegrees,
+        impulse: motion.impulse,
+        direction: motion.direction,
+        reversal: motion.reversal,
+        acceleration: motion.acceleration,
+        pressure: motion.pressure,
+        grip: motion.grip,
+        handContact: motion.handContact,
+        needleLifted: motion.needleLifted,
+        visualOnly: motion.visualOnly,
+        inputTimeMs: Number(sample.timeStamp) || performance.now(),
+      });
+    }
+    scheduleRender();
+  }
+
+  function finishPointer(event, cancelled = false) {
+    noteActivity();
+    const gesture = activeGestures.get(event.pointerId);
+    if (!gesture) return;
+    activeGestures.delete(event.pointerId);
+    if (gesture.kind === "button" && !cancelled) gesture.region.onActivate();
+    if (gesture.kind === "record") {
+      const motion = cancelled
+        ? gesture.tracker.cancel({
+          pointerId: event.pointerId,
+          pressure: event.pressure,
+          pointerType: event.pointerType,
+        })
+        : gesture.tracker.finish({
+          pointerId: event.pointerId,
+          pressure: event.pressure,
+          pointerType: event.pointerType,
+        });
+      visualRotation = motion.rotationDegrees;
+      player.endScratch({
+        rotationDegrees: motion.rotationDegrees,
+        resumePlayback: true,
+        cancelled: motion.cancelled,
+        pressure: motion.pressure,
+        grip: motion.grip,
+        handContact: motion.handContact,
+      });
+    }
     scheduleRender();
   }
 
   function pointerUp(event) {
-    noteActivity();
-    if (!activeGesture || activeGesture.pointerId !== event.pointerId) return;
-    const gesture = activeGesture;
-    activeGesture = null;
-    if (gesture.kind === "button") gesture.region.onActivate();
-    if (gesture.kind === "record") {
-      player.endScratch({ rotationDegrees: visualRotation, resumePlayback: true });
-    }
-    scheduleRender();
+    finishPointer(event, false);
+  }
+
+  function pointerCancel(event) {
+    finishPointer(event, true);
   }
 
   const unsubscribe = player.subscribe(next => {
     const wasScratching = snapshot.scratching;
     const couldAutoFade = canAutoFadeUi(snapshot);
     snapshot = next;
-    if ((next.scratching || wasScratching) && Number.isFinite(next.rotationDegrees)) {
+    if (!hasRecordGesture() && (next.scratching || wasScratching) && Number.isFinite(next.rotationDegrees)) {
       visualRotation = next.rotationDegrees;
     }
     if (!canAutoFadeUi(next)) {
@@ -477,7 +561,8 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
   canvas.addEventListener("pointerdown", pointerDown);
   canvas.addEventListener("pointermove", pointerMove);
   canvas.addEventListener("pointerup", pointerUp);
-  canvas.addEventListener("pointercancel", pointerUp);
+  canvas.addEventListener("pointercancel", pointerCancel);
+  canvas.addEventListener("lostpointercapture", pointerCancel);
   scheduleIdleTimer();
   scheduleRender();
 
@@ -527,6 +612,19 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
       cancelAnimationFrame(frame);
       clearIdleTimer();
       root.classList.remove("vinyl-ui-idle");
+      for (const [pointerId, gesture] of activeGestures) {
+        if (gesture.kind !== "record") continue;
+        const motion = gesture.tracker.cancel({ pointerId });
+        player.endScratch({
+          rotationDegrees: motion.rotationDegrees,
+          resumePlayback: true,
+          cancelled: true,
+          pressure: 0,
+          grip: 0,
+          handContact: false,
+        });
+      }
+      activeGestures.clear();
       unsubscribe();
       for (const type of activityEvents) {
         activityTarget.removeEventListener(type, noteActivity, { passive: true });
@@ -534,7 +632,8 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
       canvas.removeEventListener("pointerdown", pointerDown);
       canvas.removeEventListener("pointermove", pointerMove);
       canvas.removeEventListener("pointerup", pointerUp);
-      canvas.removeEventListener("pointercancel", pointerUp);
+      canvas.removeEventListener("pointercancel", pointerCancel);
+      canvas.removeEventListener("lostpointercapture", pointerCancel);
     }
   });
 }

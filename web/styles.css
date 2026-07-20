@@ -20,7 +20,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -137,6 +138,61 @@ button.is-active {
 
 .timeline input {
   width: 100%;
+}
+
+.technique-control {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 7rem 1fr;
+  gap: 1rem;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.technique-control select {
+  min-height: 40px;
+  border: 1px solid var(--embed-tone);
+  border-radius: 0;
+  background: var(--embed-bg);
+  color: var(--embed-tone);
+  font-weight: 900;
+}
+
+.advanced-controls {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--embed-tone);
+  padding: 0;
+}
+
+.advanced-controls summary {
+  min-height: 40px;
+  box-sizing: border-box;
+  padding: 11px 12px;
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  list-style-position: inside;
+}
+
+.advanced-controls[open] {
+  padding-bottom: 12px;
+}
+
+.advanced-controls .timeline {
+  width: auto;
+  margin: 10px 12px 0;
+}
+
+.advanced-controls .control-help {
+  display: block;
+  margin: 5px 12px 0;
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  opacity: 0.72;
 }
 
 output {
@@ -269,7 +325,7 @@ body.embed-page {
   pointer-events: none;
 }
 
-.embed-controls,
+.embed-controls:not(.advanced-controls),
 html.embed-mode .metadata,
 html.embed-mode .player-shell > header {
   display: none !important;

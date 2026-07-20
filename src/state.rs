@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::mixer::DEFAULT_SHARP_CROSSFADER_WIDTH;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DeckId {
@@ -186,7 +188,7 @@ impl Default for PlayerConfig {
     fn default() -> Self {
         Self {
             sample_rate: 48_000.0,
-            sharp_crossfader_width: 0.08,
+            sharp_crossfader_width: DEFAULT_SHARP_CROSSFADER_WIDTH,
         }
     }
 }

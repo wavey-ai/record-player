@@ -5,6 +5,14 @@ import { createPcmChunkCacheHandler, recordCacheKey } from "./pcm-cache.js";
 import { createRemoteOpusChunkCacheHandler, createRemoteOpusPrecache, decodeRecordDescriptorJson } from "./opus-cache.js";
 import { buildSoundkitFrameHeader, soundkitOpusPacketItemsFromPackets } from "./player-soundkit.js";
 import { clearScratchPerformances, deleteScratchPerformance, getScratchPerformance, listScratchPerformances, saveScratchPerformance } from "./scratch-performance-store.js";
+import {
+  normalizeScratchClicks,
+  normalizeScratchPerformance,
+  normalizeScratchPreset,
+  SCRATCH_GATE_ALGORITHM_VERSION,
+  SCRATCH_PERFORMANCE_SCHEMA_VERSION,
+  SCRATCH_PRESET_DEFAULT_CLICKS,
+} from "./scratch-performance-schema.js";
 
 const log = createLogger("host");
 const HOST_CONFIG = globalThis.VIN_YL_PLAYER_HOST_CONFIG || {};
@@ -320,6 +328,9 @@ const MOBILE_SURFACE_GAIN_MULTIPLIER = 2.25;
 // and social clips should not add two revolutions of deadwax surface noise
 // after the music finishes.
 const LEAD_IN_TURNS = 2;
+const DEADWAX_TURNS = 2;
+const DEFAULT_HF_ACCELERATION_LIMIT = 0.35;
+const DEFAULT_STYLUS_TRACING_LIMIT = 0.72;
 
 const elements = {
   file: playerRoot.querySelector("#file"),
@@ -339,13 +350,23 @@ const elements = {
   rpm45: playerRoot.querySelector("#rpm-45"),
   rpm: playerRoot.querySelector("#rpm"),
   volume: playerRoot.querySelector("#volume"),
-  xfade: playerRoot.querySelector("#xfade")
+  xfade: playerRoot.querySelector("#xfade"),
+  scratchPreset: playerRoot.querySelector("#scratch-preset"),
+  scratchClicks: playerRoot.querySelector("#scratch-clicks"),
+  scratchClicksValue: playerRoot.querySelector("#scratch-clicks-value"),
+  highFrequencyAccelerationLimit: playerRoot.querySelector("#hf-acceleration-limit"),
+  highFrequencyAccelerationLimitValue: playerRoot.querySelector("#hf-acceleration-limit-value"),
+  stylusTracingLimit: playerRoot.querySelector("#stylus-tracing-limit"),
+  stylusTracingLimitValue: playerRoot.querySelector("#stylus-tracing-limit-value"),
+  advancedControls: playerRoot.querySelector(".advanced-controls"),
 };
 
 const state = {
   context: null,
+  audioInitialisePromise: null,
   node: null,
   worker: null,
+  coreInitialisePromise: null,
   requestId: 0,
   pending: new Map(),
   view: null,
@@ -369,9 +390,14 @@ const state = {
   lastCoreObservedAtMs: 0,
   decoder: null,
   loadSequence: 0,
+  loadInFlightSequence: 0,
+  failedLoadSequence: 0,
+  loadFailureSequence: 0,
+  loadFailurePromise: null,
   recordObjectUrl: "",
   streamInitialised: false,
   streamReady: false,
+  streamReadyMarking: false,
   streamDecodedFrames: 0,
   buffering: false,
   streamReadyPromise: null,
@@ -380,6 +406,7 @@ const state = {
   baseRpm: 33.3333333333,
   seekTimer: 0,
   seekInFlight: false,
+  seekDispatchSerial: 0,
   queuedSeekSeconds: null,
   gainNode: null,
   captureNode: null,
@@ -396,14 +423,52 @@ const state = {
   scratchReplayRequests: new Map(),
   scratchReplayId: 0,
   activeScratchRecorder: null,
+  replayScratching: false,
+  scratchPreset: "baby",
+  scratchClicks: SCRATCH_PRESET_DEFAULT_CLICKS.baby,
+  scratchGate: 1,
+  scratchGateTarget: 1,
+  scratchDirection: 0,
+  scratchMoving: false,
+  scratchGatePhase: 0,
+  scratchStrokeProgress: 0,
+  effectiveRate: 0,
+  highFrequencyAccelerationLimit: DEFAULT_HF_ACCELERATION_LIMIT,
+  stylusTracingLimit: DEFAULT_STYLUS_TRACING_LIMIT,
+  pointerToAudioLatencyMs: null,
+  pointerCommandId: 0,
+  lastDspRotationTurns: null,
+  cleanEnd: false,
   canvasController: null,
-  streamInitialised: false,
-  streamReady: false,
-  streamDecodedFrames: 0,
   streamAppendChain: Promise.resolve(),
   decodeProgressText: "",
+  pcmWindowWorker: null,
+  pcmWindowBanks: [],
+  pcmWindowFrames: 0,
+  pcmWindowTotalFrames: 0,
+  pcmWindowShared: false,
+  pcmWindowInitialised: false,
+  pcmWindowReady: false,
+  pcmWindowAppliedStart: 0,
+  pcmWindowAppliedEnd: 0,
+  pcmWindowAppliedAvailableEnd: 0,
+  pcmWindowReadyPromise: null,
+  pcmWindowReadyResolve: null,
+  pcmWindowReadyReject: null,
+  pcmWindowRequestId: 0,
+  pcmWindowRequestInFlight: false,
+  pcmWindowAwaitingApply: false,
+  pcmWindowQueuedRequest: null,
+  pcmWindowAvailabilityWaiters: new Set(),
+  pcmStreamGeneration: 0,
+  pcmStreamLoadSequence: 0,
+  playbackEpoch: 0,
+  endTransitionGeneration: 0,
+  lastOutputFrame: 0,
+  pendingAutomaticDeadwax: null,
   regionTimer: 0,
   surfaceRegion: null,
+  surfaceRegionId: 0,
   needleAutoBehaviorEnabled: true,
   cacheHandler: null,
   postMessageBridge: null,
@@ -421,6 +486,63 @@ const state = {
   },
 };
 
+function scratchReplayActive() {
+  return state.scratchReplayRequests.size > 0;
+}
+
+function currentLoadFailedOrFailing() {
+  return state.loadSequence > 0 && (
+    state.failedLoadSequence === state.loadSequence
+    || state.loadFailureSequence === state.loadSequence
+  );
+}
+
+function grooveInteractionReady() {
+  return Boolean(
+    state.node
+    && state.streamReady
+    && !state.buffering
+    && !state.loadInFlightSequence
+    && !currentLoadFailedOrFailing()
+  );
+}
+
+function seekInteractionReady() {
+  return Boolean(
+    state.node
+    && state.streamReady
+    && !state.loadInFlightSequence
+    && !state.tape.loading
+    && !currentLoadFailedOrFailing()
+  );
+}
+
+function clearLiveScratchInteraction() {
+  const pointerId = state.scratchPointerId;
+  state.scratching = false;
+  state.scratchPointerId = null;
+  state.replayScratching = false;
+  if (
+    pointerId != null
+    && elements.platter?.hasPointerCapture?.(pointerId)
+  ) {
+    elements.platter.releasePointerCapture(pointerId);
+  }
+}
+
+async function interruptScratchReplay(action = "Live control") {
+  if (!scratchReplayActive()) return;
+  await cancelScratchReplays(new Error(`${action} interrupted scratch replay`));
+}
+
+function interruptScratchReplayNow(action = "Live control") {
+  if (!scratchReplayActive()) return;
+  const hasUncancelledRequest = Array.from(state.scratchReplayRequests.values())
+    .some(request => !request.cancelled);
+  if (!hasUncancelledRequest) return;
+  void cancelScratchReplays(new Error(`${action} interrupted scratch replay`));
+}
+
 const DEFAULT_POST_MESSAGE_BRIDGE = Object.freeze({
   enabled: false,
   targetOrigin: "*",
@@ -437,6 +559,10 @@ const DEFAULT_POST_MESSAGE_BRIDGE = Object.freeze({
     setRpmType: "bitneedle-set-rpm",
     setCrossfaderType: "bitneedle-set-crossfader",
     setNeedleLiftedType: "bitneedle-set-needle-lifted",
+    setScratchPresetType: "bitneedle-set-scratch-preset",
+    setScratchClicksType: "bitneedle-set-scratch-clicks",
+    setHighFrequencyAccelerationLimitType: "bitneedle-set-hf-acceleration-limit",
+    setStylusTracingLimitType: "bitneedle-set-stylus-tracing-limit",
     // Live counterpart to the ?bg/tone/turntable/controls/status/light/
     // strobe/dots/arm/arc/load embed query params — lets an embedder change
     // any of them after the iframe is already loaded, without reloading it
@@ -576,6 +702,22 @@ async function handleBridgeMessage(event) {
       await api.setNeedleLifted(Boolean(message.lifted));
       return;
     }
+    if (message.type === bridge.inbound.setScratchPresetType) {
+      api.setScratchPreset(message.preset);
+      return;
+    }
+    if (message.type === bridge.inbound.setScratchClicksType) {
+      api.setScratchClicks(message.clicks);
+      return;
+    }
+    if (message.type === bridge.inbound.setHighFrequencyAccelerationLimitType) {
+      api.setHighFrequencyAccelerationLimit(message.strength);
+      return;
+    }
+    if (message.type === bridge.inbound.setStylusTracingLimitType) {
+      api.setStylusTracingLimit(message.strength);
+      return;
+    }
     if (message.type === bridge.inbound.setEmbedOptionsType) {
       applyEmbedOptions(message.options || {});
       return;
@@ -692,6 +834,15 @@ function resetStreamReadyPromise() {
     state.streamReadyResolve = resolve;
     state.streamReadyReject = reject;
   });
+  state.streamReadyPromise.catch(() => {});
+}
+
+function cancelPendingStreamReady(error) {
+  const reject = state.streamReadyReject;
+  state.streamReadyPromise = null;
+  state.streamReadyResolve = null;
+  state.streamReadyReject = null;
+  reject?.(error);
 }
 
 function profileRpm(recordProfile) {
@@ -704,6 +855,7 @@ function updateRpmButtons() {
 }
 
 async function setRpm(rpm) {
+  await interruptScratchReplay("RPM control");
   const nextRpm = Math.max(16, Math.min(90, Number(rpm) || state.baseRpm));
   state.rpm = nextRpm;
   updateRpmButtons();
@@ -712,49 +864,325 @@ async function setRpm(rpm) {
   await dispatch({ type: "set_playback_rate", deck: "a", rate });
 }
 
-async function initialiseProgressiveStream({ sampleRate, audioLength, channels, workletSeamRepair = true }) {
-  if (state.streamInitialised) return;
+function updateScratchTechniqueControls() {
+  if (elements.scratchPreset) elements.scratchPreset.value = state.scratchPreset;
+  if (elements.scratchClicks) elements.scratchClicks.value = String(state.scratchClicks);
+  if (elements.scratchClicksValue) elements.scratchClicksValue.value = String(state.scratchClicks);
+}
+
+function setScratchClicks(value, { record = true } = {}) {
+  interruptScratchReplayNow("Scratch click control");
+  state.scratchClicks = normalizeScratchClicks(value, state.scratchClicks);
+  updateScratchTechniqueControls();
+  state.node?.port.postMessage({ type: "scratch-clicks", clicks: state.scratchClicks });
+  if (record) recordScratchEvent({ type: "scratch-clicks", clicks: state.scratchClicks });
+  publishState();
+  return state.scratchClicks;
+}
+
+function setScratchPreset(value, { record = true } = {}) {
+  interruptScratchReplayNow("Scratch preset control");
+  state.scratchPreset = normalizeScratchPreset(value, state.scratchPreset);
+  state.scratchClicks = SCRATCH_PRESET_DEFAULT_CLICKS[state.scratchPreset];
+  updateScratchTechniqueControls();
+  state.node?.port.postMessage({ type: "scratch-preset", preset: state.scratchPreset });
+  state.node?.port.postMessage({ type: "scratch-clicks", clicks: state.scratchClicks });
+  if (record) {
+    recordScratchEvent({ type: "scratch-preset", preset: state.scratchPreset });
+    recordScratchEvent({ type: "scratch-clicks", clicks: state.scratchClicks });
+  }
+  publishState();
+  return state.scratchPreset;
+}
+
+function normalizeLimitStrength(value, name) {
+  const strength = Number(value);
+  if (!Number.isFinite(strength)) throw new TypeError(`${name} must be a finite number`);
+  return clamp(strength, 0, 1);
+}
+
+function setHighFrequencyAccelerationLimit(value) {
+  interruptScratchReplayNow("High-frequency acceleration limiter");
+  state.highFrequencyAccelerationLimit = normalizeLimitStrength(value, "High-frequency acceleration limit");
+  if (elements.highFrequencyAccelerationLimit) {
+    elements.highFrequencyAccelerationLimit.value = String(state.highFrequencyAccelerationLimit);
+  }
+  if (elements.highFrequencyAccelerationLimitValue) {
+    elements.highFrequencyAccelerationLimitValue.value = `${Math.round(state.highFrequencyAccelerationLimit * 100)}%`;
+  }
+  state.node?.port.postMessage({
+    type: "hf-acceleration-limit",
+    strength: state.highFrequencyAccelerationLimit,
+  });
+  publishState();
+  return state.highFrequencyAccelerationLimit;
+}
+
+function setStylusTracingLimit(value) {
+  interruptScratchReplayNow("Stylus tracing control");
+  state.stylusTracingLimit = normalizeLimitStrength(value, "Stylus tracing limit");
+  if (elements.stylusTracingLimit) elements.stylusTracingLimit.value = String(state.stylusTracingLimit);
+  if (elements.stylusTracingLimitValue) {
+    elements.stylusTracingLimitValue.value = `${Math.round(state.stylusTracingLimit * 100)}%`;
+  }
+  state.node?.port.postMessage({
+    type: "stylus-tracing-limit",
+    strength: state.stylusTracingLimit,
+  });
+  publishState();
+  return state.stylusTracingLimit;
+}
+
+const PCM_WINDOW_SECONDS = 6;
+const PCM_WINDOW_BANK_COUNT = 2;
+
+function resetPcmWindowReadyPromise() {
+  state.pcmWindowReadyPromise = new Promise((resolve, reject) => {
+    state.pcmWindowReadyResolve = resolve;
+    state.pcmWindowReadyReject = reject;
+  });
+  // A record load can be superseded before its first window arrives. Keep the
+  // cancellation rejection observable to awaiters without creating an
+  // unhandled-rejection warning for a superseded progressive load.
+  state.pcmWindowReadyPromise.catch(() => {});
+}
+
+function waitForPcmAvailability(targetFrame) {
+  const target = Math.max(0, Math.floor(Number(targetFrame) || 0));
+  if (state.streamDecodedFrames >= target) return Promise.resolve(state.streamDecodedFrames);
+  const promise = new Promise((resolve, reject) => {
+    state.pcmWindowAvailabilityWaiters.add({ target, resolve, reject });
+  });
+  promise.catch(() => {});
+  return promise;
+}
+
+function resolvePcmAvailabilityWaiters() {
+  for (const waiter of state.pcmWindowAvailabilityWaiters) {
+    if (state.streamDecodedFrames < waiter.target) continue;
+    state.pcmWindowAvailabilityWaiters.delete(waiter);
+    waiter.resolve(state.streamDecodedFrames);
+  }
+}
+
+function disposePcmWindowTransport({ resetWorklet = true } = {}) {
+  const worker = state.pcmWindowWorker;
+  state.pcmWindowWorker = null;
+  worker?.terminate();
+  const resetError = new Error("PCM window transport reset");
+  state.pcmWindowReadyReject?.(resetError);
+  for (const waiter of state.pcmWindowAvailabilityWaiters) waiter.reject(resetError);
+  state.pcmWindowAvailabilityWaiters.clear();
+  state.pcmWindowBanks = [];
+  state.pcmWindowFrames = 0;
+  state.pcmWindowTotalFrames = 0;
+  state.pcmWindowShared = false;
+  state.pcmWindowInitialised = false;
+  state.pcmWindowReady = false;
+  state.pcmWindowAppliedStart = 0;
+  state.pcmWindowAppliedEnd = 0;
+  state.pcmWindowAppliedAvailableEnd = 0;
+  state.pcmWindowReadyPromise = null;
+  state.pcmWindowReadyResolve = null;
+  state.pcmWindowReadyReject = null;
+  state.pcmWindowRequestInFlight = false;
+  state.pcmWindowAwaitingApply = false;
+  state.pcmWindowQueuedRequest = null;
+  if (resetWorklet) state.node?.port.postMessage({ type: "window-transport-reset" });
+}
+
+function flushQueuedPcmWindowRequest() {
+  const queued = state.pcmWindowQueuedRequest;
+  if (!queued) return;
+  state.pcmWindowQueuedRequest = null;
+  requestPcmWindow(queued.position, queued);
+}
+
+function requestPcmWindow(position, { resetPosition = false, workletRequestId = 0 } = {}) {
+  const request = {
+    position: Math.max(0, Number(position) || 0),
+    resetPosition: Boolean(resetPosition),
+    workletRequestId: Math.max(0, Math.floor(Number(workletRequestId) || 0)),
+  };
+  if (!state.pcmWindowWorker || !state.pcmWindowInitialised || state.pcmWindowRequestInFlight || state.pcmWindowAwaitingApply) {
+    state.pcmWindowQueuedRequest = request;
+    return;
+  }
+  const requestId = ++state.pcmWindowRequestId;
+  state.pcmWindowRequestInFlight = true;
+  state.pcmWindowWorker.postMessage({ type: "request-window", requestId, ...request });
+}
+
+function handlePcmWindowFailure(error) {
+  const loadSequence = state.pcmStreamLoadSequence;
+  state.pcmWindowRequestInFlight = false;
+  state.pcmWindowReadyReject?.(error);
+  for (const waiter of state.pcmWindowAvailabilityWaiters) waiter.reject(error);
+  state.pcmWindowAvailabilityWaiters.clear();
+  state.streamReadyReject?.(error);
+  void failCurrentLoad(loadSequence, error, "PCM window error");
+}
+
+function handlePcmWindowWorkerMessage(worker, message) {
+  if (worker !== state.pcmWindowWorker) return;
+  if (message.type === "initialised") {
+    state.pcmWindowInitialised = true;
+    flushQueuedPcmWindowRequest();
+    return;
+  }
+  if (message.type === "availability") {
+    state.streamDecodedFrames = Math.max(0, Math.floor(Number(message.availableEnd) || 0));
+    resolvePcmAvailabilityWaiters();
+    state.node?.port.postMessage({
+      type: "stream-availability",
+      decodedLength: state.streamDecodedFrames,
+      totalLength: Math.max(1, Math.floor(Number(message.totalFrames) || 1)),
+    });
+    if (Array.isArray(message.seamRepairs) && message.seamRepairs.length && isPlayerVerboseLoggingEnabled()) {
+      for (const repair of message.seamRepairs) log.action("pcm-seam-repaired", repair);
+    }
+    void handleWorkletBuffered({ decodedLength: state.streamDecodedFrames });
+    if (
+      state.pcmWindowQueuedRequest
+      && !state.pcmWindowRequestInFlight
+      && !state.pcmWindowAwaitingApply
+    ) {
+      flushQueuedPcmWindowRequest();
+    } else if (
+      !scratchReplayActive()
+      && (!state.pcmWindowReady || !state.streamReady || state.buffering)
+    ) {
+      requestPcmWindow(state.positionFrames, { resetPosition: !state.pcmWindowReady });
+    }
+    return;
+  }
+  if (message.type === "window-ready") {
+    state.pcmWindowRequestInFlight = false;
+    state.pcmWindowAwaitingApply = true;
+    const channelBuffers = Array.isArray(message.channelBuffers) ? message.channelBuffers : [];
+    state.node?.port.postMessage({ type: "window-ready", ...message }, channelBuffers);
+    return;
+  }
+  if (message.type === "window-unavailable") {
+    state.pcmWindowRequestInFlight = false;
+    state.node?.port.postMessage({ type: "window-unavailable", ...message });
+    return;
+  }
+  if (message.type === "worker-error") {
+    const error = new Error(message.message || "PCM window worker failed");
+    handlePcmWindowFailure(error);
+  }
+}
+
+function initialisePcmWindowTransport(
+  { sampleRate, audioLength, channelCount },
+  loadSequence = state.loadSequence,
+) {
+  disposePcmWindowTransport();
+  const streamGeneration = ++state.pcmStreamGeneration;
+  state.pcmStreamLoadSequence = loadSequence;
+  resetPcmWindowReadyPromise();
+  const windowFrames = Math.max(4096, Math.min(audioLength, Math.round(sampleRate * PCM_WINDOW_SECONDS)));
+  const shared = typeof SharedArrayBuffer === "function" && globalThis.crossOriginIsolated === true;
+  const bankBuffers = shared
+    ? Array.from({ length: PCM_WINDOW_BANK_COUNT }, () => (
+      Array.from({ length: channelCount }, () => new SharedArrayBuffer(windowFrames * Float32Array.BYTES_PER_ELEMENT))
+    ))
+    : [];
+  const worker = new Worker(versionedAssetUrl("./pcm-window-worker.js"), { type: "module" });
+  state.pcmWindowWorker = worker;
+  state.pcmWindowBanks = bankBuffers;
+  state.pcmWindowFrames = windowFrames;
+  state.pcmWindowTotalFrames = audioLength;
+  state.pcmWindowShared = shared;
+  worker.onmessage = event => handlePcmWindowWorkerMessage(worker, event.data || {});
+  worker.onerror = event => {
+    if (worker !== state.pcmWindowWorker) return;
+    const error = new Error(event.message || "PCM window worker failed");
+    handlePcmWindowFailure(error);
+  };
+  state.node.port.postMessage({
+    type: "window-transport-init",
+    sampleRate,
+    totalFrames: audioLength,
+    channelCount,
+    windowFrames,
+    bankBuffers,
+    shared,
+    streamGeneration,
+  });
+  worker.postMessage({
+    type: "init-progressive",
+    sampleRate,
+    totalFrames: audioLength,
+    channelCount,
+    windowFrames,
+    bankBuffers,
+  });
+  log.action("pcm-window-transport-created", { sampleRate, audioLength, channelCount, windowFrames, shared });
+}
+
+async function initialiseProgressiveStream(
+  { sampleRate, audioLength, channels },
+  { force = false, position = 0, loadSequence = state.loadSequence } = {},
+) {
+  assertCurrentLoad(loadSequence);
+  if (state.streamInitialised && !force) return;
   const channelCount = Math.max(1, Math.min(2, Number(channels) || 2));
-  state.sampleRate = Math.max(1, Number(sampleRate) || 48000);
+  const resolvedSampleRate = Math.max(1, Number(sampleRate) || 48000);
+  await dispatch({ type: "set_source_sample_rate", deck: "a", sample_rate: resolvedSampleRate });
+  assertCurrentLoad(loadSequence);
+  state.sampleRate = resolvedSampleRate;
+  const totalFrames = Math.max(1, Math.floor(Number(audioLength) || 1));
   state.duration = state.metadataDuration > 0
     ? state.metadataDuration
-    : Math.max(1, Number(audioLength) || 1) / state.sampleRate;
-  state.positionFrames = 0;
-  state.lastReportedPosition = 0;
+    : totalFrames / state.sampleRate;
+  state.positionFrames = Math.max(0, Math.min(totalFrames - 1, Number(position) || 0));
+  state.lastReportedPosition = state.positionFrames;
+  state.lastCoreObservedPositionFrames = -1;
+  state.lastCoreObservedAtMs = 0;
+  state.lastDspRotationTurns = null;
+  state.pointerToAudioLatencyMs = null;
   state.streamDecodedFrames = 0;
-  if (isPlayerVerboseLoggingEnabled()) log.send("worklet:stream-init", { sampleRate: state.sampleRate, audioLength: Math.max(1, Number(audioLength) || 1), channels: channelCount, workletSeamRepair });
-  state.node.port.postMessage({
-    type: "stream-init",
-    sampleRate: state.sampleRate,
-    audioLength: Math.max(1, Number(audioLength) || 1),
-    channels: channelCount,
-    workletSeamRepair
-  });
+  state.streamReadyMarking = false;
+  initialisePcmWindowTransport(
+    { sampleRate: state.sampleRate, audioLength: totalFrames, channelCount },
+    loadSequence,
+  );
   state.streamInitialised = true;
 }
 
-async function appendProgressiveSegments(segments) {
+async function appendProgressiveSegments(segments, loadSequence = state.loadSequence) {
+  assertCurrentLoad(loadSequence);
   if (!Array.isArray(segments) || !segments.length) return;
   const first = segments[0] || {};
   await initialiseProgressiveStream({
     sampleRate: first.sampleRate,
     audioLength: first.audioLength,
     channels: first.channels,
-    workletSeamRepair: first.workletSeamRepair !== false
-  });
+  }, { loadSequence });
+  assertCurrentLoad(loadSequence);
+  const normalized = [];
+  const transfer = [];
   for (const segment of segments) {
     const channelBuffers = Array.isArray(segment.channelBuffers) ? segment.channelBuffers : [];
     if (!channelBuffers.length) continue;
     const startFrame = Math.max(0, Math.floor(Number(segment.startFrame ?? segment.offset ?? 0) || 0));
     const inferredFrames = new Int16Array(channelBuffers[0]).length;
     const endFrame = Math.max(startFrame, Math.floor(Number(segment.endFrame) || (startFrame + inferredFrames)));
-    if (isPlayerVerboseLoggingEnabled()) log.send("worklet:append-pcm", { startFrame, endFrame, channels: channelBuffers.length, bytes: channelBuffers.reduce((sum, buffer) => sum + (buffer?.byteLength || 0), 0) });
-    state.node.port.postMessage({
-      type: "append-pcm",
+    normalized.push({
       startFrame,
       endFrame,
-      channelBuffers
-    }, channelBuffers);
+      workletSeamRepair: segment.workletSeamRepair !== false,
+      channelBuffers,
+    });
+    transfer.push(...channelBuffers);
+    if (isPlayerVerboseLoggingEnabled()) log.send("pcm-window:append", { startFrame, endFrame, channels: channelBuffers.length, bytes: channelBuffers.reduce((sum, buffer) => sum + (buffer?.byteLength || 0), 0) });
+  }
+  assertCurrentLoad(loadSequence);
+  if (normalized.length) {
+    if (!state.pcmWindowWorker) throw new Error("PCM window worker is unavailable");
+    state.pcmWindowWorker.postMessage({ type: "append-segments", segments: normalized }, transfer);
   }
 }
 
@@ -763,37 +1191,64 @@ async function appendProgressiveSegments(segments) {
 const PROGRESSIVE_READY_SECONDS = 3;
 
 async function handleWorkletBuffered(message) {
-  state.streamDecodedFrames = Math.max(0, Math.floor(Number(message.decodedLength) || 0));
+  if (state.pcmStreamLoadSequence !== state.loadSequence) return;
+  state.streamDecodedFrames = Math.max(
+    state.streamDecodedFrames,
+    Math.max(0, Math.floor(Number(message.decodedLength) || 0)),
+  );
   publishState();
-  if (state.streamReady) return;
-  const totalFrames = Math.max(1, Math.round(state.duration * state.sampleRate));
+  if (state.streamReady || state.streamReadyMarking) return;
+  const totalFrames = Math.max(
+    1,
+    state.pcmWindowTotalFrames || Math.round(state.duration * state.sampleRate),
+  );
   const thresholdFrames = Math.max(1024, Math.round(state.sampleRate * PROGRESSIVE_READY_SECONDS));
-  const contiguousReady = state.streamDecodedFrames >= Math.min(totalFrames, thresholdFrames);
+  const readyFrames = Math.min(totalFrames, thresholdFrames);
+  const contiguousReady = (
+    state.pcmWindowReady
+    && state.streamDecodedFrames >= readyFrames
+    && state.pcmWindowAppliedStart === 0
+    && state.pcmWindowAppliedEnd >= readyFrames
+    && state.pcmWindowAppliedAvailableEnd >= readyFrames
+  );
   if (contiguousReady) {
-    state.streamReady = true;
-    await markLoadedReady();
-    renderDecodeStatus();
-    state.streamReadyResolve?.();
-    state.streamReadyResolve = null;
+    const loadSequence = state.pcmStreamLoadSequence;
+    try {
+      await ensureStreamReady(loadSequence);
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+      state.streamReadyReject?.(error);
+      state.streamReadyReject = null;
+      await failCurrentLoad(loadSequence, error, "Playback setup failed");
+    }
   }
 }
 
-async function loadDecodedPcm({ sampleRate, audioLength, s16ChannelBuffers }) {
+async function loadDecodedPcm(
+  { sampleRate, audioLength, s16ChannelBuffers },
+  loadSequence = state.loadSequence,
+) {
+  assertCurrentLoad(loadSequence);
   const sourceBuffers = Array.isArray(s16ChannelBuffers) ? s16ChannelBuffers : [];
   if (!sourceBuffers.length) throw new Error("Record contains no PCM channels");
   await initialiseProgressiveStream({
     sampleRate,
     audioLength,
     channels: sourceBuffers.length
-  });
+  }, { loadSequence });
+  assertCurrentLoad(loadSequence);
   const endFrame = Math.max(1, Number(audioLength) || new Int16Array(sourceBuffers[0]).length);
-  state.node.port.postMessage({
-    type: "append-pcm",
-    startFrame: 0,
-    endFrame,
-    channelBuffers: sourceBuffers
+  if (!state.pcmWindowWorker) throw new Error("PCM window worker is unavailable");
+  state.pcmWindowWorker.postMessage({
+    type: "append-segments",
+    segments: [{ startFrame: 0, endFrame, channelBuffers: sourceBuffers }],
   }, sourceBuffers);
-  state.streamDecodedFrames = endFrame;
+  requestPcmWindow(state.positionFrames, { resetPosition: true });
+  await Promise.all([
+    state.pcmWindowReadyPromise,
+    waitForPcmAvailability(endFrame),
+  ]);
+  assertCurrentLoad(loadSequence);
 }
 
 function audioBufferChannelToS16Buffer(channel) {
@@ -806,22 +1261,162 @@ function audioBufferChannelToS16Buffer(channel) {
   return output.buffer;
 }
 
+function loadSupersededError() {
+  const error = new Error("Player load was superseded by a newer request");
+  error.name = "AbortError";
+  return error;
+}
+
+function assertCurrentLoad(loadSequence) {
+  if (loadSequence !== state.loadSequence) throw loadSupersededError();
+  if (loadSequence !== 0 && state.failedLoadSequence === loadSequence) {
+    const error = new Error("Player load is no longer active after a fatal playback error");
+    error.name = "AbortError";
+    throw error;
+  }
+}
+
+function invalidateEndTransition() {
+  state.endTransitionGeneration += 1;
+  state.pendingAutomaticDeadwax = null;
+}
+
+function clearPendingSeekTransaction() {
+  clearTimeout(state.seekTimer);
+  state.seekTimer = 0;
+  state.queuedSeekSeconds = null;
+  state.seekInFlight = false;
+  state.seekDispatchSerial += 1;
+  state.acknowledgedSeekGeneration = state.pendingSeekGeneration;
+}
+
+function failCurrentLoad(loadSequence, error, label = "Player load failed") {
+  if (loadSequence !== state.loadSequence) return false;
+  if (
+    state.loadFailureSequence === loadSequence
+    && state.loadFailurePromise
+  ) {
+    return state.loadFailurePromise;
+  }
+  if (state.failedLoadSequence === loadSequence) return true;
+
+  state.loadFailureSequence = loadSequence;
+  state.failedLoadSequence = loadSequence;
+  // Close replay and seek admission before the first await. Decoder, worklet
+  // and UI failure callbacks can otherwise re-enter replay/seek while teardown
+  // is waiting for a sample-accurate replay acknowledgement.
+  state.streamReady = false;
+  state.streamReadyMarking = false;
+  state.buffering = false;
+  clearPendingSeekTransaction();
+  clearLiveScratchInteraction();
+  cancelPendingStreamReady(error);
+  const failingDecoder = state.decoder;
+  failingDecoder?.close();
+  if (state.decoder === failingDecoder) state.decoder = null;
+
+  const failurePromise = (async () => {
+    // Settle replay while its worklet generation is still accepted. The reset
+    // can then invalidate PCM without stranding a replay promise behind the
+    // generation filter.
+    await cancelScratchReplays(error);
+    if (loadSequence !== state.loadSequence) return false;
+    clearPendingSeekTransaction();
+    clearLiveScratchInteraction();
+    state.pcmStreamGeneration += 1;
+    invalidateEndTransition();
+    disposePcmWindowTransport();
+    state.streamInitialised = false;
+    state.streamDecodedFrames = 0;
+    state.streamAppendChain = Promise.resolve();
+    state.duration = 0;
+    state.metadataDuration = 0;
+    state.positionFrames = 0;
+    state.lastReportedPosition = 0;
+    state.basePcmSource = null;
+    state.pendingAutomaticDeadwax = null;
+    if (state.recordObjectUrl) URL.revokeObjectURL(state.recordObjectUrl);
+    state.recordObjectUrl = "";
+    if (elements.recordImage) elements.recordImage.removeAttribute("src");
+    elements.play.disabled = true;
+    elements.needle.disabled = true;
+    elements.seek.disabled = true;
+    await dispatch({
+      type: "set_load_state",
+      deck: "a",
+      status: "failed",
+      loaded: false,
+      duration_seconds: 0,
+    }).catch(() => {});
+    if (loadSequence !== state.loadSequence) return false;
+    setStatus(`${label}: ${error?.message || error}`);
+    publishState();
+    return true;
+  })();
+  const managedFailurePromise = failurePromise.finally(() => {
+    if (state.loadFailureSequence !== loadSequence) return;
+    state.loadFailureSequence = 0;
+    state.loadFailurePromise = null;
+  });
+  state.loadFailurePromise = managedFailurePromise;
+  return managedFailurePromise;
+}
+
 // Presave and authoring surfaces already have a conventional audio file before
 // they have a published Bitneedle PNG. Feed that decoded PCM through the same
 // Rust transport, AudioWorklet and acoustic scratch renderer used for records so
 // previews never need a parallel scratch implementation.
-async function loadAudioFile(file, { artworkUrl = "", title = "", artist = "" } = {}) {
+async function loadAudioFile(file, options = {}) {
   if (!(file instanceof Blob)) throw new TypeError("An audio File or Blob is required");
-  await initialiseAudio();
-  await state.context.resume();
-  const audioBuffer = await state.context.decodeAudioData((await file.arrayBuffer()).slice(0));
-  if (!audioBuffer?.length || !audioBuffer.numberOfChannels) throw new Error("The audio file decoded empty");
+  const loadSequence = ++state.loadSequence;
+  state.loadInFlightSequence = loadSequence;
+  invalidateEndTransition();
+  clearPendingSeekTransaction();
+  clearLiveScratchInteraction();
+  cancelPendingStreamReady(loadSupersededError());
+  try {
+    await cancelScratchReplays(new Error("Player load cancelled scratch replay"));
+    assertCurrentLoad(loadSequence);
+    return await loadAudioFileForSequence(file, options, loadSequence);
+  } catch (error) {
+    if (loadSequence !== state.loadSequence) throw loadSupersededError();
+    await failCurrentLoad(loadSequence, error, "Audio preview failed");
+    throw error;
+  } finally {
+    if (state.loadInFlightSequence === loadSequence) state.loadInFlightSequence = 0;
+  }
+}
 
-  state.loadSequence += 1;
+async function loadAudioFileForSequence(
+  file,
+  { artworkUrl = "", title = "", artist = "", cleanEnd = true } = {},
+  loadSequence,
+) {
+  await initialiseAudio();
+  assertCurrentLoad(loadSequence);
+  await state.context.resume();
+  assertCurrentLoad(loadSequence);
+  const previousView = deckView();
+  if (previousView?.transport_on || previousView?.playing || state.view?.lead_in_active || state.view?.deadwax_active) {
+    await stopPlaybackTransport();
+    assertCurrentLoad(loadSequence);
+  }
+  await dispatch({ type: "set_load_state", deck: "a", status: "loading", loaded: false, duration_seconds: 0 });
+  assertCurrentLoad(loadSequence);
+  const sourceBytes = await file.arrayBuffer();
+  assertCurrentLoad(loadSequence);
+  const audioBuffer = await state.context.decodeAudioData(sourceBytes.slice(0));
+  assertCurrentLoad(loadSequence);
+  if (!audioBuffer?.length || !audioBuffer.numberOfChannels) {
+    throw new Error("The audio file decoded empty");
+  }
+
   state.decoder?.close();
   state.decoder = null;
+  disposePcmWindowTransport({ resetWorklet: false });
   state.streamInitialised = false;
   state.streamReady = false;
+  state.streamReadyMarking = false;
   state.streamDecodedFrames = 0;
   state.streamAppendChain = Promise.resolve();
   state.decodeProgressText = "";
@@ -831,6 +1426,12 @@ async function loadAudioFile(file, { artworkUrl = "", title = "", artist = "" } 
   state.lastReportedPosition = 0;
   state.baseRpm = 33.3333333333;
   state.rpm = state.baseRpm;
+  state.cleanEnd = Boolean(cleanEnd);
+  state.node.port.postMessage({
+    type: "end-behavior",
+    cleanEnd: state.cleanEnd,
+    deadwaxTurns: DEADWAX_TURNS,
+  });
   state.recordHash = `audio:${file.name || "preview"}:${file.size || 0}:${file.lastModified || 0}`;
   state.recordReleaseId = "";
   state.recordHeaderProof = null;
@@ -844,6 +1445,7 @@ async function loadAudioFile(file, { artworkUrl = "", title = "", artist = "" } 
   resetTapeState();
   updateRpmButtons();
   state.node.port.postMessage({ type: "reset" });
+  state.node.port.postMessage({ type: "native-rpm", rpm: state.baseRpm });
 
   const channelCount = Math.min(2, audioBuffer.numberOfChannels);
   const s16ChannelBuffers = Array.from({ length: channelCount }, (_, index) => (
@@ -858,9 +1460,11 @@ async function loadAudioFile(file, { artworkUrl = "", title = "", artist = "" } 
     sampleRate: audioBuffer.sampleRate,
     audioLength: audioBuffer.length,
     s16ChannelBuffers,
-  });
+  }, loadSequence);
+  assertCurrentLoad(loadSequence);
   state.node.port.postMessage({ type: "stream-complete" });
-  await markLoadedReady();
+  await markLoadedReady(loadSequence);
+  assertCurrentLoad(loadSequence);
   state.streamReady = true;
   state.streamReadyResolve?.();
   state.streamReadyResolve = null;
@@ -889,11 +1493,41 @@ async function getCaptureStream() {
   return state.captureNode.stream;
 }
 
-async function markLoadedReady() {
+async function markLoadedReady(loadSequence = state.loadSequence) {
+  assertCurrentLoad(loadSequence);
   await dispatch({ type: "set_load_state", deck: "a", status: "ready", loaded: true, duration_seconds: state.duration });
+  assertCurrentLoad(loadSequence);
+  await dispatch({
+    type: "playback_position_observed",
+    deck: "a",
+    seconds: framesToSeconds(state.positionFrames),
+  });
+  assertCurrentLoad(loadSequence);
   elements.play.disabled = false;
   elements.needle.disabled = false;
   elements.seek.disabled = false;
+}
+
+async function ensureStreamReady(loadSequence = state.loadSequence) {
+  assertCurrentLoad(loadSequence);
+  if (state.streamReady) return;
+  if (state.streamReadyMarking) {
+    if (!state.streamReadyPromise) throw new Error("Stream readiness transaction is unavailable");
+    await state.streamReadyPromise;
+    assertCurrentLoad(loadSequence);
+    return;
+  }
+  state.streamReadyMarking = true;
+  try {
+    await markLoadedReady(loadSequence);
+    assertCurrentLoad(loadSequence);
+    state.streamReady = true;
+    renderDecodeStatus();
+    state.streamReadyResolve?.();
+    state.streamReadyResolve = null;
+  } finally {
+    if (loadSequence === state.loadSequence) state.streamReadyMarking = false;
+  }
 }
 
 function resetTapeState() {
@@ -1204,12 +1838,16 @@ async function decodeTapeMasterSource(stored, releaseId) {
 }
 
 async function ensureTapeMasterSource() {
+  const loadSequence = state.loadSequence;
   const releaseId = String(state.recordReleaseId || "").trim();
   if (!releaseId) return null;
   if (state.tape.source && state.tape.releaseId === releaseId) return state.tape.source;
   const stored = (await readTapeMasterStream(releaseId)) || (await fetchTapeMasterRemoteStream(releaseId));
+  assertCurrentLoad(loadSequence);
   if (!stored) return null;
   const source = await decodeTapeMasterSource(stored, releaseId);
+  assertCurrentLoad(loadSequence);
+  if (releaseId !== String(state.recordReleaseId || "").trim()) throw loadSupersededError();
   if (!source) return null;
   if (source.sampleRate !== state.sampleRate || source.audioLength !== Math.round(state.duration * state.sampleRate)) {
     throw new Error("Tape master geometry does not match the loaded record.");
@@ -1233,8 +1871,10 @@ function storeBasePcmSource({ sampleRate, audioLength, s16ChannelBuffers }) {
   };
 }
 
-async function replaceActivePcmSource(source) {
+async function replaceActivePcmSource(source, loadSequence = state.loadSequence) {
   if (!state.node || !source) return;
+  await cancelScratchReplays(new Error("PCM source replacement cancelled scratch replay"));
+  assertCurrentLoad(loadSequence);
   const view = deckView();
   if (state.scratching || state.view?.lead_in_active || state.view?.deadwax_active) {
     throw new Error("TAPE switching is unavailable while scratching or cueing.");
@@ -1246,31 +1886,39 @@ async function replaceActivePcmSource(source) {
   const needleLifted = Boolean(view?.needle_lifted);
   const position = clamp(Math.floor(Number(state.positionFrames) || 0), 0, Math.max(0, source.audioLength - 1));
   if (wasPlaying) {
-    state.node.port.postMessage({ type: "stop", handoff: false });
+    const playbackEpoch = ++state.playbackEpoch;
+    state.node.port.postMessage({ type: "stop", handoff: false, playbackEpoch });
   }
   const channelBuffers = cloneChannelBuffers(source.channelBuffers);
-  state.node.port.postMessage({
-    type: "stream-init",
+  await initialiseProgressiveStream({
     sampleRate: source.sampleRate,
     audioLength: source.audioLength,
     channels: source.channels,
-  });
-  state.node.port.postMessage({
-    type: "append-pcm",
-    startFrame: 0,
-    endFrame: source.audioLength,
-    channelBuffers,
+  }, { force: true, position, loadSequence });
+  assertCurrentLoad(loadSequence);
+  state.pcmWindowWorker.postMessage({
+    type: "append-segments",
+    segments: [{ startFrame: 0, endFrame: source.audioLength, channelBuffers }],
   }, channelBuffers);
+  requestPcmWindow(position, { resetPosition: true });
+  await Promise.all([
+    state.pcmWindowReadyPromise,
+    waitForPcmAvailability(source.audioLength),
+  ]);
+  assertCurrentLoad(loadSequence);
   state.node.port.postMessage({ type: "stream-complete" });
-  seekWorklet(position);
+  state.positionFrames = position;
+  state.lastReportedPosition = position;
   state.node.port.postMessage({ type: "transport", running: motorRunning });
   state.node.port.postMessage({ type: "needle", lifted: needleLifted });
   if (wasPlaying) {
+    const playbackEpoch = ++state.playbackEpoch;
     state.node.port.postMessage({
       type: "play",
       position,
       rate: state.baseRpm > 0 ? state.rpm / state.baseRpm : 1,
       handoff: false,
+      playbackEpoch,
     });
   }
   state.sampleRate = source.sampleRate;
@@ -1281,6 +1929,8 @@ async function replaceActivePcmSource(source) {
 }
 
 async function setTapeMonitor(active) {
+  const loadSequence = state.loadSequence;
+  invalidateEndTransition();
   const next = Boolean(active);
   if (next === state.tape.active) return;
   if (!state.basePcmSource) {
@@ -1290,21 +1940,24 @@ async function setTapeMonitor(active) {
   state.tape.loading = true;
   updateTapeButton();
   try {
+    await cancelScratchReplays(new Error("Tape monitor switch cancelled scratch replay"));
+    assertCurrentLoad(loadSequence);
     if (next) {
       setStatus("TAPE: loading HQ Opus master...");
       const source = await ensureTapeMasterSource();
+      assertCurrentLoad(loadSequence);
       if (!source) {
         state.tape.available = false;
         setStatus("HQ Opus tape master is unavailable for this record.");
         return;
       }
-      await replaceActivePcmSource(source);
+      await replaceActivePcmSource(source, loadSequence);
       state.tape.active = true;
       state.tape.available = true;
       state.tape.sourceLabel = "hq-opus";
       setStatus("TAPE: HQ Opus");
     } else {
-      await replaceActivePcmSource(state.basePcmSource);
+      await replaceActivePcmSource(state.basePcmSource, loadSequence);
       state.tape.active = false;
       setStatus("TAPE: record audio");
     }
@@ -1352,6 +2005,8 @@ async function flushQueuedSeek() {
   let seconds = state.queuedSeekSeconds;
   state.queuedSeekSeconds = null;
   state.seekInFlight = true;
+  const loadSequence = state.loadSequence;
+  const seekDispatchSerial = ++state.seekDispatchSerial;
   // Original seekPlaybackToRatio: cueing a spinning record by eye lands
   // 50–140 ms early (DJs aim ahead of the beat) and plays the needle-drop
   // foley while the stylus settles.
@@ -1362,39 +2017,186 @@ async function flushQueuedSeek() {
     state.node?.port.postMessage({ type: "needle-drop" });
   }
   try {
-    await dispatch({ type: "seek", deck: "a", seconds });
+    await dispatch(
+      { type: "seek", deck: "a", seconds },
+      { loadSequence },
+    );
   } finally {
+    if (seekDispatchSerial !== state.seekDispatchSerial) return;
     state.seekInFlight = false;
     if (state.queuedSeekSeconds != null) void flushQueuedSeek();
   }
 }
 
 function queueSeek(seconds) {
+  if (!seekInteractionReady()) return false;
+  interruptScratchReplayNow("Seek control");
+  invalidateEndTransition();
   state.positionFrames = secondsToFrames(seconds);
   seekWorklet(state.positionFrames);
   state.queuedSeekSeconds = seconds;
   clearTimeout(state.seekTimer);
   state.seekTimer = setTimeout(() => void flushQueuedSeek(), 35);
+  return true;
 }
 
-function coreRequest(type, payload = {}) {
+function rejectPendingCoreRequests(error, worker = null) {
+  for (const [id, request] of state.pending) {
+    if (worker && request.worker !== worker) continue;
+    state.pending.delete(id);
+    clearTimeout(request.timeoutId);
+    request.reject(error);
+  }
+}
+
+function handleCoreWorkerFailure(worker, error) {
+  if (state.worker !== worker) return;
+  state.worker = null;
+  worker.terminate();
+  rejectPendingCoreRequests(error, worker);
+  const loadSequence = state.loadSequence;
+  if (loadSequence > 0 && !currentLoadFailedOrFailing()) {
+    void failCurrentLoad(loadSequence, error, "Player core failed");
+  } else {
+    setStatus(`Player core failed: ${error.message || error}`);
+  }
+}
+
+function attachCoreWorkerHandlers(worker) {
+  worker.onmessage = event => {
+    const request = state.pending.get(event.data?.id);
+    log.receive(
+      `core:${event.data?.type || (event.data?.ok ? "response" : "error")}`,
+      event.data,
+      request?.telemetry ? { telemetry: true } : undefined,
+    );
+    const { id, ok, result, error } = event.data;
+    if (!request || request.worker !== worker) {
+      if (id !== 0) log.warn("core-unmatched-response", event.data);
+      return;
+    }
+    state.pending.delete(id);
+    clearTimeout(request.timeoutId);
+    if (ok) request.resolve(result);
+    else request.reject(new Error(error));
+  };
+  worker.onerror = event => {
+    event.preventDefault?.();
+    handleCoreWorkerFailure(
+      worker,
+      new Error(event.message || "Player core worker failed"),
+    );
+  };
+  worker.onmessageerror = () => {
+    handleCoreWorkerFailure(worker, new Error("Player core worker response could not be decoded"));
+  };
+}
+
+async function startCoreWorker() {
+  const worker = new Worker(versionedAssetUrl("./player-core-worker.js"), { type: "module" });
+  state.worker = worker;
+  attachCoreWorkerHandlers(worker);
+  log.action("core-worker-created", {});
+  try {
+    const result = await coreRequest(
+      "init",
+      { moduleUrl: versionedAssetUrl("./record-player/record_player.js") },
+      { timeoutMs: 15_000 },
+    );
+    if (state.worker !== worker) throw new Error("Player core worker was replaced during initialisation");
+    state.view = result.view;
+    const controls = [];
+    if (Math.abs(state.volume - 1) > 0.000001) {
+      controls.push({ type: "set_channel_gain", deck: "a", value: state.volume });
+    }
+    if (Math.abs(state.crossfader - 0.5) > 0.000001) {
+      controls.push({ type: "set_crossfader", value: state.crossfader });
+    }
+    for (const event of controls) {
+      const controlResult = await coreRequest("dispatch", { event });
+      state.view = controlResult.view;
+      for (const command of controlResult.commands) executeCommand(command);
+    }
+    return result;
+  } catch (error) {
+    handleCoreWorkerFailure(worker, error);
+    throw error;
+  }
+}
+
+async function ensureCoreWorker() {
+  if (state.coreInitialisePromise) {
+    await state.coreInitialisePromise;
+    return;
+  }
+  if (state.worker) return;
+  const promise = startCoreWorker();
+  state.coreInitialisePromise = promise;
+  try {
+    await promise;
+  } finally {
+    if (state.coreInitialisePromise === promise) state.coreInitialisePromise = null;
+  }
+}
+
+function coreRequest(type, payload = {}, { timeoutMs = 5_000 } = {}) {
   return new Promise((resolve, reject) => {
+    const worker = state.worker;
+    if (!worker) {
+      reject(new Error("Player core worker is unavailable"));
+      return;
+    }
     const id = ++state.requestId;
     const isPositionTelemetry = payload?.event?.type === "playback_position_observed";
-    state.pending.set(id, { resolve, reject, type, startedAt: performance.now(), telemetry: isPositionTelemetry });
+    const timeoutId = setTimeout(() => {
+      const request = state.pending.get(id);
+      if (!request || request.worker !== worker) return;
+      state.pending.delete(id);
+      const error = new Error(`Player core ${type} request timed out`);
+      request.reject(error);
+      handleCoreWorkerFailure(worker, error);
+    }, Math.max(1, Number(timeoutMs) || 5_000));
+    state.pending.set(id, {
+      resolve,
+      reject,
+      type,
+      startedAt: performance.now(),
+      telemetry: isPositionTelemetry,
+      worker,
+      timeoutId,
+    });
     if (isPlayerVerboseLoggingEnabled()) log.send(`core:${type}`, { id, payload }, isPositionTelemetry ? { telemetry: true } : undefined);
-    state.worker.postMessage({ id, type, payload });
+    try {
+      worker.postMessage({ id, type, payload });
+    } catch (error) {
+      state.pending.delete(id);
+      clearTimeout(timeoutId);
+      const failure = error instanceof Error ? error : new Error(String(error));
+      reject(failure);
+      handleCoreWorkerFailure(worker, failure);
+    }
   });
 }
 
-async function dispatch(event) {
+async function dispatch(event, { loadSequence = null } = {}) {
   const isPositionTelemetry = event?.type === "playback_position_observed";
   if (isPlayerVerboseLoggingEnabled()) log.action(`dispatch:${event?.type || "unknown"}`, event, isPositionTelemetry ? { telemetry: true } : undefined);
+  await ensureCoreWorker();
   const result = await coreRequest("dispatch", { event });
+  if (
+    loadSequence != null
+    && (
+      loadSequence !== state.loadSequence
+      || state.failedLoadSequence === loadSequence
+    )
+  ) {
+    return false;
+  }
   state.view = result.view;
   for (const command of result.commands) executeCommand(command);
   render();
   await maybeAutoLowerNeedle();
+  return true;
 }
 
 async function maybeAutoLowerNeedle() {
@@ -1424,6 +2226,7 @@ function timedRegionDurationSeconds(turns) {
 }
 
 async function startLeadInPlayback() {
+  invalidateEndTransition();
   const view = deckView();
   if (!view?.loaded) {
     await dispatch({ type: "toggle_transport", deck: "a" });
@@ -1441,9 +2244,16 @@ async function startLeadInPlayback() {
 }
 
 async function stopPlaybackTransport() {
+  invalidateEndTransition();
   await dispatch({ type: "stop_timed_region", region: "lead_in", completed: false }).catch(() => {});
   await dispatch({ type: "stop_timed_region", region: "deadwax", completed: false }).catch(() => {});
   await dispatch({ type: "set_transport", deck: "a", running: false });
+  await dispatch({
+    type: "set_needle",
+    deck: "a",
+    lifted: true,
+    observed_playback_seconds: framesToSeconds(state.positionFrames),
+  });
   state.node?.port.postMessage({ type: "needle", lifted: true });
 }
 
@@ -1459,56 +2269,125 @@ async function toggleStartStopPlayback() {
 
 function executeCommand(command) {
   if (isPlayerVerboseLoggingEnabled()) log.action(`command:${command?.type || "unknown"}`, command);
+  if (command.type === "set_packet_gain") {
+    state.packetGain = Math.max(0, Number(command.gain) || 0);
+    updateOutputGain(command.ramp_ms);
+    return;
+  }
+  if (command.type === "set_mixer_track_gain" && Number(command.track) === 0) {
+    state.mixerGain = Math.max(0, Number(command.gain) || 0);
+    updateOutputGain(command.ramp_ms);
+    return;
+  }
   if (!state.node) { log.warn("command-without-worklet", command); return; }
   if (command.type === "set_motor") {
     state.node.port.postMessage({ type: "transport", running: command.running });
   } else if (command.type === "start_packet_playback") {
-    state.node.port.postMessage({ type: "play", position: secondsToFrames(command.offset_seconds), rate: command.rate, handoff: Boolean(command.platter_handoff) });
+    state.pendingAutomaticDeadwax = null;
+    const playbackEpoch = ++state.playbackEpoch;
+    state.node.port.postMessage({
+      type: "play",
+      position: secondsToFrames(command.offset_seconds),
+      rate: command.rate,
+      handoff: Boolean(command.platter_handoff),
+      playbackEpoch,
+    });
   } else if (command.type === "stop_packet_playback") {
-    state.node.port.postMessage({ type: "stop", handoff: Boolean(command.platter_handoff) });
+    if (!command.platter_handoff) state.pendingAutomaticDeadwax = null;
+    const playbackEpoch = ++state.playbackEpoch;
+    state.node.port.postMessage({
+      type: "stop",
+      handoff: Boolean(command.platter_handoff),
+      playbackEpoch,
+    });
   } else if (command.type === "seek_packet_playback") {
     seekWorklet(secondsToFrames(command.offset_seconds));
   } else if (command.type === "set_scratch_transport") {
     state.node.port.postMessage({ type: "scratch-transport", handContact: Boolean(command.hand_contact), motorRate: Number(command.motor_rate) || 0 });
   } else if (command.type === "set_scratch_target") {
-    state.node.port.postMessage({ type: "scratch", active: true, position: command.position_frames, rate: command.rate });
+    state.node.port.postMessage({ type: "scratch", active: true, position: command.position_frames, rate: command.rate, impulse: command.impulse });
   } else if (command.type === "set_scratch_position") {
-    seekWorklet(command.position_frames);
-  } else if (command.type === "set_packet_gain") {
-    state.packetGain = Math.max(0, Number(command.gain) || 0);
-    updateOutputGain(command.ramp_ms);
-  } else if (command.type === "set_mixer_track_gain" && Number(command.track) === 0) {
-    state.mixerGain = Math.max(0, Number(command.gain) || 0);
-    updateOutputGain(command.ramp_ms);
+    seekWorklet(command.position_frames, command.impulse);
   } else if (command.type === "start_surface_region") {
     const durationSeconds = Math.max(0, Number(command.duration_seconds) || 0);
-    state.surfaceRegion = { region: command.region, startedAtMs: performance.now(), durationSeconds };
-    state.node.port.postMessage({ type: "surface-region", action: "start", region: command.region, durationSeconds });
+    const automaticDeadwax = command.region === "deadwax"
+      ? state.pendingAutomaticDeadwax
+      : null;
+    state.pendingAutomaticDeadwax = null;
+    const startOutputFrame = Number.isFinite(automaticDeadwax?.startOutputFrame)
+      ? automaticDeadwax.startOutputFrame
+      : audioFrameNow();
+    const durationFrames = Number.isFinite(automaticDeadwax?.durationFrames)
+      ? Math.max(0, automaticDeadwax.durationFrames)
+      : Math.max(0, Math.round(durationSeconds * (state.context?.sampleRate || state.sampleRate)));
+    const regionId = ++state.surfaceRegionId;
+    state.surfaceRegion = {
+      region: command.region,
+      regionId,
+      startedAtMs: performance.now(),
+      durationSeconds,
+      startOutputFrame,
+      durationFrames,
+    };
+    state.node.port.postMessage({
+      type: "surface-region",
+      action: "start",
+      region: command.region,
+      regionId,
+      durationSeconds,
+    });
     publishState();
     clearTimeout(state.regionTimer);
-    if (command.region === "lead_in") {
-      state.regionTimer = setTimeout(() => {
-        void dispatch({ type: "timed_region_elapsed", region: command.region });
-      }, durationSeconds * 1000);
-    } else {
-      state.regionTimer = 0;
-    }
+    // Region completion is driven by AudioWorklet frames. A main-thread timer
+    // can be throttled in a background tab and move the groove transition off
+    // the audio clock.
+    state.regionTimer = 0;
   } else if (command.type === "stop_surface_region") {
     clearTimeout(state.regionTimer);
+    state.pendingAutomaticDeadwax = null;
+    state.surfaceRegionId += 1;
     if (state.surfaceRegion?.region === command.region) state.surfaceRegion = null;
-    state.node.port.postMessage({ type: "surface-region", action: "stop", region: command.region });
+    state.node.port.postMessage({
+      type: "surface-region",
+      action: "stop",
+      region: command.region,
+      regionId: state.surfaceRegionId,
+    });
     publishState();
   }
 }
 
-function seekWorklet(position) {
+function seekWorklet(position, impulse = 0) {
+  invalidateEndTransition();
   const generation = ++state.pendingSeekGeneration;
   state.positionFrames = position;
-  state.node.port.postMessage({ type: "seek", position, generation });
+  requestPcmWindow(position, { resetPosition: true });
+  state.node.port.postMessage({ type: "seek", position, generation, impulse: Number(impulse) || 0 });
 }
 
 async function initialiseAudio() {
-  if (state.context) return;
+  if (state.context && state.node) return;
+  if (state.audioInitialisePromise) {
+    await state.audioInitialisePromise;
+    return initialiseAudio();
+  }
+  state.audioInitialisePromise = initialiseAudioOnce();
+  try {
+    await state.audioInitialisePromise;
+  } catch (error) {
+    state.node?.disconnect();
+    state.gainNode?.disconnect();
+    await state.context?.close().catch(() => {});
+    state.node = null;
+    state.gainNode = null;
+    state.context = null;
+    throw error;
+  } finally {
+    state.audioInitialisePromise = null;
+  }
+}
+
+async function initialiseAudioOnce() {
   state.context = new AudioContext({ latencyHint: "interactive" });
   const recordPlayerWasmResponse = await fetch(versionedAssetUrl("./record-player/record_player_bg.wasm"));
   if (!recordPlayerWasmResponse.ok) throw new Error(`Failed to load record-player WASM: ${recordPlayerWasmResponse.status}`);
@@ -1528,6 +2407,52 @@ async function initialiseAudio() {
     if (isPlayerVerboseLoggingEnabled()) log.receive(`worklet:${event.data?.type || "message"}`, event.data);
     handleWorkletMessage(event);
   };
+  const audioNode = state.node;
+  audioNode.onprocessorerror = () => {
+    if (state.node !== audioNode) return;
+    const error = new Error("AudioWorklet processor failed during playback");
+    // A dead processor cannot publish the replay-ended acknowledgement. Settle
+    // that half of the transaction locally before entering load teardown.
+    for (const request of state.scratchReplayRequests.values()) {
+      acknowledgeScratchReplayRequest(request);
+    }
+    const failedContext = state.context;
+    const failedGainNode = state.gainNode;
+    const failedCaptureNode = state.captureNode;
+    state.node = null;
+    state.gainNode = null;
+    state.captureNode = null;
+    state.context = null;
+    audioNode.disconnect();
+    failedGainNode?.disconnect();
+    failedCaptureNode?.disconnect?.();
+    void failedContext?.close().catch(() => {});
+    const loadSequence = state.loadSequence;
+    if (loadSequence > 0) {
+      void failCurrentLoad(loadSequence, error, "Audio engine failed");
+    } else {
+      void cancelScratchReplays(error);
+      setStatus(error.message);
+      publishState();
+    }
+  };
+  state.node.port.postMessage({ type: "scratch-preset", preset: state.scratchPreset });
+  state.node.port.postMessage({ type: "scratch-clicks", clicks: state.scratchClicks });
+  state.node.port.postMessage({ type: "native-rpm", rpm: state.baseRpm });
+  state.node.port.postMessage({
+    type: "end-behavior",
+    cleanEnd: state.cleanEnd,
+    deadwaxTurns: DEADWAX_TURNS,
+  });
+  state.node.port.postMessage({
+    type: "hf-acceleration-limit",
+    strength: state.highFrequencyAccelerationLimit,
+  });
+  state.node.port.postMessage({
+    type: "stylus-tracing-limit",
+    strength: state.stylusTracingLimit,
+  });
+  updateOutputGain(0);
   if (IS_MOBILE_DEVICE) {
     state.node.port.postMessage({ type: "surface-gain", multiplier: MOBILE_SURFACE_GAIN_MULTIPLIER });
   }
@@ -1557,53 +2482,247 @@ async function loadNeedleSurfaceAsset() {
 
 function handleWorkletMessage(event) {
   const message = event.data;
-  if (message.type === "position") {
-    if (state.pendingSeekGeneration !== state.acknowledgedSeekGeneration) return;
-    const previousPosition = state.lastReportedPosition;
-    state.positionFrames = message.position;
-    state.buffering = false;
-    state.lastReportedPosition = message.position;
-    if (!state.draggingSeek) elements.seek.value = String(state.duration > 0 ? framesToSeconds(message.position) / state.duration : 0);
-    if (!message.scratching && Number.isFinite(previousPosition)) {
-      const framesPerTurn = state.sampleRate * 60 / state.baseRpm;
-      state.rotation = (state.rotation + ((message.position - previousPosition) / framesPerTurn) * 360) % 360;
-      elements.platter.style.setProperty("--rotation", `${state.rotation}deg`);
+  const streamGeneration = Number(message.streamGeneration);
+  const matchingReplayRequest = message.type === "scratch-replay-ended"
+    ? state.scratchReplayRequests.get(message.id)
+    : null;
+  if (
+    Number.isFinite(streamGeneration)
+    && streamGeneration !== state.pcmStreamGeneration
+    && !matchingReplayRequest
+  ) {
+    if (isPlayerVerboseLoggingEnabled()) {
+      log.action("worklet-message-stale", {
+        type: message.type,
+        received: streamGeneration,
+        expected: state.pcmStreamGeneration,
+      });
     }
+    return;
+  }
+  if (message.type === "window-request") {
+    requestPcmWindow(message.position, {
+      resetPosition: Boolean(message.resetPosition),
+      workletRequestId: message.workletRequestId,
+    });
+  } else if (message.type === "window-applied") {
+    state.pcmWindowAwaitingApply = false;
+    if (message.applied === false) {
+      const error = new Error(message.error || "Audio worklet rejected a PCM window");
+      setStatus(`PCM window error: ${error.message}`);
+      handlePcmWindowFailure(error);
+      return;
+    }
+    state.pcmWindowReady = true;
+    state.pcmWindowAppliedStart = Math.max(0, Math.floor(Number(message.windowStart) || 0));
+    state.pcmWindowAppliedEnd = Math.max(0, Math.floor(Number(message.windowEnd) || 0));
+    state.pcmWindowAppliedAvailableEnd = Math.max(0, Math.floor(Number(message.availableEnd) || 0));
+    if (message.resumed) state.buffering = false;
+    state.streamDecodedFrames = Math.max(
+      state.streamDecodedFrames,
+      Math.floor(Number(message.availableEnd ?? message.decodedLength) || 0),
+    );
+    state.pcmWindowReadyResolve?.(message);
+    state.pcmWindowReadyResolve = null;
+    state.pcmWindowReadyReject = null;
+    void handleWorkletBuffered({ decodedLength: state.streamDecodedFrames });
+    flushQueuedPcmWindowRequest();
+  } else if (message.type === "position") {
+    if (Number.isFinite(message.outputFrame)) state.lastOutputFrame = message.outputFrame;
+    const replayActive = scratchReplayActive();
+    state.replayScratching = replayActive && Boolean(message.scratching);
+    if (!replayActive) {
+      if (typeof message.scratchPreset === "string") {
+        state.scratchPreset = normalizeScratchPreset(message.scratchPreset, state.scratchPreset);
+      }
+      if (Number.isFinite(message.scratchClicks)) {
+        state.scratchClicks = normalizeScratchClicks(message.scratchClicks, state.scratchClicks);
+      }
+      updateScratchTechniqueControls();
+    }
+    if (Number.isFinite(message.effectiveRate)) state.effectiveRate = message.effectiveRate;
+    if (Number.isFinite(message.scratchGate)) state.scratchGate = message.scratchGate;
+    if (Number.isFinite(message.scratchGateTarget)) state.scratchGateTarget = message.scratchGateTarget;
+    if (Number.isFinite(message.scratchDirection)) state.scratchDirection = message.scratchDirection;
+    if (typeof message.scratchMoving === "boolean") state.scratchMoving = message.scratchMoving;
+    if (Number.isFinite(message.scratchGatePhase)) state.scratchGatePhase = message.scratchGatePhase;
+    if (Number.isFinite(message.scratchStrokeProgress)) state.scratchStrokeProgress = message.scratchStrokeProgress;
+    if (!replayActive) {
+      if (Number.isFinite(message.highFrequencyAccelerationLimit)) {
+        state.highFrequencyAccelerationLimit = message.highFrequencyAccelerationLimit;
+      }
+      if (Number.isFinite(message.stylusTracingLimit)) {
+        state.stylusTracingLimit = message.stylusTracingLimit;
+      }
+    }
+    if (Number.isFinite(message.inputLatencyMs)) state.pointerToAudioLatencyMs = message.inputLatencyMs;
+
+    const rotationTurns = Number(message.platterRotationTurns);
+    if (!replayActive && Number.isFinite(rotationTurns)) {
+      if (state.lastDspRotationTurns != null && !state.scratching) {
+        state.rotation = (state.rotation + (rotationTurns - state.lastDspRotationTurns) * 360) % 360;
+        elements.platter.style.setProperty("--rotation", `${state.rotation}deg`);
+      }
+      state.lastDspRotationTurns = rotationTurns;
+    }
+
+    // Replay telemetry describes its temporary Rust transaction. Keep useful
+    // gate/rate meters live, but do not move the public cursor or feed replay
+    // positions/configuration back into the persistent Rust player core.
+    if (replayActive) {
+      state.buffering = Boolean(message.buffering);
+      publishState();
+      return;
+    }
+
+    if (state.pendingSeekGeneration !== state.acknowledgedSeekGeneration) {
+      publishState();
+      return;
+    }
+    state.positionFrames = message.position;
+    state.buffering = Boolean(message.buffering);
+    state.lastReportedPosition = message.position;
+    const observedAtMs = performance.now();
+    if (
+      !message.scratching
+      && !state.scratching
+      && (
+        observedAtMs - state.lastCoreObservedAtMs >= 100
+        || Math.abs(message.position - state.lastCoreObservedPositionFrames) >= state.sampleRate * 0.25
+      )
+    ) {
+      state.lastCoreObservedAtMs = observedAtMs;
+      state.lastCoreObservedPositionFrames = message.position;
+      void dispatch({
+        type: "playback_position_observed",
+        deck: "a",
+        seconds: framesToSeconds(message.position),
+      }).catch(error => log.warn("core-position-observation-failed", {
+        message: error instanceof Error ? error.message : String(error),
+      }));
+    }
+    if (!state.draggingSeek) elements.seek.value = String(state.duration > 0 ? framesToSeconds(message.position) / state.duration : 0);
     publishState();
   } else if (message.type === "seeked") {
     state.acknowledgedSeekGeneration = Math.max(state.acknowledgedSeekGeneration, message.generation ?? 0);
     state.positionFrames = message.position;
   } else if (message.type === "buffering") {
-    state.positionFrames = Math.max(0, Number(message.position) || state.positionFrames);
-    state.lastReportedPosition = state.positionFrames;
+    if (!scratchReplayActive()) {
+      state.positionFrames = Math.max(0, Number(message.position) || state.positionFrames);
+      state.lastReportedPosition = state.positionFrames;
+    }
     state.buffering = true;
     setStatus("Buffering decoded groove audio…");
     publishState();
   } else if (message.type === "buffered") {
+    state.buffering = false;
     void handleWorkletBuffered(message);
   } else if (message.type === "worklet-error") {
     setStatus(`Audio engine error: ${message.message || message.stage || "unknown error"}`);
     console.error("[vin.yl.player] AudioWorklet error", message);
   } else if (message.type === "ended") {
+    const playbackEpoch = Number(message.playbackEpoch);
+    if (playbackEpoch !== state.playbackEpoch) return;
     state.positionFrames = message.position;
+    if (Number.isFinite(message.outputFrame)) state.lastOutputFrame = message.outputFrame;
+    const endTransitionGeneration = ++state.endTransitionGeneration;
+    const automaticDeadwax = message.deadwaxStarted
+      ? {
+        endTransitionGeneration,
+        startOutputFrame: Math.max(0, Number(message.outputFrame) || 0),
+        durationFrames: Math.max(0, Number(message.deadwaxDurationFrames) || 0),
+      }
+      : null;
+    state.pendingAutomaticDeadwax = automaticDeadwax;
     void (async () => {
       await dispatch({ type: "playback_ended", deck: "a" });
-      state.surfaceRegion = null;
-      state.node?.port.postMessage({ type: "surface-region", action: "stop", region: "deadwax" });
+      if (
+        playbackEpoch !== state.playbackEpoch
+        || endTransitionGeneration !== state.endTransitionGeneration
+      ) {
+        if (state.pendingAutomaticDeadwax === automaticDeadwax) {
+          state.pendingAutomaticDeadwax = null;
+        }
+        return;
+      }
+      const view = deckView();
+      if (!state.cleanEnd && view?.transport_on && !view?.needle_lifted) {
+        await dispatch({
+          type: "start_timed_region",
+          region: "deadwax",
+          now_ms: performance.now(),
+          duration_seconds: timedRegionDurationSeconds(DEADWAX_TURNS),
+        });
+      } else if (state.cleanEnd && view?.transport_on) {
+        await stopPlaybackTransport();
+      } else if (state.pendingAutomaticDeadwax === automaticDeadwax) {
+        state.pendingAutomaticDeadwax = null;
+      }
+      if (playbackEpoch !== state.playbackEpoch && !state.surfaceRegion) return;
       publishState();
-    })();
+    })().catch(error => {
+      if (state.pendingAutomaticDeadwax === automaticDeadwax) {
+        state.pendingAutomaticDeadwax = null;
+      }
+      log.warn("programme-end-transition-failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
+  } else if (message.type === "surface-region-ended") {
+    const region = message.region === "deadwax" ? "deadwax" : "lead_in";
+    if (
+      state.surfaceRegion?.region !== region
+      || Number(message.regionId) !== state.surfaceRegion.regionId
+    ) {
+      return;
+    }
+    clearTimeout(state.regionTimer);
+    state.regionTimer = 0;
+    if (Number.isFinite(message.outputFrame)) state.lastOutputFrame = message.outputFrame;
+    void dispatch({ type: "timed_region_elapsed", region });
   } else if (message.type === "scratch-replay-ended") {
-    const request = state.scratchReplayRequests.get(message.id);
-    if (request) {
-      state.scratchReplayRequests.delete(message.id);
-      request.resolve({ cancelled: Boolean(message.cancelled), positionFrames: Number(message.position) || 0 });
+    const request = matchingReplayRequest;
+    acknowledgeScratchReplayRequest(request, message);
+    if (request && !request.cancelled) {
+      state.replayScratching = false;
+      settleScratchReplayRequest(request, "resolve", {
+        cancelled: Boolean(message.cancelled),
+        positionFrames: Number(message.position) || 0,
+      });
+      if (state.scratchReplayRequests.get(request.id) === request) {
+        state.scratchReplayRequests.delete(request.id);
+      }
+      if (!state.scratchReplayRequests.size) state.replayScratching = false;
+      publishState();
     }
   }
 }
 
-async function loadFile(file, { cache, resumeAudio = true } = {}) {
-  const loadSequence = state.loadSequence + 1;
-  state.loadSequence = loadSequence;
+async function loadFile(file, options = {}) {
+  const loadSequence = ++state.loadSequence;
+  state.loadInFlightSequence = loadSequence;
+  invalidateEndTransition();
+  clearPendingSeekTransaction();
+  clearLiveScratchInteraction();
+  cancelPendingStreamReady(loadSupersededError());
+  try {
+    await cancelScratchReplays(new Error("Player load cancelled scratch replay"));
+    assertCurrentLoad(loadSequence);
+    return await loadFileForSequence(file, options, loadSequence);
+  } catch (error) {
+    if (loadSequence !== state.loadSequence) throw loadSupersededError();
+    await failCurrentLoad(loadSequence, error, "Record load failed");
+    throw error;
+  } finally {
+    if (state.loadInFlightSequence === loadSequence) state.loadInFlightSequence = 0;
+  }
+}
+
+async function loadFileForSequence(
+  file,
+  { cache, resumeAudio = true, cleanEnd = false } = {},
+  loadSequence,
+) {
   if (isPlayerLoggingEnabled()) {
     console.log("[vin.yl.player] loadFile:start", {
       name: file?.name || "",
@@ -1615,27 +2734,47 @@ async function loadFile(file, { cache, resumeAudio = true } = {}) {
     });
   }
   await initialiseAudio();
+  assertCurrentLoad(loadSequence);
   if (resumeAudio) {
     await state.context.resume();
+    assertCurrentLoad(loadSequence);
   }
+  const previousView = deckView();
+  if (previousView?.transport_on || previousView?.playing || state.view?.lead_in_active || state.view?.deadwax_active) {
+    await stopPlaybackTransport();
+    assertCurrentLoad(loadSequence);
+  }
+  await dispatch({ type: "set_load_state", deck: "a", status: "loading", loaded: false, duration_seconds: 0 });
+  assertCurrentLoad(loadSequence);
   if (cache !== undefined) state.cacheHandler = normalizeCacheHandler(cache);
   if (state.decoder) {
     state.decoder.close();
   }
-  state.decoder = new RecordDecoderClient(versionedAssetUrl("./record-decoder-worker.js"), {
+  disposePcmWindowTransport();
+  const decoder = new RecordDecoderClient(versionedAssetUrl("./record-decoder-worker.js"), {
     loggingEnabled: isPlayerLoggingEnabled(),
     cache: state.cacheHandler,
   });
-  state.decoder.setCache(state.cacheHandler);
-  await state.decoder.initialise();
+  state.decoder = decoder;
+  decoder.setCache(state.cacheHandler);
+  await decoder.initialise();
+  assertCurrentLoad(loadSequence);
   state.streamInitialised = false;
   state.streamReady = false;
+  state.streamReadyMarking = false;
   state.streamDecodedFrames = 0;
   state.buffering = false;
   state.duration = 0;
   state.metadataDuration = 0;
+  state.cleanEnd = Boolean(cleanEnd);
+  state.node.port.postMessage({
+    type: "end-behavior",
+    cleanEnd: state.cleanEnd,
+    deadwaxTurns: DEADWAX_TURNS,
+  });
   state.streamAppendChain = Promise.resolve();
   resetStreamReadyPromise();
+  const streamReadyPromise = state.streamReadyPromise;
   state.decodeProgressText = "";
   state.programmeMap = null;
   state.recordReleaseId = "";
@@ -1650,6 +2789,7 @@ async function loadFile(file, { cache, resumeAudio = true } = {}) {
   elements.recordImage.src = state.recordObjectUrl;
   setStatus(`Inspecting ${file.name}…`);
   const sourceBytes = await file.arrayBuffer();
+  assertCurrentLoad(loadSequence);
   if (isPlayerLoggingEnabled()) {
     console.log("[vin.yl.player] loadFile:bytes", {
       name: file?.name || "",
@@ -1657,12 +2797,17 @@ async function loadFile(file, { cache, resumeAudio = true } = {}) {
     });
   }
   const cacheKey = await recordCacheKey(sourceBytes);
+  assertCurrentLoad(loadSequence);
   state.recordHash = cacheKey;
-  const inspected = await state.decoder.inspect(sourceBytes.slice(0));
+  const inspected = await decoder.inspect(sourceBytes.slice(0));
+  assertCurrentLoad(loadSequence);
   state.recordHeaderProof = inspected.recordHeaderProof || null;
   try {
-    state.recordDescriptorJson = await decodeRecordDescriptorJson(sourceBytes, inspected.recordProfile || "");
+    const descriptorJson = await decodeRecordDescriptorJson(sourceBytes, inspected.recordProfile || "");
+    assertCurrentLoad(loadSequence);
+    state.recordDescriptorJson = descriptorJson;
   } catch (error) {
+    if (loadSequence !== state.loadSequence) throw loadSupersededError();
     state.recordDescriptorJson = "";
     console.warn("[vin.yl.player] record descriptor decode failed", error);
   }
@@ -1672,6 +2817,7 @@ async function loadFile(file, { cache, resumeAudio = true } = {}) {
       recordHeaderProof: state.recordHeaderProof,
       recordProfile: inspected.recordProfile || "",
     });
+    assertCurrentLoad(loadSequence);
   }
   if (isPlayerLoggingEnabled()) {
     console.log("[vin.yl.player] loadFile:inspect", {
@@ -1704,12 +2850,16 @@ async function loadFile(file, { cache, resumeAudio = true } = {}) {
   state.baseRpm = profileRpm(inspected.recordProfile);
   state.rpm = state.baseRpm;
   updateRpmButtons();
+  state.node.port.postMessage({ type: "native-rpm", rpm: state.baseRpm });
   setStatus(`Decoding ${file.name}…`);
   let lastLoggedDecodeChunk = -1;
-  const decodePromise = state.decoder.decode(sourceBytes, inspected.recordProfile || "", {
+  const decodePromise = decoder.decode(sourceBytes, inspected.recordProfile || "", {
       recordBindingHex: state.recordHash,
     }, progress => {
-      if (loadSequence !== state.loadSequence) return;
+      if (
+        loadSequence !== state.loadSequence
+        || state.failedLoadSequence === loadSequence
+      ) return;
       const chunksProcessed = Math.max(0, Math.floor(Number(progress?.chunksProcessed) || 0));
       const totalChunks = Math.max(0, Math.floor(Number(progress?.totalChunks) || 0));
       if (totalChunks > 0 && chunksProcessed !== lastLoggedDecodeChunk) {
@@ -1720,15 +2870,30 @@ async function loadFile(file, { cache, resumeAudio = true } = {}) {
       renderDecodeStatus();
       if (Array.isArray(progress.decodedPcmSegments) && progress.decodedPcmSegments.length) {
         const segments = progress.decodedPcmSegments;
-        state.streamAppendChain = state.streamAppendChain
-          .then(() => appendProgressiveSegments(segments))
-          .catch(error => {
-            setStatus(`Progressive playback failed: ${error.message || error}`);
+        const appendPromise = state.streamAppendChain
+          .then(() => (
+            loadSequence === state.loadSequence
+              ? appendProgressiveSegments(segments, loadSequence)
+              : undefined
+          ))
+          .catch(async error => {
+            if (loadSequence === state.loadSequence) {
+              setStatus(`Progressive playback failed: ${error.message || error}`);
+              await failCurrentLoad(loadSequence, error, "Progressive playback failed");
+            }
+            throw error;
           });
+        // Full decode consumes this chain later, but readiness must fail as soon
+        // as an append does. Keep the retained rejection observed meanwhile.
+        appendPromise.catch(() => {});
+        state.streamAppendChain = appendPromise;
       }
     });
   decodePromise.then(async decoded => {
-    if (loadSequence !== state.loadSequence) return;
+    if (
+      loadSequence !== state.loadSequence
+      || state.failedLoadSequence === loadSequence
+    ) return;
     await state.streamAppendChain;
     if (loadSequence !== state.loadSequence) return;
 
@@ -1739,17 +2904,28 @@ async function loadFile(file, { cache, resumeAudio = true } = {}) {
     state.baseRpm = profileRpm(inspected.recordProfile);
     state.rpm = state.baseRpm;
     updateRpmButtons();
+    state.node.port.postMessage({ type: "native-rpm", rpm: state.baseRpm });
     storeBasePcmSource({ sampleRate, audioLength, s16ChannelBuffers: s16Buffers });
     updateTapeButton();
     if (!state.streamInitialised) {
-      await loadDecodedPcm({ sampleRate, audioLength, s16ChannelBuffers: s16Buffers });
+      await loadDecodedPcm({ sampleRate, audioLength, s16ChannelBuffers: s16Buffers }, loadSequence);
+      if (loadSequence !== state.loadSequence) return;
+    } else if (state.streamDecodedFrames < audioLength) {
+      assertCurrentLoad(loadSequence);
+      if (!state.pcmWindowWorker) throw new Error("PCM window worker is unavailable");
+      state.pcmWindowWorker.postMessage({
+        type: "append-segments",
+        segments: [{ startFrame: 0, endFrame: audioLength, channelBuffers: s16Buffers }],
+      }, s16Buffers);
     }
+    await Promise.all([
+      state.pcmWindowReadyPromise,
+      waitForPcmAvailability(audioLength),
+    ]);
+    assertCurrentLoad(loadSequence);
     state.node.port.postMessage({ type: "stream-complete" });
     if (!state.streamReady) {
-      await markLoadedReady();
-      state.streamReady = true;
-      state.streamReadyResolve?.();
-      state.streamReadyResolve = null;
+      await ensureStreamReady(loadSequence);
     }
     publishState();
     if (isPlayerLoggingEnabled()) {
@@ -1765,43 +2941,65 @@ async function loadFile(file, { cache, resumeAudio = true } = {}) {
     if (loadSequence !== state.loadSequence) return;
     state.streamReadyReject?.(error);
     state.streamReadyReject = null;
-    setStatus(`Playback decode failed: ${error.message || error}`);
+    void failCurrentLoad(loadSequence, error, "Playback decode failed");
   });
 
   // Start as soon as the worklet has a small contiguous lead-in; the rest
   // continues decoding and appending in the background.
-  await state.streamReadyPromise;
+  await streamReadyPromise;
   if (loadSequence !== state.loadSequence) return null;
 }
 
 async function loadRecordFromUrl(url, options = {}) {
-  const resolved = new URL(String(url || ""), globalThis.location?.href || import.meta.url);
-  if (isPlayerLoggingEnabled()) {
-    console.log("[vin.yl.player] loadRecordFromUrl:start", {
-      input: String(url || ""),
-      resolved: resolved.toString(),
-      options,
-    });
+  const requestSequence = ++state.loadSequence;
+  state.loadInFlightSequence = requestSequence;
+  invalidateEndTransition();
+  clearPendingSeekTransaction();
+  clearLiveScratchInteraction();
+  cancelPendingStreamReady(loadSupersededError());
+  try {
+    await cancelScratchReplays(new Error("Player load cancelled scratch replay"));
+    assertCurrentLoad(requestSequence);
+    const resolved = new URL(String(url || ""), globalThis.location?.href || import.meta.url);
+    if (isPlayerLoggingEnabled()) {
+      console.log("[vin.yl.player] loadRecordFromUrl:start", {
+        input: String(url || ""),
+        resolved: resolved.toString(),
+        options,
+      });
+    }
+    const response = await fetch(resolved.toString(), { cache: "force-cache" });
+    assertCurrentLoad(requestSequence);
+    if (!response.ok) {
+      console.error("[vin.yl.player] loadRecordFromUrl:fetch-failed", {
+        resolved: resolved.toString(),
+        status: response.status,
+      });
+      throw new Error(`Failed to load record from ${resolved}: ${response.status}`);
+    }
+    const blob = await response.blob();
+    assertCurrentLoad(requestSequence);
+    if (isPlayerLoggingEnabled()) {
+      console.log("[vin.yl.player] loadRecordFromUrl:fetched", {
+        resolved: resolved.toString(),
+        size: blob.size || 0,
+        type: blob.type || "",
+      });
+    }
+    const pathname = resolved.pathname.split("/").pop() || "record.png";
+    const file = new File([blob], pathname, { type: blob.type || "image/png" });
+    return await loadFileForSequence(
+      file,
+      { resumeAudio: false, ...(options || {}) },
+      requestSequence,
+    );
+  } catch (error) {
+    if (requestSequence !== state.loadSequence) throw loadSupersededError();
+    await failCurrentLoad(requestSequence, error, "Record download failed");
+    throw error;
+  } finally {
+    if (state.loadInFlightSequence === requestSequence) state.loadInFlightSequence = 0;
   }
-  const response = await fetch(resolved.toString(), { cache: "force-cache" });
-  if (!response.ok) {
-    console.error("[vin.yl.player] loadRecordFromUrl:fetch-failed", {
-      resolved: resolved.toString(),
-      status: response.status,
-    });
-    throw new Error(`Failed to load record from ${resolved}: ${response.status}`);
-  }
-  const blob = await response.blob();
-  if (isPlayerLoggingEnabled()) {
-    console.log("[vin.yl.player] loadRecordFromUrl:fetched", {
-      resolved: resolved.toString(),
-      size: blob.size || 0,
-      type: blob.type || "",
-    });
-  }
-  const pathname = resolved.pathname.split("/").pop() || "record.png";
-  const file = new File([blob], pathname, { type: blob.type || "image/png" });
-  return loadFile(file, { resumeAudio: false, ...(options || {}) });
 }
 
 async function configureStartupCache() {
@@ -1855,7 +3053,21 @@ function unwrapAngle(delta) {
 }
 
 function audioFrameNow() {
-  return Math.max(0, Math.round((state.context?.currentTime || 0) * state.sampleRate));
+  const outputSampleRate = state.context?.sampleRate || state.sampleRate;
+  return Math.max(0, Math.round((state.context?.currentTime || 0) * outputSampleRate));
+}
+
+function pointerAudioTiming(inputTimeMs) {
+  if (!state.context || !Number.isFinite(Number(inputTimeMs))) return {};
+  let timestamp = Number(inputTimeMs);
+  if (timestamp > 1_000_000_000_000 && Number.isFinite(performance.timeOrigin)) {
+    timestamp -= performance.timeOrigin;
+  }
+  const ageMs = clamp(performance.now() - timestamp, 0, 1000);
+  return {
+    commandId: ++state.pointerCommandId,
+    inputAudioTime: Math.max(0, state.context.currentTime - ageMs / 1000),
+  };
 }
 
 function scratchInitialState() {
@@ -1867,8 +3079,15 @@ function scratchInitialState() {
     playbackRate: state.baseRpm > 0 ? state.rpm / state.baseRpm : 1,
     volume: state.volume,
     crossfader: state.crossfader,
-    motorRunning: Boolean(view?.motor_running ?? view?.playing),
-    playing: Boolean(view?.playing)
+    manualCrossfader: state.crossfader,
+    motorRunning: Boolean(view?.transport_on ?? view?.playing),
+    playing: Boolean(view?.playing),
+    needleLifted: Boolean(view?.needle_lifted),
+    preset: state.scratchPreset,
+    clicks: state.scratchClicks,
+    faderCurve: "sharp-0.08",
+    highFrequencyAccelerationLimit: state.highFrequencyAccelerationLimit,
+    stylusTracingLimit: state.stylusTracingLimit,
   };
 }
 
@@ -1895,57 +3114,198 @@ function createScratchRecorder({ name = "" } = {}) {
       if (!active) return;
       const next = { ...event, frameOffset: Math.max(0, frame - startFrame) };
       const previous = events[events.length - 1];
-      if (previous && previous.type === next.type && previous.frameOffset === next.frameOffset && previous.positionFrames === next.positionFrames && previous.rate === next.rate) return;
+      if (previous && JSON.stringify(previous) === JSON.stringify(next)) return;
       events.push(next);
     },
     stop() {
       if (!active) return null;
       active = false;
       state.scratchRecorders.delete(this);
-      const durationFrames = events.length ? events[events.length - 1].frameOffset : Math.max(0, audioFrameNow() - startFrame);
-      return Object.freeze({
+      const durationFrames = Math.max(
+        events.length ? events[events.length - 1].frameOffset : 0,
+        Math.max(0, audioFrameNow() - startFrame),
+      );
+      const outputSampleRate = state.context?.sampleRate || state.sampleRate;
+      return Object.freeze(normalizeScratchPerformance({
         id: crypto.randomUUID(),
-        schemaVersion: 1,
+        schemaVersion: SCRATCH_PERFORMANCE_SCHEMA_VERSION,
         name: String(name || ""),
         recordHash: state.recordHash,
         releaseId: elements.metaRelease?.textContent || "",
         createdAt: new Date().toISOString(),
-        sampleRate: state.sampleRate,
+        sourceSampleRate: state.sampleRate,
+        outputSampleRate,
         durationFrames,
-        durationMs: durationFrames / state.sampleRate * 1000,
+        durationMs: durationFrames / outputSampleRate * 1000,
         engine: {
           name: "vin.yl.player.acoustic",
-          version: 1,
+          version: 2,
+          gateAlgorithmVersion: SCRATCH_GATE_ALGORITHM_VERSION,
           recordProfile: elements.metaProfile?.textContent || "",
           nativeRpm: state.baseRpm
         },
         initialState,
         events: events.map(event => ({ ...event })),
         effects: { acoustic: true, surface: true }
-      });
+      }));
     },
     get active() { return active; }
   });
 }
 
 async function replayScratch(performance, { effects = "original" } = {}) {
-  if (!performance || !Array.isArray(performance.events)) throw new TypeError("A valid scratch performance is required");
-  if (performance.recordHash && state.recordHash && performance.recordHash !== state.recordHash) throw new Error("Scratch performance belongs to a different record");
-  await initialiseAudio();
-  await state.context.resume();
-  const initialPosition = Math.max(0, Number(performance.initialState?.positionFrames) || 0);
+  if (state.scratchReplayRequests.size > 0) throw new Error("A scratch replay is already active");
+  if (state.loadInFlightSequence) throw new Error("Scratch replay is unavailable while a record is loading");
+  if (
+    state.failedLoadSequence === state.loadSequence
+    || state.loadFailureSequence === state.loadSequence
+  ) {
+    throw new Error("Scratch replay is unavailable after a record load failure");
+  }
+  if (state.tape.loading) throw new Error("Scratch replay is unavailable while the TAPE source is changing");
+  if (state.buffering || !state.streamReady) throw new Error("Scratch replay requires a ready, buffered record");
+  if (
+    state.seekInFlight
+    || state.queuedSeekSeconds != null
+    || state.pendingSeekGeneration !== state.acknowledgedSeekGeneration
+  ) {
+    throw new Error("Scratch replay is unavailable while a seek is pending");
+  }
+  if (state.scratching) throw new Error("Scratch replay is unavailable during live scratching");
+  if (state.surfaceRegion || state.view?.lead_in_active || state.view?.deadwax_active) {
+    throw new Error("Scratch replay is unavailable during lead-in or deadwax playback");
+  }
   const id = ++state.scratchReplayId;
-  const completion = new Promise((resolve, reject) => state.scratchReplayRequests.set(id, { resolve, reject }));
-  state.node.port.postMessage({ type: "replay-scratch", id, performance, effectsMode: effects });
-  return completion;
+  let resolveCompletion;
+  let rejectCompletion;
+  let resolveWorkletAck;
+  const completion = new Promise((resolve, reject) => {
+    resolveCompletion = resolve;
+    rejectCompletion = reject;
+  });
+  completion.catch(() => {});
+  const workletAckPromise = new Promise(resolve => { resolveWorkletAck = resolve; });
+  const request = {
+    id,
+    phase: "setup",
+    cancelled: false,
+    settled: false,
+    workletStarted: false,
+    workletAcknowledged: false,
+    workletAckPromise,
+    resolveWorkletAck,
+    resolve: resolveCompletion,
+    reject: rejectCompletion,
+  };
+  state.scratchReplayRequests.set(id, request);
+  publishState();
+  try {
+    await initialiseAudio();
+    assertScratchReplayRequestActive(request);
+    await state.context.resume();
+    assertScratchReplayRequestActive(request);
+    const normalized = normalizeScratchPerformance(performance, {
+      sourceSampleRate: state.sampleRate,
+      outputSampleRate: state.context.sampleRate,
+    });
+    if (normalized.recordHash && state.recordHash && normalized.recordHash !== state.recordHash) {
+      throw new Error("Scratch performance belongs to a different record");
+    }
+    if (state.surfaceRegion || state.view?.lead_in_active || state.view?.deadwax_active) {
+      throw new Error("Scratch replay is unavailable during lead-in or deadwax playback");
+    }
+    request.phase = "active";
+    state.node.port.postMessage({ type: "replay-scratch", id, performance: normalized, effectsMode: effects });
+    request.workletStarted = true;
+    return completion;
+  } catch (error) {
+    request.cancelled = true;
+    if (!request.workletStarted) acknowledgeScratchReplayRequest(request);
+    settleScratchReplayRequest(request, "reject", error);
+    if (state.scratchReplayRequests.get(id) === request) state.scratchReplayRequests.delete(id);
+    if (!state.scratchReplayRequests.size) state.replayScratching = false;
+    publishState();
+    throw error;
+  }
+}
+
+function assertScratchReplayRequestActive(request) {
+  if (
+    request.cancelled
+    || state.scratchReplayRequests.get(request.id) !== request
+  ) {
+    throw request.cancelError || new Error("Scratch replay was cancelled during setup");
+  }
+}
+
+function settleScratchReplayRequest(request, action, value) {
+  if (request.settled) return;
+  request.settled = true;
+  if (action === "resolve") request.resolve(value);
+  else request.reject(value);
+}
+
+function acknowledgeScratchReplayRequest(request, message = null) {
+  if (!request || request.workletAcknowledged) return;
+  request.workletAcknowledged = true;
+  request.resolveWorkletAck(message);
+}
+
+async function waitForScratchReplayAcknowledgement(request, timeoutMs = 1_000) {
+  if (request.workletAcknowledged) return;
+  let timeoutId = 0;
+  await Promise.race([
+    request.workletAckPromise,
+    new Promise(resolve => {
+      timeoutId = setTimeout(resolve, timeoutMs);
+    }),
+  ]);
+  clearTimeout(timeoutId);
+  if (!request.workletAcknowledged) {
+    log.warn("scratch-replay-cancel-ack-timeout", { id: request.id, timeoutMs });
+    acknowledgeScratchReplayRequest(request);
+  }
+}
+
+async function cancelScratchReplays(error = new Error("Scratch replay cancelled")) {
+  const requests = Array.from(state.scratchReplayRequests.values());
+  if (!requests.length) return;
+  state.replayScratching = false;
+  for (const request of requests) {
+    request.cancelled = true;
+    request.cancelError = error;
+    request.phase = "restoring";
+    if (!request.workletStarted || !state.node?.port) acknowledgeScratchReplayRequest(request);
+  }
+  if (requests.some(request => request.workletStarted && !request.workletAcknowledged)) {
+    try {
+      state.node.port.postMessage({ type: "cancel-scratch-replay" });
+    } catch (postError) {
+      for (const request of requests) acknowledgeScratchReplayRequest(request);
+      log.warn("scratch-replay-cancel-post-failed", {
+        message: postError instanceof Error ? postError.message : String(postError),
+      });
+    }
+  }
+  await Promise.all(requests.map(async request => {
+    await waitForScratchReplayAcknowledgement(request);
+    settleScratchReplayRequest(request, "reject", error);
+    if (state.scratchReplayRequests.get(request.id) === request) {
+      state.scratchReplayRequests.delete(request.id);
+    }
+  }));
+  if (!state.scratchReplayRequests.size) state.replayScratching = false;
+  publishState();
 }
 
 function cancelScratchReplay() {
-  state.node?.port.postMessage({ type: "cancel-scratch-replay" });
+  return cancelScratchReplays();
 }
 
 async function beginScratch(event) {
-  if (!state.node || state.scratching) return;
+  if (!grooveInteractionReady() || state.scratching || state.scratchReplayRequests.size) return;
+  const loadSequence = state.loadSequence;
+  invalidateEndTransition();
   elements.platter.setPointerCapture(event.pointerId);
   const angle = angleForPointer(event);
   state.scratching = true;
@@ -1955,17 +3315,20 @@ async function beginScratch(event) {
   state.scratchLastTime = event.timeStamp;
   state.scratchStartPosition = state.positionFrames;
   recordScratchEvent({ type: "scratch-start", positionFrames: state.positionFrames, rate: 0, impulse: 0.22 });
-  await dispatch({
-    type: "begin_scratch",
-    deck: "a",
-    pointer_id: event.pointerId,
-    playback_seconds: framesToSeconds(state.positionFrames),
-    rotation_degrees: state.rotation
-  });
+  await dispatch(
+    {
+      type: "begin_scratch",
+      deck: "a",
+      pointer_id: event.pointerId,
+      playback_seconds: framesToSeconds(state.positionFrames),
+      rotation_degrees: state.rotation
+    },
+    { loadSequence },
+  );
 }
 
 function moveScratch(event) {
-  if (!state.scratching || event.pointerId !== state.scratchPointerId) return;
+  if (state.scratchReplayRequests.size || !state.scratching || event.pointerId !== state.scratchPointerId) return;
   const angle = angleForPointer(event);
   const totalDelta = unwrapAngle(angle - state.scratchStartAngle);
   const localDelta = unwrapAngle(angle - state.scratchLastAngle);
@@ -1985,7 +3348,7 @@ function moveScratch(event) {
 }
 
 async function endScratch(event) {
-  if (!state.scratching || event.pointerId !== state.scratchPointerId) return;
+  if (state.scratchReplayRequests.size || !state.scratching || event.pointerId !== state.scratchPointerId) return;
   state.scratching = false;
   recordScratchEvent({ type: "scratch-end", positionFrames: state.positionFrames, rate: 0, impulse: 0, resumePlayback: true });
   await dispatch({
@@ -2002,18 +3365,27 @@ async function endScratch(event) {
 
 
 function updateOutputGain(rampMs = 12) {
-  if (!state.gainNode || !state.context) return;
-  const gain = state.packetGain * state.mixerGain;
-  const now = state.context.currentTime;
-  const end = now + Math.max(0, Number(rampMs) || 0) / 1000;
-  state.gainNode.gain.cancelScheduledValues(now);
-  state.gainNode.gain.setValueAtTime(state.gainNode.gain.value, now);
-  state.gainNode.gain.linearRampToValueAtTime(gain, end);
+  const gain = Math.max(0, Math.min(4, state.packetGain * state.mixerGain));
+  state.node?.port.postMessage({
+    type: "output-gain",
+    gain,
+    rampMs: Math.max(0, Math.min(60_000, Number(rampMs) || 0)),
+  });
 }
 
 function currentDeadwaxProgress() {
   const region = state.surfaceRegion;
   if (!region || region.region !== "deadwax") return 0;
+  if (
+    Number.isFinite(region.startOutputFrame)
+    && Number.isFinite(region.durationFrames)
+    && region.durationFrames > 0
+  ) {
+    return Math.max(0, Math.min(
+      1,
+      (state.lastOutputFrame - region.startOutputFrame) / region.durationFrames,
+    ));
+  }
   const durationMs = Math.max(1, Number(region.durationSeconds) * 1000 || 1);
   return Math.max(0, Math.min(1, (performance.now() - Number(region.startedAtMs || 0)) / durationMs));
 }
@@ -2028,7 +3400,8 @@ function publicState() {
     deadwaxProgress: currentDeadwaxProgress(),
     motorRunning: Boolean(view?.transport_on),
     needleLifted: Boolean(view?.needle_lifted),
-    scratching: state.scratching,
+    scratching: state.scratching || state.replayScratching,
+    scratchReplayActive: state.scratchReplayRequests.size > 0,
     buffering: state.buffering,
     positionSeconds: framesToSeconds(state.positionFrames),
     durationSeconds: state.duration,
@@ -2042,6 +3415,24 @@ function publicState() {
     playbackRate: state.baseRpm > 0 ? state.rpm / state.baseRpm : 1,
     volume: state.volume,
     crossfader: state.crossfader,
+    scratchPreset: state.scratchPreset,
+    scratchClicks: state.scratchClicks,
+    scratchGate: state.scratchGate,
+    scratchGateTarget: state.scratchGateTarget,
+    scratchDirection: state.scratchDirection,
+    scratchMoving: state.scratchMoving,
+    scratchGatePhase: state.scratchGatePhase,
+    scratchStrokeProgress: state.scratchStrokeProgress,
+    effectiveRate: state.effectiveRate,
+    highFrequencyAccelerationLimit: state.highFrequencyAccelerationLimit,
+    stylusTracingLimit: state.stylusTracingLimit,
+    pointerToAudioLatencyMs: state.pointerToAudioLatencyMs,
+    audioBaseLatencyMs: Number.isFinite(state.context?.baseLatency)
+      ? state.context.baseLatency * 1000
+      : null,
+    audioOutputLatencyMs: Number.isFinite(state.context?.outputLatency)
+      ? state.context.outputLatency * 1000
+      : null,
     recordProfile: elements.metaProfile?.textContent || "",
     payloadContainer: elements.metaContainer?.textContent || "",
     releaseId: elements.metaRelease?.textContent || "",
@@ -2049,6 +3440,8 @@ function publicState() {
     recordImageUrl: state.recordObjectUrl,
     rotationDegrees: state.rotation,
     sampleRate: state.sampleRate,
+    outputSampleRate: state.context?.sampleRate || null,
+    cleanEnd: state.cleanEnd,
     positionFrames: state.positionFrames,
     currentTrackIndex: currentTrackIndex(),
     currentTrackTitle: programmeTracks()[currentTrackIndex()]?.title || "",
@@ -2060,20 +3453,37 @@ function publicState() {
 
 function publishState() {
   const snapshot = publicState();
-  for (const listener of state.listeners) listener(snapshot);
-  reportBridgePlayback(snapshot);
-  reportBridgeRecord(snapshot);
+  for (const listener of state.listeners) {
+    try {
+      listener(snapshot);
+    } catch (error) {
+      log.warn("state-listener-failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  try {
+    reportBridgePlayback(snapshot);
+    reportBridgeRecord(snapshot);
+  } catch (error) {
+    log.warn("state-bridge-report-failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 async function setVolume(value) {
+  await interruptScratchReplay("Volume control");
   state.volume = Math.max(0, Math.min(1, Number(value) || 0));
   if (elements.volume) elements.volume.value = String(state.volume);
   await dispatch({ type: "set_channel_gain", deck: "a", value: state.volume });
 }
 
-async function setCrossfader(value) {
+async function setCrossfader(value, { record = true } = {}) {
+  await interruptScratchReplay("Crossfader control");
   state.crossfader = Math.max(0, Math.min(1, Number(value) || 0));
   if (elements.xfade) elements.xfade.value = String(state.crossfader);
+  if (record) recordScratchEvent({ type: "manual-crossfader", value: state.crossfader });
   await dispatch({ type: "set_crossfader", value: state.crossfader });
 }
 
@@ -2144,63 +3554,132 @@ const api = Object.freeze({
     await state.context.resume();
   },
   startTransport: async () => {
+    await interruptScratchReplay("Transport start");
+    invalidateEndTransition();
     await initialiseAudio();
     await state.context.resume();
     const view = deckView();
     if (!view?.transport_on) await dispatch({ type: "set_transport", deck: "a", running: true });
   },
   stopTransport: async () => {
+    await interruptScratchReplay("Transport stop");
+    invalidateEndTransition();
     const view = deckView();
     if (view?.transport_on) await dispatch({ type: "set_transport", deck: "a", running: false });
   },
   toggleTransport: async () => {
+    await interruptScratchReplay("Transport control");
+    invalidateEndTransition();
     await initialiseAudio();
     await state.context.resume();
     await dispatch({ type: "toggle_transport", deck: "a" });
   },
   play: async () => {
+    await interruptScratchReplay("Playback start");
     await initialiseAudio();
     await state.context.resume();
     const view = deckView();
     if (!(view?.transport_on || view?.playing || state.view?.lead_in_active || state.view?.deadwax_active)) await startLeadInPlayback();
   },
   pause: async () => {
+    await interruptScratchReplay("Playback stop");
     const view = deckView();
     if (view?.transport_on || view?.playing || state.view?.lead_in_active || state.view?.deadwax_active) await stopPlaybackTransport();
   },
   reset: async () => {
-    state.loadSequence += 1;
+    const resetSequence = ++state.loadSequence;
+    state.loadInFlightSequence = 0;
+    state.streamReady = false;
+    state.streamReadyMarking = false;
+    state.buffering = false;
+    invalidateEndTransition();
+    clearPendingSeekTransaction();
+    clearLiveScratchInteraction();
+    await cancelScratchReplays(new Error("Player reset during scratch replay"));
+    if (resetSequence !== state.loadSequence) return false;
+    clearPendingSeekTransaction();
+    clearLiveScratchInteraction();
+    await state.audioInitialisePromise?.catch(() => {});
+    if (resetSequence !== state.loadSequence) return false;
+
+    // From here through resource detachment there are no awaits, so a newer
+    // load cannot be partially cleared by this reset. Once detached, a newer
+    // request may safely create its own context while the old one closes.
+    state.pcmStreamGeneration += 1;
+    state.playbackEpoch += 1;
+    state.surfaceRegionId += 1;
     clearTimeout(state.regionTimer);
     state.regionTimer = 0;
     state.surfaceRegion = null;
-    if (state.node) await stopPlaybackTransport().catch(() => {});
+    state.pendingAutomaticDeadwax = null;
+    state.lastOutputFrame = 0;
     state.decoder?.close();
     state.decoder = null;
-    state.streamReadyReject?.(new Error("Player reset"));
-    state.streamReadyResolve = null;
-    state.streamReadyReject = null;
-    state.streamReadyPromise = null;
+    cancelPendingStreamReady(new Error("Player reset"));
     state.streamInitialised = false;
     state.streamReady = false;
+    state.streamReadyMarking = false;
     state.streamDecodedFrames = 0;
+    state.buffering = false;
+    state.positionFrames = 0;
+    state.duration = 0;
+    state.metadataDuration = 0;
+    state.lastReportedPosition = 0;
+    state.lastDspRotationTurns = null;
+    state.replayScratching = false;
+    state.pointerToAudioLatencyMs = null;
+    state.effectiveRate = 0;
+    state.packetGain = 1;
+    state.mixerGain = 1;
+    state.scratchGate = 1;
+    state.scratchGateTarget = 1;
+    state.scratchDirection = 0;
+    state.scratchMoving = false;
     state.streamAppendChain = Promise.resolve();
     state.decodeProgressText = "";
     state.basePcmSource = null;
-    state.node?.port.postMessage({ type: "reset" });
-    state.node?.disconnect();
-    state.gainNode?.disconnect();
-    state.captureNode?.disconnect?.();
-    await state.context?.close().catch?.(() => {});
+    state.recordHash = "";
+    state.recordReleaseId = "";
+    state.recordDescriptorJson = "";
+    state.programmeMap = null;
+    state.cleanEnd = false;
+    state.failedLoadSequence = 0;
+    if (state.recordObjectUrl) URL.revokeObjectURL(state.recordObjectUrl);
+    state.recordObjectUrl = "";
+    disposePcmWindowTransport({ resetWorklet: false });
+    const audioNode = state.node;
+    const gainNode = state.gainNode;
+    const captureNode = state.captureNode;
+    const audioContext = state.context;
+    audioNode?.port.postMessage({ type: "reset" });
+    audioNode?.disconnect();
+    gainNode?.disconnect();
+    captureNode?.disconnect?.();
     state.node = null;
     state.gainNode = null;
     state.captureNode = null;
     state.context = null;
+    state.audioInitialisePromise = null;
+    await audioContext?.close().catch?.(() => {});
+    if (resetSequence !== state.loadSequence) return false;
+    if (state.worker) {
+      await dispatch({
+        type: "set_load_state",
+        deck: "a",
+        status: "empty",
+        loaded: false,
+        duration_seconds: 0,
+      }).catch(() => {});
+      if (resetSequence !== state.loadSequence) return false;
+    }
     const canvas = playerRoot.querySelector("#player-canvas");
     const context = canvas?.getContext("2d");
     if (context) context.clearRect(0, 0, canvas.width, canvas.height);
     publishState();
+    return true;
   },
   togglePlayback: async () => {
+    await interruptScratchReplay("Playback control");
     await initialiseAudio();
     await state.context.resume();
     await toggleStartStopPlayback();
@@ -2211,7 +3690,13 @@ const api = Object.freeze({
   setRpm,
   setVolume,
   setCrossfader,
+  setScratchPreset,
+  setScratchClicks,
+  setHighFrequencyAccelerationLimit,
+  setStylusTracingLimit,
   setNeedleLifted: async lifted => {
+    await interruptScratchReplay("Needle control");
+    invalidateEndTransition();
     state.needleAutoBehaviorEnabled = false;
     const next = Boolean(lifted);
     const view = deckView();
@@ -2222,33 +3707,58 @@ const api = Object.freeze({
     // stylus re-placement with needle-drop foley, never a brake/restart.
     if (lowering && view?.transport_on) state.node?.port.postMessage({ type: "needle-drop" });
   },
-  beginScratch: ({ pointerId = 0, rotationDegrees = state.rotation, positionFrames = state.positionFrames, rate = 0, impulse = 0.22 } = {}) => {
+  beginScratch: ({ pointerId = 0, rotationDegrees = state.rotation, positionFrames = state.positionFrames, rate = 0, impulse = 0.22, inputTimeMs } = {}) => {
+    if (!grooveInteractionReady() || state.scratching || state.scratchReplayRequests.size) {
+      return Promise.resolve(false);
+    }
+    const loadSequence = state.loadSequence;
+    invalidateEndTransition();
     const position = Number(positionFrames) || 0;
     // The hand owns the record from the first touch: publish the scratching
     // state immediately so the canvas stops advancing the motor's visual
     // rotation — otherwise the drawn record fights the hand.
     state.scratching = true;
-    state.rotation = Number(rotationDegrees) || state.rotation;
+    if (Number.isFinite(Number(rotationDegrees))) state.rotation = Number(rotationDegrees);
     publishState();
     recordScratchEvent({ type: "scratch-start", positionFrames: position, rate: Number(rate) || 0, impulse: Number(impulse) || 0 });
-    state.node?.port.postMessage({ type: "scratch", active: true, position, rate: Number(rate) || 0, impulse: Number(impulse) || 0 });
-    return dispatch({ type: "begin_scratch", deck: "a", pointer_id: pointerId, playback_seconds: framesToSeconds(position), rotation_degrees: rotationDegrees });
+    state.node?.port.postMessage({
+      type: "scratch",
+      active: true,
+      position,
+      rate: Number(rate) || 0,
+      impulse: Number(impulse) || 0,
+      ...pointerAudioTiming(inputTimeMs),
+    });
+    return dispatch(
+      { type: "begin_scratch", deck: "a", pointer_id: pointerId, playback_seconds: framesToSeconds(position), rotation_degrees: rotationDegrees },
+      { loadSequence },
+    );
   },
-  updateScratch: ({ positionFrames, rate = 0, rotationDegrees = state.rotation, impulse = 0 } = {}) => {
+  updateScratch: ({ positionFrames, rate = 0, rotationDegrees = state.rotation, impulse = 0, inputTimeMs } = {}) => {
+    if (!grooveInteractionReady() || !state.scratching || state.scratchReplayRequests.size) {
+      return Promise.resolve(false);
+    }
     const position = Number(positionFrames) || 0;
     const nextRate = Number(rate) || 0;
     const nextImpulse = Number(impulse) || 0;
     state.scratching = true;
-    state.rotation = Number(rotationDegrees) || state.rotation;
+    if (Number.isFinite(Number(rotationDegrees))) state.rotation = Number(rotationDegrees);
     state.positionFrames = position;
     recordScratchEvent({ type: "scratch-motion", positionFrames: position, rate: nextRate, impulse: nextImpulse });
-    state.node?.port.postMessage({ type: "motion", position, rate: nextRate, impulse: nextImpulse });
+    state.node?.port.postMessage({
+      type: "motion",
+      position,
+      rate: nextRate,
+      impulse: nextImpulse,
+      ...pointerAudioTiming(inputTimeMs),
+    });
     publishState();
     return Promise.resolve();
   },
   endScratch: ({ rotationDegrees = state.rotation, resumePlayback = true } = {}) => {
+    if (!state.scratching || state.scratchReplayRequests.size) return Promise.resolve(false);
     state.scratching = false;
-    state.rotation = Number(rotationDegrees) || state.rotation;
+    if (Number.isFinite(Number(rotationDegrees))) state.rotation = Number(rotationDegrees);
     publishState();
     recordScratchEvent({ type: "scratch-end", positionFrames: state.positionFrames, rate: 0, impulse: 0, resumePlayback: Boolean(resumePlayback) });
     state.node?.port.postMessage({ type: "scratch", active: false, position: state.positionFrames, rate: 0, impulse: 0 });
@@ -2261,15 +3771,42 @@ const api = Object.freeze({
   cancelScratchReplay,
   scratches: Object.freeze({
     save: saveScratchPerformance,
-    get: getScratchPerformance,
-    list: query => listScratchPerformances({ recordHash: state.recordHash, ...(query || {}) }),
+    get: id => getScratchPerformance(id, {
+      sourceSampleRate: state.sampleRate,
+      outputSampleRate: state.context?.sampleRate || state.sampleRate,
+    }),
+    list: query => listScratchPerformances({
+      recordHash: state.recordHash,
+      ...(query || {}),
+      target: {
+        sourceSampleRate: state.sampleRate,
+        outputSampleRate: state.context?.sampleRate || state.sampleRate,
+        ...(query?.target || {}),
+      },
+    }),
     delete: deleteScratchPerformance,
     clear: query => clearScratchPerformances({ recordHash: state.recordHash, ...(query || {}) }),
     export: performance => JSON.stringify(performance),
-    import: value => typeof value === "string" ? JSON.parse(value) : structuredClone(value)
+    import: value => normalizeScratchPerformance(
+      typeof value === "string" ? JSON.parse(value) : structuredClone(value),
+      {
+        sourceSampleRate: state.sampleRate,
+        outputSampleRate: state.context?.sampleRate || state.sampleRate,
+      },
+    )
   }),
   getState: publicState,
-  subscribe(listener) { state.listeners.add(listener); listener(publicState()); return () => state.listeners.delete(listener); },
+  subscribe(listener) {
+    state.listeners.add(listener);
+    try {
+      listener(publicState());
+    } catch (error) {
+      log.warn("state-listener-initial-notification-failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return () => state.listeners.delete(listener);
+  },
   canvas: Object.freeze({
     mount(canvas, options = {}) {
       state.canvasController?.destroy();
@@ -2307,23 +3844,7 @@ globalThis.vin.yl ??= {};
 globalThis.vin.yl.player = api;
 
 async function initialise() {
-  state.worker = new Worker(versionedAssetUrl("./player-core-worker.js"), { type: "module" });
-  log.action("core-worker-created", {});
-  state.worker.onmessage = event => {
-    const request = state.pending.get(event.data?.id);
-    log.receive(
-      `core:${event.data?.type || (event.data?.ok ? "response" : "error")}`,
-      event.data,
-      request?.telemetry ? { telemetry: true } : undefined,
-    );
-    const { id, ok, result, error } = event.data;
-    if (!request) { if (id !== 0) log.warn("core-unmatched-response", event.data); return; }
-    state.pending.delete(id);
-    if (ok) request.resolve(result);
-    else request.reject(new Error(error));
-  };
-  const result = await coreRequest("init", { moduleUrl: versionedAssetUrl("./record-player/record_player.js") });
-  state.view = result.view;
+  await ensureCoreWorker();
   elements.play.disabled = false;
   elements.needle.disabled = false;
   render();
@@ -2365,18 +3886,12 @@ elements.file.addEventListener("change", () => {
   if (file) void loadFile(file).catch(error => setStatus(error.message));
 });
 elements.play.addEventListener("click", async () => {
-  await initialiseAudio();
-  await state.context.resume();
-  await toggleStartStopPlayback();
+  await api.togglePlayback();
 });
 elements.needle.addEventListener("click", () => {
-  state.needleAutoBehaviorEnabled = false;
   const view = deckView();
   if (!view) return;
-  const lifted = !view.needle_lifted;
-  void dispatch({ type: "set_needle", deck: "a", lifted, observed_playback_seconds: framesToSeconds(state.positionFrames) });
-  state.node?.port.postMessage({ type: "needle", lifted });
-  if (!lifted && view.transport_on) state.node?.port.postMessage({ type: "needle-drop" });
+  void api.setNeedleLifted(!view.needle_lifted).catch(error => setStatus(error?.message || String(error)));
 });
 elements.tape?.addEventListener("click", () => {
   void setTapeMonitor(!state.tape.active).catch((error) => {
@@ -2391,8 +3906,14 @@ elements.seek.addEventListener("input", () => {
 });
 elements.seek.addEventListener("change", () => {
   state.draggingSeek = false;
+  if (!seekInteractionReady()) {
+    clearPendingSeekTransaction();
+    return;
+  }
   const seconds = Number(elements.seek.value) * state.duration;
   state.queuedSeekSeconds = seconds;
+  clearTimeout(state.seekTimer);
+  state.seekTimer = 0;
   void flushQueuedSeek();
 });
 elements.seek.addEventListener("pointerup", () => { state.draggingSeek = false; });
@@ -2401,10 +3922,29 @@ elements.rpm45?.addEventListener("click", () => void setRpm(45));
 elements.rpm?.addEventListener("input", () => void setRpm(elements.rpm.value));
 elements.volume?.addEventListener("input", () => void setVolume(elements.volume.value));
 elements.xfade?.addEventListener("input", () => void setCrossfader(elements.xfade.value));
+elements.scratchPreset?.addEventListener("change", () => setScratchPreset(elements.scratchPreset.value));
+elements.scratchClicks?.addEventListener("input", () => setScratchClicks(elements.scratchClicks.value));
+elements.highFrequencyAccelerationLimit?.addEventListener("input", () => {
+  setHighFrequencyAccelerationLimit(elements.highFrequencyAccelerationLimit.value);
+});
+elements.stylusTracingLimit?.addEventListener("input", () => {
+  setStylusTracingLimit(elements.stylusTracingLimit.value);
+});
 elements.platter.addEventListener("pointerdown", event => void beginScratch(event));
 elements.platter.addEventListener("pointermove", moveScratch);
 elements.platter.addEventListener("pointerup", event => void endScratch(event));
 elements.platter.addEventListener("pointercancel", event => void endScratch(event));
 
 updateTapeButton();
+updateScratchTechniqueControls();
+if (elements.highFrequencyAccelerationLimit) {
+  elements.highFrequencyAccelerationLimit.value = String(state.highFrequencyAccelerationLimit);
+}
+if (elements.highFrequencyAccelerationLimitValue) {
+  elements.highFrequencyAccelerationLimitValue.value = `${Math.round(state.highFrequencyAccelerationLimit * 100)}%`;
+}
+if (elements.stylusTracingLimit) elements.stylusTracingLimit.value = String(state.stylusTracingLimit);
+if (elements.stylusTracingLimitValue) {
+  elements.stylusTracingLimitValue.value = `${Math.round(state.stylusTracingLimit * 100)}%`;
+}
 initialise().catch(error => setStatus(error.message));

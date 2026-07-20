@@ -1,69 +1,69 @@
 "use strict";
 
+import {
+  contiguousPcmEnd,
+  copyPcmWindow,
+  mergePcmWrittenRange,
+  pcmRangeIsWritten,
+  planPcmWindow,
+  PCM_SEAM_HALF_SAMPLES,
+  repairPcmSeam,
+} from "./pcm-window-helpers.js";
+
 const state = {
   sampleRate: 48000,
   totalFrames: 0,
   channelCount: 0,
-  chunkFrames: 48000,
   channels: [],
   banks: [],
   windowFrames: 0,
   nextBank: 0,
   generation: 0,
-  availableStart: 0,
   availableEnd: 0,
   writtenRanges: [],
+  seamBoundaries: new Set(),
 };
 
-// Merges [start, end) into the sorted, non-overlapping writtenRanges list and
-// returns the contiguous-from-zero coverage end (0 if frame zero is not yet
-// covered). Disjoint ranges (e.g. a later chunk arriving before an earlier
-// one) are retained but never reported as available until the gap closes.
-function mergeWrittenRange(start, end) {
-  const ranges = state.writtenRanges;
-  let inserted = false;
-  for (let index = 0; index < ranges.length; index += 1) {
-    if (end < ranges[index][0]) {
-      ranges.splice(index, 0, [start, end]);
-      inserted = true;
-      break;
-    }
-    if (start <= ranges[index][1]) {
-      ranges[index][0] = Math.min(ranges[index][0], start);
-      ranges[index][1] = Math.max(ranges[index][1], end);
-      inserted = true;
-      break;
-    }
-  }
-  if (!inserted) {
-    ranges.push([start, end]);
-  }
-  for (let index = ranges.length - 1; index > 0; index -= 1) {
-    if (ranges[index - 1][1] >= ranges[index][0]) {
-      ranges[index - 1][1] = Math.max(ranges[index - 1][1], ranges[index][1]);
-      ranges.splice(index, 1);
-    }
-  }
-  return ranges.length && ranges[0][0] === 0 ? ranges[0][1] : 0;
-}
-
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
+function postWorkerError(stage, message, requestId) {
+  postMessage({ type: "worker-error", stage, message, requestId });
 }
 
 function initialise(message) {
   state.sampleRate = Math.max(1, Number(message.sampleRate) || 48000);
   state.totalFrames = Math.max(1, Math.floor(Number(message.totalFrames) || 1));
-  state.channelCount = Math.max(1, Math.floor(Number(message.channelCount) || 2));
-  state.chunkFrames = Math.max(1024, Math.floor(Number(message.chunkFrames) || state.sampleRate));
-  state.windowFrames = Math.max(4096, Math.floor(Number(message.windowFrames) || state.sampleRate * 12));
-  state.banks = (message.bankBuffers || []).map(bankBuffers =>
+  state.channelCount = Math.max(1, Math.min(2, Math.floor(Number(message.channelCount) || 2)));
+  state.windowFrames = Math.max(4096, Math.min(
+    state.totalFrames,
+    Math.floor(Number(message.windowFrames) || state.sampleRate * 12),
+  ));
+  const banks = (message.bankBuffers || []).map(bankBuffers =>
     bankBuffers.map(buffer => new Float32Array(buffer))
   );
+  state.banks = banks.length > 0 && banks.every(bank => (
+    bank.length === state.channelCount
+    && bank.every(channel => channel.length >= state.windowFrames)
+  )) ? banks : [];
   state.channels = Array.from({ length: state.channelCount }, () => new Int16Array(state.totalFrames));
-  state.availableStart = 0;
+  state.nextBank = 0;
+  state.generation = 0;
   state.availableEnd = 0;
   state.writtenRanges = [];
+  state.seamBoundaries = new Set();
+}
+
+function repairAvailableSeams(updatedStart, updatedEnd) {
+  const repairs = [];
+  const radius = PCM_SEAM_HALF_SAMPLES + 2;
+  for (const boundary of state.seamBoundaries) {
+    if (boundary + radius < updatedStart || boundary - radius > updatedEnd) continue;
+    if (!pcmRangeIsWritten(state.writtenRanges, boundary - radius, boundary + radius)) continue;
+    const repair = repairPcmSeam(state.channels, boundary);
+    if (repair) {
+      repairs.push(repair);
+      state.seamBoundaries.delete(boundary);
+    }
+  }
+  return repairs;
 }
 
 function appendSegment(segment) {
@@ -78,80 +78,121 @@ function appendSegment(segment) {
     end > start &&
     end <= state.totalFrames &&
     buffers.length === state.channelCount &&
-    buffers.every((buffer) => buffer && new Int16Array(buffer).length === frameCount)
+    buffers.every(buffer => buffer && new Int16Array(buffer).length === frameCount)
   );
-  if (!segmentValid) return;
+  if (!segmentValid) {
+    throw new Error(
+      `Rejected malformed PCM segment startFrame=${segment?.startFrame} endFrame=${segment?.endFrame} buffers=${buffers.length} expectedChannels=${state.channelCount}`,
+    );
+  }
   for (let channel = 0; channel < state.channelCount; channel += 1) {
     state.channels[channel].set(new Int16Array(buffers[channel]), start);
   }
-  state.availableEnd = mergeWrittenRange(start, end);
-  state.availableStart = state.availableEnd > 0 ? 0 : state.totalFrames;
+  if (start > 0 && segment.workletSeamRepair !== false) {
+    state.seamBoundaries.add(start);
+  } else if (segment.workletSeamRepair === false) {
+    state.seamBoundaries.delete(start);
+  }
+  mergePcmWrittenRange(state.writtenRanges, start, end);
+  state.availableEnd = contiguousPcmEnd(state.writtenRanges);
+  return repairAvailableSeams(start, end);
 }
 
-function fillWindow(position, resetPosition, requestId) {
-  if (!state.banks.length || !state.totalFrames || state.availableEnd <= state.availableStart) return;
-  const bankIndex = state.nextBank;
-  state.nextBank = (state.nextBank + 1) % state.banks.length;
-  const half = Math.floor(state.windowFrames / 2);
-  const maxStart = Math.max(0, state.totalFrames - state.windowFrames);
-  const requestedStart = clamp(Math.round(position) - half, 0, maxStart);
-  const start = Math.min(requestedStart, Math.max(0, state.availableEnd - 1));
-  const length = Math.min(state.windowFrames, state.totalFrames - start);
-  const bank = state.banks[bankIndex];
+function fillWindow(position, resetPosition, requestId, workletRequestId = 0) {
+  const plan = planPcmWindow({
+    position,
+    totalFrames: state.totalFrames,
+    availableEnd: state.availableEnd,
+    windowFrames: state.windowFrames,
+  });
+  if (!plan) {
+    postMessage({
+      type: "window-unavailable",
+      requestId,
+      position: Math.max(0, Number(position) || 0),
+      availableStart: 0,
+      availableEnd: state.availableEnd,
+      totalFrames: state.totalFrames,
+      workletRequestId: Math.max(0, Math.floor(Number(workletRequestId) || 0)),
+    });
+    return;
+  }
 
-  for (let channel = 0; channel < state.channelCount; channel += 1) {
-    const target = bank[channel];
-    target.fill(0);
-    const copyStart = Math.max(start, state.availableStart);
-    const copyEnd = Math.min(start + length, state.availableEnd);
-    if (copyEnd > copyStart) {
-      const source = state.channels[channel].subarray(copyStart, copyEnd);
-      const targetOffset = copyStart - start;
-      for (let frame = 0; frame < source.length; frame += 1) {
-        target[targetOffset + frame] = source[frame] / 32768;
-      }
-    }
+  let bankIndex = -1;
+  let channelBuffers;
+  let transfer = [];
+  if (state.banks.length) {
+    bankIndex = state.nextBank;
+    state.nextBank = (state.nextBank + 1) % state.banks.length;
+    const bank = state.banks[bankIndex];
+    copyPcmWindow(state.channels, plan, bank);
+    channelBuffers = [];
+  } else {
+    const channels = copyPcmWindow(state.channels, plan);
+    channelBuffers = channels.map(channel => channel.buffer);
+    transfer = channelBuffers;
   }
 
   state.generation += 1;
   postMessage({
     type: "window-ready",
     bankIndex,
-    start,
-    length,
-    availableStart: state.availableStart,
+    channelBuffers,
+    start: plan.start,
+    length: plan.length,
+    availableStart: 0,
     availableEnd: state.availableEnd,
     totalFrames: state.totalFrames,
     sampleRate: state.sampleRate,
     generation: state.generation,
     resetPosition: Boolean(resetPosition),
-    position: clamp(Number(position) || 0, 0, Math.max(0, state.totalFrames - 1)),
+    position: plan.position,
     requestId,
-  });
+    workletRequestId: Math.max(0, Math.floor(Number(workletRequestId) || 0)),
+  }, transfer);
 }
 
 self.onmessage = event => {
   const message = event.data || {};
-  if (message.type === "init-progressive") {
-    initialise(message);
-    postMessage({ type: "initialised", totalFrames: state.totalFrames, sampleRate: state.sampleRate });
-    return;
-  }
-  if (message.type === "append-segments") {
-    const segments = Array.isArray(message.segments) ? message.segments : [];
-    for (const segment of segments) appendSegment(segment);
-    if (segments.length) fillWindow(Number(message.position) || 0, Boolean(message.resetPosition), message.requestId);
-    return;
-  }
-  if (message.type === "init") {
-    initialise(message);
-    const buffers = Array.isArray(message.channelBuffers) ? message.channelBuffers : [];
-    appendSegment({ startFrame: 0, endFrame: state.totalFrames, channelBuffers: buffers });
-    postMessage({ type: "initialised", totalFrames: state.totalFrames, sampleRate: state.sampleRate });
-    fillWindow(0, true, message.requestId);
-    return;
-  }
-  if (message.type === "request-window") {
-    fillWindow(message.position, message.resetPosition, message.requestId);
+  try {
+    if (message.type === "init-progressive") {
+      initialise(message);
+      postMessage({
+        type: "initialised",
+        totalFrames: state.totalFrames,
+        sampleRate: state.sampleRate,
+        channelCount: state.channelCount,
+        windowFrames: state.windowFrames,
+        shared: state.banks.length > 0,
+      });
+      return;
+    }
+    if (message.type === "append-segments") {
+      const segments = Array.isArray(message.segments) ? message.segments : [];
+      const repairs = [];
+      for (const segment of segments) repairs.push(...appendSegment(segment));
+      postMessage({
+        type: "availability",
+        availableStart: 0,
+        availableEnd: state.availableEnd,
+        totalFrames: state.totalFrames,
+        seamRepairs: repairs,
+      });
+      return;
+    }
+    if (message.type === "request-window") {
+      fillWindow(
+        message.position,
+        message.resetPosition,
+        message.requestId,
+        message.workletRequestId,
+      );
+      return;
+    }
+    if (message.type === "reset") {
+      initialise({ sampleRate: 48000, totalFrames: 1, channelCount: 1, windowFrames: 4096 });
+    }
+  } catch (error) {
+    postWorkerError(message.type || "message", error instanceof Error ? error.message : String(error), message.requestId);
   }
 };

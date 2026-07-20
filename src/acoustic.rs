@@ -3,11 +3,14 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 use crate::{
+    mixer::{sharp_crossfader_gains, DEFAULT_SHARP_CROSSFADER_WIDTH},
     resampler::adaptive_sample,
     scratch_gate::{ScratchGate, ScratchPreset},
 };
 
 const OUTPUT_GAIN: f64 = 1.0;
+const MAX_FINAL_OUTPUT_GAIN: f64 = 4.0;
+const MAX_FINAL_OUTPUT_GAIN_RAMP_MS: f64 = 60_000.0;
 const RATE_SPRING_OMEGA: f64 = 70.0;
 const RATE_SPRING_ZETA: f64 = 0.85;
 const POSITION_CATCHUP_SECONDS: f64 = 0.28;
@@ -332,6 +335,47 @@ pub struct AcousticStatus {
     pub output_length: usize,
 }
 
+#[derive(Clone, Debug)]
+struct AcousticReplaySnapshot {
+    config: AcousticConfig,
+    native_rpm: f64,
+    position: f64,
+    target_position: f64,
+    rate: f64,
+    rate_velocity: f64,
+    target_rate: f64,
+    wow_phase: f64,
+    flutter_phase: f64,
+    platter_rotation_turns: f64,
+    drag_lowpass_state: Vec<f64>,
+    high_frequency_acceleration_limiter: HighFrequencyAccelerationLimiter,
+    active: bool,
+    needle_lifted: bool,
+    hand_contact: bool,
+    grip: f64,
+    motor_rate: f64,
+    motor_delivered_rate: f64,
+    unpowered_throw_rate: f64,
+    ended: bool,
+    contact_impulse: f64,
+    last_effective_rate: f64,
+    noise_seed: u32,
+    last_noise: f64,
+    last_output_samples: Vec<f64>,
+    window_miss_frames: usize,
+    frames_since_motion: usize,
+    frames_since_window_request: usize,
+    scratch_gate: ScratchGate,
+    manual_fader_gain: f64,
+    output_gain_current: f64,
+    output_gain_target: f64,
+    output_gain_step: f64,
+    output_gain_remaining_frames: usize,
+    surface_bed: Option<SurfaceBed>,
+    needle_thump: Option<NeedleThump>,
+    needle_burst: Option<SurfaceBurst>,
+}
+
 #[wasm_bindgen]
 pub struct ScratchAcousticDsp {
     config: AcousticConfig,
@@ -372,6 +416,10 @@ pub struct ScratchAcousticDsp {
     scratch_gate: ScratchGate,
     scratch_gate_trace: Vec<f32>,
     manual_fader_gain: f64,
+    output_gain_current: f64,
+    output_gain_target: f64,
+    output_gain_step: f64,
+    output_gain_remaining_frames: usize,
     requested_window_position: Option<f64>,
     surface_asset: Vec<Vec<f32>>,
     surface_asset_rate: f64,
@@ -379,6 +427,7 @@ pub struct ScratchAcousticDsp {
     surface_bed: Option<SurfaceBed>,
     needle_thump: Option<NeedleThump>,
     needle_burst: Option<SurfaceBurst>,
+    replay_snapshot: Option<Box<AcousticReplaySnapshot>>,
 }
 
 #[wasm_bindgen]
@@ -451,6 +500,10 @@ impl ScratchAcousticDsp {
             scratch_gate: ScratchGate::default(),
             scratch_gate_trace: Vec::new(),
             manual_fader_gain: 1.0,
+            output_gain_current: 1.0,
+            output_gain_target: 1.0,
+            output_gain_step: 0.0,
+            output_gain_remaining_frames: 0,
             requested_window_position: None,
             surface_asset: Vec::new(),
             surface_asset_rate: 48_000.0,
@@ -458,6 +511,7 @@ impl ScratchAcousticDsp {
             surface_bed: None,
             needle_thump: None,
             needle_burst: None,
+            replay_snapshot: None,
         }
     }
 
@@ -473,7 +527,8 @@ impl ScratchAcousticDsp {
         if !source_sample_rate.is_finite() || source_sample_rate <= 0.0 {
             return Err(JsValue::from_str("sourceSampleRate must be positive"));
         }
-        let mut copied_channels = Vec::with_capacity(channels.length() as usize);
+        let channel_count = channels.length() as usize;
+        let mut channel_length = None;
         for value in channels.iter() {
             if !value.is_instance_of::<Float32Array>() {
                 return Err(JsValue::from_str(
@@ -481,27 +536,32 @@ impl ScratchAcousticDsp {
                 ));
             }
             let typed = Float32Array::new(&value);
-            let mut samples = vec![0.0_f32; typed.length() as usize];
-            typed.copy_to(&mut samples);
-            copied_channels.push(samples);
+            let length = typed.length() as usize;
+            if channel_length.is_some_and(|expected| expected != length) {
+                return Err(JsValue::from_str("source channels must have equal lengths"));
+            }
+            channel_length = Some(length);
         }
-        if copied_channels.is_empty() || copied_channels[0].is_empty() {
+        let Some(length) = channel_length.filter(|length| *length > 0) else {
             return Err(JsValue::from_str(
                 "at least one non-empty source channel is required",
             ));
-        }
-        let length = copied_channels[0].len();
-        if copied_channels
-            .iter()
-            .any(|channel| channel.len() != length)
-        {
-            return Err(JsValue::from_str("source channels must have equal lengths"));
+        };
+
+        // Window swaps are realtime control work. Reuse the active channel
+        // allocations when geometry is stable so a normal progressive swap is
+        // one bounded copy per channel rather than allocation + copy + drop.
+        self.channels.resize_with(channel_count, Vec::new);
+        for (channel_index, value) in channels.iter().enumerate() {
+            let typed = Float32Array::new(&value);
+            let destination = &mut self.channels[channel_index];
+            destination.resize(length, 0.0);
+            typed.copy_to(destination);
         }
         self.source_sample_rate = source_sample_rate;
         self.window_start = window_start as usize;
         self.window_end = self.window_start.saturating_add(length);
         self.total_frames = (total_frames as usize).max(self.window_end);
-        self.channels = copied_channels;
         if let Some(position) = reset_position {
             self.reset_position(position);
         }
@@ -651,9 +711,144 @@ impl ScratchAcousticDsp {
         Ok(())
     }
 
+    #[wasm_bindgen(js_name = setManualCrossfader)]
+    pub fn set_manual_crossfader(&mut self, position: f64) -> Result<(), JsValue> {
+        if !valid_unit_interval(position) {
+            return Err(JsValue::from_str(
+                "manualCrossfader must be between 0 and 1",
+            ));
+        }
+        self.manual_fader_gain =
+            f64::from(sharp_crossfader_gains(position as f32, DEFAULT_SHARP_CROSSFADER_WIDTH).0);
+        Ok(())
+    }
+
     #[wasm_bindgen(getter, js_name = manualFaderGain)]
     pub fn manual_fader_gain(&self) -> f64 {
         self.manual_fader_gain
+    }
+
+    /// Final post-mix gain used by the host for packet and mixer level. A
+    /// linear ramp starts from the gain active at the next rendered frame.
+    #[wasm_bindgen(js_name = setOutputGain)]
+    pub fn set_output_gain(&mut self, gain: f64, ramp_ms: f64) -> Result<(), JsValue> {
+        if !gain.is_finite() || !(0.0..=MAX_FINAL_OUTPUT_GAIN).contains(&gain) {
+            return Err(JsValue::from_str("outputGain must be between 0 and 4"));
+        }
+        if !ramp_ms.is_finite() || !(0.0..=MAX_FINAL_OUTPUT_GAIN_RAMP_MS).contains(&ramp_ms) {
+            return Err(JsValue::from_str(
+                "outputGain rampMs must be between 0 and 60000",
+            ));
+        }
+        if ramp_ms == 0.0 || gain == self.output_gain_current {
+            self.output_gain_current = gain;
+            self.output_gain_target = gain;
+            self.output_gain_step = 0.0;
+            self.output_gain_remaining_frames = 0;
+            return Ok(());
+        }
+
+        let ramp_frames = (self.output_sample_rate * ramp_ms / 1_000.0)
+            .round()
+            .max(1.0);
+        if !ramp_frames.is_finite() || ramp_frames > usize::MAX as f64 {
+            return Err(JsValue::from_str(
+                "outputGain ramp exceeds the supported frame count",
+            ));
+        }
+        self.output_gain_target = gain;
+        self.output_gain_remaining_frames = ramp_frames as usize;
+        self.output_gain_step =
+            (gain - self.output_gain_current) / self.output_gain_remaining_frames.max(1) as f64;
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = captureReplayState)]
+    pub fn capture_replay_state(&mut self) {
+        self.replay_snapshot = Some(Box::new(AcousticReplaySnapshot {
+            config: self.config,
+            native_rpm: self.native_rpm,
+            position: self.position,
+            target_position: self.target_position,
+            rate: self.rate,
+            rate_velocity: self.rate_velocity,
+            target_rate: self.target_rate,
+            wow_phase: self.wow_phase,
+            flutter_phase: self.flutter_phase,
+            platter_rotation_turns: self.platter_rotation_turns,
+            drag_lowpass_state: self.drag_lowpass_state.clone(),
+            high_frequency_acceleration_limiter: self.high_frequency_acceleration_limiter.clone(),
+            active: self.active,
+            needle_lifted: self.needle_lifted,
+            hand_contact: self.hand_contact,
+            grip: self.grip,
+            motor_rate: self.motor_rate,
+            motor_delivered_rate: self.motor_delivered_rate,
+            unpowered_throw_rate: self.unpowered_throw_rate,
+            ended: self.ended,
+            contact_impulse: self.contact_impulse,
+            last_effective_rate: self.last_effective_rate,
+            noise_seed: self.noise_seed,
+            last_noise: self.last_noise,
+            last_output_samples: self.last_output_samples.clone(),
+            window_miss_frames: self.window_miss_frames,
+            frames_since_motion: self.frames_since_motion,
+            frames_since_window_request: self.frames_since_window_request,
+            scratch_gate: self.scratch_gate.clone(),
+            manual_fader_gain: self.manual_fader_gain,
+            output_gain_current: self.output_gain_current,
+            output_gain_target: self.output_gain_target,
+            output_gain_step: self.output_gain_step,
+            output_gain_remaining_frames: self.output_gain_remaining_frames,
+            surface_bed: self.surface_bed.clone(),
+            needle_thump: self.needle_thump,
+            needle_burst: self.needle_burst.clone(),
+        }));
+    }
+
+    #[wasm_bindgen(js_name = restoreReplayState)]
+    pub fn restore_replay_state(&mut self) -> bool {
+        let Some(snapshot) = self.replay_snapshot.take() else {
+            return false;
+        };
+        self.config = snapshot.config;
+        self.native_rpm = snapshot.native_rpm;
+        self.position = snapshot.position;
+        self.target_position = snapshot.target_position;
+        self.rate = snapshot.rate;
+        self.rate_velocity = snapshot.rate_velocity;
+        self.target_rate = snapshot.target_rate;
+        self.wow_phase = snapshot.wow_phase;
+        self.flutter_phase = snapshot.flutter_phase;
+        self.platter_rotation_turns = snapshot.platter_rotation_turns;
+        self.drag_lowpass_state = snapshot.drag_lowpass_state;
+        self.high_frequency_acceleration_limiter = snapshot.high_frequency_acceleration_limiter;
+        self.active = snapshot.active;
+        self.needle_lifted = snapshot.needle_lifted;
+        self.hand_contact = snapshot.hand_contact;
+        self.grip = snapshot.grip;
+        self.motor_rate = snapshot.motor_rate;
+        self.motor_delivered_rate = snapshot.motor_delivered_rate;
+        self.unpowered_throw_rate = snapshot.unpowered_throw_rate;
+        self.ended = snapshot.ended;
+        self.contact_impulse = snapshot.contact_impulse;
+        self.last_effective_rate = snapshot.last_effective_rate;
+        self.noise_seed = snapshot.noise_seed;
+        self.last_noise = snapshot.last_noise;
+        self.last_output_samples = snapshot.last_output_samples;
+        self.window_miss_frames = snapshot.window_miss_frames;
+        self.frames_since_motion = snapshot.frames_since_motion;
+        self.frames_since_window_request = snapshot.frames_since_window_request;
+        self.scratch_gate = snapshot.scratch_gate;
+        self.manual_fader_gain = snapshot.manual_fader_gain;
+        self.output_gain_current = snapshot.output_gain_current;
+        self.output_gain_target = snapshot.output_gain_target;
+        self.output_gain_step = snapshot.output_gain_step;
+        self.output_gain_remaining_frames = snapshot.output_gain_remaining_frames;
+        self.surface_bed = snapshot.surface_bed;
+        self.needle_thump = snapshot.needle_thump;
+        self.needle_burst = snapshot.needle_burst;
+        true
     }
 
     #[wasm_bindgen(js_name = setHighFrequencyAccelerationLimit)]
@@ -824,7 +1019,7 @@ impl ScratchAcousticDsp {
     }
 
     #[wasm_bindgen(js_name = render)]
-    pub fn render(&mut self, frame_count: u32, output_channel_count: u32) {
+    pub fn render(&mut self, frame_count: u32, output_channel_count: u32) -> u32 {
         let frame_count = frame_count as usize;
         let output_channel_count = (output_channel_count as usize).clamp(1, 2);
         self.output
@@ -833,7 +1028,7 @@ impl ScratchAcousticDsp {
         self.scratch_gate_trace.resize(frame_count, 1.0);
         self.requested_window_position = None;
         if frame_count == 0 {
-            return;
+            return 0;
         }
         if !self.active || self.channels.is_empty() || self.total_frames <= 1 {
             let gate_contact = self.active && self.hand_contact;
@@ -847,7 +1042,8 @@ impl ScratchAcousticDsp {
             self.mix_foley(frame_count, output_channel_count);
             self.apply_scratch_gate_trace(frame_count, output_channel_count);
             self.apply_manual_fader_gain();
-            return;
+            self.apply_output_gain(frame_count, output_channel_count);
+            return u32::try_from(frame_count).unwrap_or(u32::MAX);
         }
         self.drag_lowpass_state.resize(output_channel_count, 0.0);
         self.last_output_samples.resize(output_channel_count, 0.0);
@@ -871,6 +1067,8 @@ impl ScratchAcousticDsp {
             .round()
             .max(1.0);
 
+        let mut rendered_frames = frame_count;
+        let mut ended_this_render = false;
         for frame in 0..frame_count {
             self.frames_since_motion = self.frames_since_motion.saturating_add(1);
             self.grip += (grip_target - self.grip) * grip_alpha;
@@ -1068,6 +1266,8 @@ impl ScratchAcousticDsp {
                 {
                     self.ended = true;
                     self.motor_rate = 0.0;
+                    rendered_frames = frame + 1;
+                    ended_this_render = true;
                 }
             }
             self.last_effective_rate = effective_rate;
@@ -1077,11 +1277,16 @@ impl ScratchAcousticDsp {
             } else {
                 0
             };
+            if ended_this_render {
+                break;
+            }
         }
-        self.mix_foley(frame_count, output_channel_count);
-        self.apply_scratch_gate_trace(frame_count, output_channel_count);
+        self.mix_foley(rendered_frames, output_channel_count);
+        self.apply_scratch_gate_trace(rendered_frames, output_channel_count);
         self.apply_manual_fader_gain();
-        self.maybe_request_window(frame_count);
+        self.apply_output_gain(rendered_frames, output_channel_count);
+        self.maybe_request_window(rendered_frames);
+        u32::try_from(rendered_frames).unwrap_or(u32::MAX)
     }
 
     #[wasm_bindgen(js_name = renderWindowMissing)]
@@ -1114,6 +1319,7 @@ impl ScratchAcousticDsp {
         self.mix_foley(frame_count, output_channel_count);
         self.apply_scratch_gate_trace(frame_count, output_channel_count);
         self.apply_manual_fader_gain();
+        self.apply_output_gain(frame_count, output_channel_count);
     }
 
     /// Render only cartridge/surface foley while keeping the programme readhead
@@ -1167,6 +1373,7 @@ impl ScratchAcousticDsp {
         self.mix_foley(frame_count, output_channel_count);
         self.apply_scratch_gate_trace(frame_count, output_channel_count);
         self.apply_manual_fader_gain();
+        self.apply_output_gain(frame_count, output_channel_count);
     }
 
     #[wasm_bindgen(getter, js_name = outputPtr)]
@@ -1453,6 +1660,32 @@ impl ScratchAcousticDsp {
         }
     }
 
+    fn apply_output_gain(&mut self, frame_count: usize, output_channel_count: usize) {
+        if frame_count == 0
+            || (self.output_gain_remaining_frames == 0 && self.output_gain_current == 1.0)
+        {
+            return;
+        }
+
+        for frame in 0..frame_count {
+            let gain = self.output_gain_current as f32;
+            if gain != 1.0 {
+                for channel_index in 0..output_channel_count {
+                    self.output[frame * output_channel_count + channel_index] *= gain;
+                }
+            }
+            if self.output_gain_remaining_frames > 0 {
+                self.output_gain_remaining_frames -= 1;
+                if self.output_gain_remaining_frames == 0 {
+                    self.output_gain_current = self.output_gain_target;
+                    self.output_gain_step = 0.0;
+                } else {
+                    self.output_gain_current += self.output_gain_step;
+                }
+            }
+        }
+    }
+
     fn mix_foley(&mut self, frame_count: usize, output_channel_count: usize) {
         if !self.config.surface_enabled
             || (self.surface_bed.is_none()
@@ -1704,27 +1937,37 @@ impl ScratchAcousticDsp {
         {
             return;
         }
+        let start = self.window_start as f64;
+        let end = self.window_end as f64;
+        let window_span = (end - start).max(1.0);
+        // A fixed high-rate margin can consume half of a smaller bounded
+        // window and request a replacement every throttle interval. Keep both
+        // the edge margin and directional look-ahead within one-sixth of the
+        // active span: normal-speed values stay unchanged, while ±8–16x still
+        // retain a useful reverse runway after a centered swap.
+        let directional_runway = (window_span / 6.0).max(256.0);
         let margin =
             (WINDOW_REQUEST_MARGIN_SECONDS * self.source_sample_rate * (speed * 0.5).max(1.0))
-                .max(256.0);
-        let projected = self.clamp_source_position(
-            self.position
-                + self.last_effective_rate
-                    * self.source_sample_rate
-                    * WINDOW_REQUEST_PROJECT_SECONDS,
-        );
+                .max(256.0)
+                .min(directional_runway);
+        let projected_offset =
+            (self.last_effective_rate * self.source_sample_rate * WINDOW_REQUEST_PROJECT_SECONDS)
+                .clamp(-directional_runway, directional_runway);
+        let projected = self.clamp_source_position(self.position + projected_offset);
         let request = if self.last_effective_rate < 0.0 {
             self.position.min(projected)
         } else {
             self.position.max(projected)
         };
-        let start = self.window_start as f64;
-        let end = self.window_end as f64;
-        if self.position < start + margin
-            || self.position > end - margin
-            || request < start + margin
-            || request > end - margin
-        {
+        let approaching_active_edge = if self.last_effective_rate < 0.0 {
+            self.window_start > 0 && (self.position < start + margin || request < start + margin)
+        } else if self.last_effective_rate > 0.0 {
+            self.window_end < self.total_frames
+                && (self.position > end - margin || request > end - margin)
+        } else {
+            false
+        };
+        if approaching_active_edge {
             self.frames_since_window_request = 0;
             self.requested_window_position = Some(request);
         }
@@ -1850,6 +2093,108 @@ mod tests {
         dsp.rate = rate;
         dsp.rate_velocity = 0.0;
         dsp
+    }
+
+    #[test]
+    fn six_second_window_prefetch_is_bounded_without_high_rate_request_churn() {
+        const WINDOW_FRAMES: usize = 48_000 * 6;
+        const WINDOW_START: usize = 1_000_000;
+        let half_window = WINDOW_FRAMES as f64 / 2.0;
+        let runway = WINDOW_FRAMES as f64 / 6.0;
+
+        for rate in [8.0, 10.0, 16.0, -8.0, -10.0, -16.0] {
+            let mut dsp = ScratchAcousticDsp::new_internal(48_000.0, AcousticConfig::default());
+            dsp.source_sample_rate = 48_000.0;
+            dsp.channels = vec![vec![0.0; WINDOW_FRAMES]];
+            dsp.window_start = WINDOW_START;
+            dsp.window_end = WINDOW_START + WINDOW_FRAMES;
+            dsp.total_frames = 8_000_000;
+            dsp.position = WINDOW_START as f64 + half_window;
+            dsp.last_effective_rate = rate;
+            dsp.frames_since_window_request = 48_000;
+
+            dsp.maybe_request_window(0);
+            assert!(
+                dsp.requested_window_position.is_none(),
+                "{rate}x requested immediately from the centre"
+            );
+
+            dsp.position = if rate > 0.0 {
+                dsp.window_end as f64 - runway + 1.0
+            } else {
+                dsp.window_start as f64 + runway - 1.0
+            };
+            dsp.frames_since_window_request = 48_000;
+            dsp.maybe_request_window(0);
+            let request = dsp
+                .requested_window_position
+                .take()
+                .unwrap_or_else(|| panic!("{rate}x did not request near its travel edge"));
+            assert!(
+                (request - dsp.position).abs() <= runway + f64::EPSILON,
+                "{rate}x projected beyond its bounded runway"
+            );
+
+            dsp.window_start = (request - half_window).round() as usize;
+            dsp.window_end = dsp.window_start + WINDOW_FRAMES;
+            dsp.frames_since_window_request = 48_000;
+            dsp.maybe_request_window(0);
+            assert!(
+                dsp.requested_window_position.is_none(),
+                "{rate}x immediately churned after a centered replacement"
+            );
+        }
+    }
+
+    #[test]
+    fn window_prefetch_ignores_trailing_and_terminal_physical_edges() {
+        const WINDOW_FRAMES: usize = 48_000 * 6;
+        let mut dsp = ScratchAcousticDsp::new_internal(48_000.0, AcousticConfig::default());
+        dsp.source_sample_rate = 48_000.0;
+        dsp.channels = vec![vec![0.0; WINDOW_FRAMES]];
+        dsp.total_frames = 2_000_000;
+
+        dsp.window_start = 0;
+        dsp.window_end = WINDOW_FRAMES;
+        dsp.position = 1_000.0;
+        dsp.last_effective_rate = 1.0;
+        dsp.frames_since_window_request = 48_000;
+        dsp.maybe_request_window(0);
+        assert!(
+            dsp.requested_window_position.is_none(),
+            "forward playback churned against the start-anchored edge"
+        );
+
+        dsp.window_start = dsp.total_frames - WINDOW_FRAMES;
+        dsp.window_end = dsp.total_frames;
+        dsp.position = dsp.window_end as f64 - 1_000.0;
+        dsp.last_effective_rate = -1.0;
+        dsp.frames_since_window_request = 48_000;
+        dsp.maybe_request_window(0);
+        assert!(
+            dsp.requested_window_position.is_none(),
+            "reverse playback churned against the end-anchored edge"
+        );
+
+        dsp.position = dsp.window_end as f64 - 1_000.0;
+        dsp.last_effective_rate = 1.0;
+        dsp.frames_since_window_request = 48_000;
+        dsp.maybe_request_window(0);
+        assert!(
+            dsp.requested_window_position.is_none(),
+            "forward playback requested beyond the physical programme end"
+        );
+
+        dsp.window_start = 0;
+        dsp.window_end = WINDOW_FRAMES;
+        dsp.position = 1_000.0;
+        dsp.last_effective_rate = -1.0;
+        dsp.frames_since_window_request = 48_000;
+        dsp.maybe_request_window(0);
+        assert!(
+            dsp.requested_window_position.is_none(),
+            "reverse playback requested before the physical programme start"
+        );
     }
 
     fn output_rms(dsp: &ScratchAcousticDsp) -> f64 {
@@ -2288,6 +2633,151 @@ mod tests {
     }
 
     #[test]
+    fn manual_crossfader_uses_the_shared_sharp_rust_curve() {
+        let mut dsp = simulation_dsp();
+        for (position, expected) in [(0.0, 0.0), (0.04, 0.5), (0.08, 1.0), (0.5, 1.0)] {
+            dsp.set_manual_crossfader(position).unwrap();
+            assert!(
+                (dsp.manual_fader_gain() - expected).abs() < 1e-6,
+                "position {position} produced {}",
+                dsp.manual_fader_gain(),
+            );
+        }
+        assert_eq!(
+            crate::PlayerConfig::default().sharp_crossfader_width,
+            DEFAULT_SHARP_CROSSFADER_WIDTH,
+        );
+    }
+
+    #[test]
+    fn programme_end_returns_the_exact_rendered_prefix_and_zeroes_the_suffix() {
+        let mut dsp = ScratchAcousticDsp::new_internal(48_000.0, AcousticConfig::default());
+        dsp.source_sample_rate = 48_000.0;
+        dsp.channels = vec![vec![0.5_f32; 512], vec![-0.5_f32; 512]];
+        dsp.window_start = 0;
+        dsp.window_end = 512;
+        dsp.total_frames = 512;
+        dsp.set_effects(false, false);
+        dsp.start();
+        dsp.set_position(472.0, 0.0);
+        dsp.set_transport(false, 1.0, 0.0);
+        dsp.motor_delivered_rate = 1.0;
+        dsp.rate = 1.0;
+        dsp.rate_velocity = 0.0;
+        let quantum_ramp_ms = 128.0 * 1_000.0 / dsp.output_sample_rate;
+        dsp.set_output_gain(0.0, quantum_ramp_ms).unwrap();
+
+        let turns_before = dsp.platter_rotation_turns;
+        let rendered = dsp.render(128, 2);
+
+        assert_eq!(rendered, 37);
+        assert!(dsp.take_ended());
+        assert!(!dsp.take_ended());
+        assert_eq!(dsp.position, 509.0);
+        assert!(dsp.output[..rendered as usize * 2]
+            .iter()
+            .any(|sample| *sample != 0.0));
+        assert!(dsp.output[rendered as usize * 2..]
+            .iter()
+            .all(|sample| *sample == 0.0));
+        let expected_turns = 37.0 * dsp.native_rpm / (60.0 * dsp.output_sample_rate);
+        assert!((dsp.platter_rotation_turns - turns_before - expected_turns).abs() < 1e-12);
+        assert_eq!(dsp.output_gain_remaining_frames, 128 - rendered as usize);
+        assert!((dsp.output_gain_current - 91.0 / 128.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn replay_snapshot_restores_dynamic_dsp_state_without_restarting_inertia() {
+        let mut dsp = simulation_dsp();
+        dsp.channels[0].fill(0.5);
+        dsp.set_effects(false, false);
+        dsp.start();
+        dsp.set_position(2_400_000.0, 0.0);
+        dsp.set_transport(false, 1.0, 0.0);
+        dsp.motor_delivered_rate = 1.0;
+        dsp.rate = 1.0;
+        dsp.last_effective_rate = 1.0;
+        dsp.platter_rotation_turns = 12.5;
+        dsp.manual_fader_gain = 0.73;
+        dsp.capture_replay_state();
+
+        dsp.start();
+        dsp.set_position(10.0, 0.0);
+        dsp.set_transport(true, 0.0, -4.0);
+        dsp.platter_rotation_turns = -3.0;
+        dsp.manual_fader_gain = 0.0;
+
+        assert!(dsp.restore_replay_state());
+        assert!(!dsp.restore_replay_state());
+        assert_eq!(dsp.position, 2_400_000.0);
+        assert_eq!(dsp.motor_delivered_rate, 1.0);
+        assert_eq!(dsp.rate, 1.0);
+        assert_eq!(dsp.last_effective_rate, 1.0);
+        assert_eq!(dsp.platter_rotation_turns, 12.5);
+        assert_eq!(dsp.manual_fader_gain, 0.73);
+        dsp.render(32, 2);
+        assert!(dsp.last_effective_rate > 0.99);
+        assert!(dsp.output.iter().any(|sample| *sample != 0.0));
+    }
+
+    #[test]
+    fn output_gain_unity_preserves_normal_render_bit_for_bit() {
+        let mut default = scratch_signal_dsp(ScratchPreset::Baby, 1.0);
+        let mut explicit_unity = scratch_signal_dsp(ScratchPreset::Baby, 1.0);
+        explicit_unity.set_output_gain(1.0, 12.0).unwrap();
+        default.render(2_048, 2);
+        explicit_unity.render(2_048, 2);
+        assert_eq!(default.output, explicit_unity.output);
+    }
+
+    #[test]
+    fn output_gain_reaches_its_linear_ramp_target() {
+        let mut dsp = simulation_dsp();
+        let four_frames_ms = 4.0 * 1_000.0 / dsp.output_sample_rate;
+        dsp.set_output_gain(0.0, four_frames_ms).unwrap();
+        dsp.output = vec![1.0; 8];
+        dsp.apply_output_gain(4, 2);
+
+        assert_eq!(dsp.output, vec![1.0, 1.0, 0.75, 0.75, 0.5, 0.5, 0.25, 0.25],);
+        assert_eq!(dsp.output_gain_current, 0.0);
+        assert_eq!(dsp.output_gain_target, 0.0);
+        assert_eq!(dsp.output_gain_step, 0.0);
+        assert_eq!(dsp.output_gain_remaining_frames, 0);
+
+        dsp.output = vec![1.0; 2];
+        dsp.apply_output_gain(1, 2);
+        assert_eq!(dsp.output, vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn replay_snapshot_restores_output_gain_mid_ramp() {
+        let mut dsp = simulation_dsp();
+        let four_frames_ms = 4.0 * 1_000.0 / dsp.output_sample_rate;
+        dsp.set_output_gain(0.25, four_frames_ms).unwrap();
+        dsp.output = vec![1.0; 2];
+        dsp.apply_output_gain(2, 1);
+        dsp.capture_replay_state();
+
+        assert_eq!(dsp.output_gain_current, 0.625);
+        assert_eq!(dsp.output_gain_target, 0.25);
+        assert_eq!(dsp.output_gain_step, -0.1875);
+        assert_eq!(dsp.output_gain_remaining_frames, 2);
+
+        dsp.set_output_gain(2.0, 0.0).unwrap();
+        assert!(dsp.restore_replay_state());
+        assert_eq!(dsp.output_gain_current, 0.625);
+        assert_eq!(dsp.output_gain_target, 0.25);
+        assert_eq!(dsp.output_gain_step, -0.1875);
+        assert_eq!(dsp.output_gain_remaining_frames, 2);
+
+        dsp.output = vec![1.0; 2];
+        dsp.apply_output_gain(2, 1);
+        assert_eq!(dsp.output, vec![0.625, 0.4375]);
+        assert_eq!(dsp.output_gain_current, 0.25);
+        assert_eq!(dsp.output_gain_remaining_frames, 0);
+    }
+
+    #[test]
     fn manual_fader_gain_one_preserves_normal_render_bit_for_bit() {
         let mut default = scratch_signal_dsp(ScratchPreset::Baby, 1.0);
         let mut explicit_unity = scratch_signal_dsp(ScratchPreset::Baby, 1.0);
@@ -2313,6 +2803,35 @@ mod tests {
         let mut surface_unity = simulation_dsp();
         let mut surface_scaled = simulation_dsp();
         surface_scaled.set_manual_fader_gain(0.25).unwrap();
+        surface_unity.trigger_needle_drop();
+        surface_scaled.trigger_needle_drop();
+        surface_unity.render_surface(4_096, 2);
+        surface_scaled.render_surface(4_096, 2);
+        assert!(surface_unity
+            .output
+            .iter()
+            .any(|sample| sample.abs() > 1e-6));
+        for (unity, scaled) in surface_unity.output.iter().zip(&surface_scaled.output) {
+            assert_eq!(*scaled, *unity * 0.25);
+        }
+    }
+
+    #[test]
+    fn output_gain_scales_window_miss_and_surface_outputs() {
+        let mut miss_unity = simulation_dsp();
+        let mut miss_scaled = simulation_dsp();
+        miss_unity.last_output_samples = vec![0.8, -0.4];
+        miss_scaled.last_output_samples = vec![0.8, -0.4];
+        miss_scaled.set_output_gain(0.5, 0.0).unwrap();
+        miss_unity.render_window_missing(32, 2);
+        miss_scaled.render_window_missing(32, 2);
+        for (unity, scaled) in miss_unity.output.iter().zip(&miss_scaled.output) {
+            assert_eq!(*scaled, *unity * 0.5);
+        }
+
+        let mut surface_unity = simulation_dsp();
+        let mut surface_scaled = simulation_dsp();
+        surface_scaled.set_output_gain(0.25, 0.0).unwrap();
         surface_unity.trigger_needle_drop();
         surface_scaled.trigger_needle_drop();
         surface_unity.render_surface(4_096, 2);

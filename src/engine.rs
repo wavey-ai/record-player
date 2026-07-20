@@ -556,7 +556,10 @@ impl PlayerEngine {
         });
         self.commands.push(HostCommand::StopPacketPlayback {
             deck,
-            platter_handoff: false,
+            // A physical-region transition keeps the platter state alive. The
+            // worklet may already have entered automatic run-out on the exact
+            // programme-end frame, so this stop must be an idempotent handoff.
+            platter_handoff: true,
         });
         self.commands.push(HostCommand::StartSurfaceRegion {
             region,
@@ -1218,8 +1221,71 @@ mod tests {
     }
     #[test]
     fn sharp_crossfader_preserves_full_middle() {
-        let (a, b) = sharp_crossfader_gains(0.5, 0.08);
+        let (a, b) = sharp_crossfader_gains(0.5, DEFAULT_SHARP_CROSSFADER_WIDTH);
         assert_eq!((a, b), (1.0, 1.0));
+    }
+
+    #[test]
+    fn deadwax_transition_preserves_platter_handoff_and_command_order() {
+        let mut engine = PlayerEngine::default();
+        ready(&mut engine);
+        engine
+            .dispatch(PlayerEvent::TogglePlayback { deck: DeckId::A })
+            .unwrap();
+        engine.drain_commands();
+        engine
+            .dispatch(PlayerEvent::PlaybackEnded { deck: DeckId::A })
+            .unwrap();
+        engine.drain_commands();
+
+        engine
+            .dispatch(PlayerEvent::StartTimedRegion {
+                region: SurfaceRegion::Deadwax,
+                now_ms: 10.0,
+                duration_seconds: 3.6,
+            })
+            .unwrap();
+        let commands = engine.drain_commands();
+        let scratch_transport = commands
+            .iter()
+            .position(|command| {
+                matches!(
+                    command,
+                    HostCommand::SetScratchTransport {
+                        hand_contact: false,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let stop_packet = commands
+            .iter()
+            .position(|command| {
+                matches!(
+                    command,
+                    HostCommand::StopPacketPlayback {
+                        platter_handoff: true,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let start_surface = commands
+            .iter()
+            .position(|command| {
+                matches!(
+                    command,
+                    HostCommand::StartSurfaceRegion {
+                        region: SurfaceRegion::Deadwax,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        assert!(scratch_transport < stop_packet && stop_packet < start_surface);
+        assert!(!commands
+            .iter()
+            .any(|command| matches!(command, HostCommand::SetMotor { .. })));
     }
     #[test]
     fn scratch_interrupts_surface_region() {

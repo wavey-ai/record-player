@@ -1,3 +1,5 @@
+import { normalizeScratchPerformance } from "./scratch-performance-schema.js";
+
 const DB_NAME = "vin.yl.player";
 const DB_VERSION = 2;
 const STORE_NAME = "scratch-performances";
@@ -43,15 +45,17 @@ async function withStore(mode, callback) {
 }
 
 export async function saveScratchPerformance(performance) {
-  await withStore("readwrite", store => requestPromise(store.put(structuredClone(performance))));
-  return performance;
+  const normalized = normalizeScratchPerformance(performance);
+  await withStore("readwrite", store => requestPromise(store.put(structuredClone(normalized))));
+  return normalized;
 }
 
-export async function getScratchPerformance(id) {
-  return withStore("readonly", store => requestPromise(store.get(String(id))));
+export async function getScratchPerformance(id, target = {}) {
+  const performance = await withStore("readonly", store => requestPromise(store.get(String(id))));
+  return performance ? normalizeScratchPerformance(performance, target) : undefined;
 }
 
-export async function listScratchPerformances({ recordHash = "", limit = 100 } = {}) {
+export async function listScratchPerformances({ recordHash = "", limit = 100, target = {} } = {}) {
   return withStore("readonly", async store => {
     const request = recordHash
       ? store.index("recordHash").getAll(String(recordHash))
@@ -59,7 +63,8 @@ export async function listScratchPerformances({ recordHash = "", limit = 100 } =
     const records = await requestPromise(request);
     return records
       .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
-      .slice(0, Math.max(1, Number(limit) || 100));
+      .slice(0, Math.max(1, Number(limit) || 100))
+      .map(record => normalizeScratchPerformance(record, target));
   });
 }
 
