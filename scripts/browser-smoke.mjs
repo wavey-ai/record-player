@@ -128,8 +128,16 @@ class CdpSession {
     return response;
   }
 
-  close() {
+  async close() {
+    if (this.socket.readyState === 3) return;
+    let timeout = 0;
+    const closed = new Promise(resolveClose => {
+      this.socket.addEventListener("close", resolveClose, { once: true });
+      timeout = setTimeout(resolveClose, 1_000);
+    });
     this.socket.close();
+    await closed;
+    clearTimeout(timeout);
   }
 }
 
@@ -568,7 +576,12 @@ async function runBrowserScenario() {
     }
   }
 
-  await player.endScratch({ rotationDegrees: 0, resumePlayback: false });
+  await player.endScratch({
+    rotationDegrees: 0,
+    resumePlayback: false,
+    cancelled: true,
+    inputTimeMs: performance.now(),
+  });
   assert(player.getState().scratchGrip === 0, "The browser did not release scratch grip");
   await wait(120);
   unsubscribe();
@@ -585,8 +598,10 @@ async function runBrowserScenario() {
   assert(recordedGrip.includes(0.25), "The browser take did not record begin grip");
   assert(recordedGrip.includes(0.35) && recordedGrip.includes(0.85), "The browser take did not record motion grip");
   const recordedStart = recordedTake.events.find(event => event.type === "scratch-start");
+  const recordedEnd = recordedTake.events.find(event => event.type === "scratch-end");
   assert(recordedStart?.rate === -1.4, "The browser take did not record begin rate");
   assert(recordedStart?.impulse === 0.37, "The browser take did not record grab impulse");
+  assert(recordedEnd?.cancelled === true, "The browser take did not retain pointer cancellation");
   const delayedInputEvent = recordedTake.events.find(event => (
     event.type === "scratch-motion"
     && event.rate === 0.333
@@ -726,6 +741,7 @@ async function runBrowserScenario() {
       eventCount: recordedTake.events.length,
       durationFrames: recordedTake.durationFrames,
       engineVersion: recordedTake.engine.version,
+      cancellationStored: recordedEnd.cancelled,
       replaySeedStored: Number.isInteger(recordedTake.replaySeed),
       rotationStored: Number.isFinite(recordedTake.initialState.rotationDegrees),
       completedAndRestored: true,
@@ -1490,7 +1506,7 @@ try {
     blindAbx,
   }, null, 2)}\n`);
 } finally {
-  session?.close();
+  await session?.close();
   chrome.kill("SIGTERM");
   server.kill("SIGTERM");
   await Promise.race([

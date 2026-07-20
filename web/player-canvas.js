@@ -376,11 +376,16 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
     return Array.from(activeGestures.values()).some(gesture => gesture.kind === "record");
   }
 
+  function pointerEventTimeMs(event) {
+    const timestamp = Number(event?.timeStamp);
+    return Number.isFinite(timestamp) ? timestamp : performance.now();
+  }
+
   function scratchPointerSample(event, point, needleLifted) {
     const sample = {
       pointerId: event.pointerId,
       angleRadians: Math.atan2(point.y - latestGeometry.cy, point.x - latestGeometry.cx),
-      timeMs: Number.isFinite(Number(event.timeStamp)) ? Number(event.timeStamp) : performance.now(),
+      timeMs: pointerEventTimeMs(event),
       radius: Math.hypot(point.x - latestGeometry.cx, point.y - latestGeometry.cy),
       pressure: event.pressure,
       pointerType: event.pointerType,
@@ -461,7 +466,7 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
       grip: motion.grip,
       handContact: motion.handContact,
       needleLifted: motion.needleLifted,
-      inputTimeMs: Number(event.timeStamp) || performance.now(),
+      inputTimeMs: pointerEventTimeMs(event),
     });
   }
 
@@ -498,7 +503,7 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
         handContact: motion.handContact,
         needleLifted: motion.needleLifted,
         visualOnly: motion.visualOnly,
-        inputTimeMs: Number(sample.timeStamp) || performance.now(),
+        inputTimeMs: pointerEventTimeMs(sample),
       });
     }
     scheduleRender();
@@ -531,7 +536,7 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
         pressure: motion.pressure,
         grip: motion.grip,
         handContact: motion.handContact,
-        inputTimeMs: Number(event.timeStamp) || performance.now(),
+        inputTimeMs: pointerEventTimeMs(event),
       });
     }
     scheduleRender();

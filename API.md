@@ -116,7 +116,7 @@ RPM accepts a continuous value from 16 through 90. Volume and crossfader accept 
 ```js
 await player.beginScratch({ pointerId, rotationDegrees, grip: 0.65, inputTimeMs });
 await player.updateScratch({ positionFrames, rate, rotationDegrees, impulse, grip: 0.9, inputTimeMs });
-await player.endScratch({ rotationDegrees, resumePlayback: true, inputTimeMs });
+await player.endScratch({ rotationDegrees, resumePlayback: true, cancelled: false, inputTimeMs });
 
 player.setScratchPreset("flare");
 player.setScratchClicks(2);
@@ -128,6 +128,11 @@ the ordered Rust scratch protocol. A programmatic controller may supply
 `outputFrame` directly instead. Future frames are clamped to the current audio
 frame because live commands are not scheduled ahead. When both fields are
 omitted, the current output frame is used.
+
+Set `cancelled: true` when the browser or controller loses the active pointer.
+The record still releases safely, and deterministic capture retains the
+cancellation marker so device-validation traces can distinguish pointer loss
+from an intentional release.
 
 The manual crossfader and the audio-rate technique gate are independent:
 

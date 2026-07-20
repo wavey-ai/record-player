@@ -9,7 +9,7 @@ is made.
 Current automated evidence:
 
 - `cargo test --workspace`: 92 tests (87 `record-player`, 5 `player-wasm`).
-- `node --test test/*.test.mjs`: 74 tests. Canvas tests check audio-owned phase
+- `node --test test/*.test.mjs`: 75 tests. Canvas tests check audio-owned phase
   at half-speed forward, full-speed reverse and rest, plus all eight preset and
   click-count selections through independent mouse and touch gestures.
 - The default tonearm now consumes decoded programme-gap anchors through the
@@ -44,6 +44,8 @@ Current automated evidence:
   deliberately delayed browser marker must record within 512 frames of its
   independently calculated intent offset while applied-frame telemetry remains
   separate.
+  Pointer cancellation follows the same safe physical release, remains distinct
+  in the normalized take, and immediately frees canvas record ownership.
   It kept a trusted record touch active while a second touch moved XFADE. The
   API, trusted mouse, trusted touch and trusted keyboard paths each selected
   all eight presets and all eight click counts while XFADE remained at `0.37`.

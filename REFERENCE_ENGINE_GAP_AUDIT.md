@@ -146,7 +146,7 @@ measured audio-thread reason to make either change.
 ## Automated evidence
 
 - `cargo test --workspace`: 92 tests.
-- `node --test test/*.test.mjs`: 74 tests.
+- `node --test test/*.test.mjs`: 75 tests.
 - The canvas regression anchors the visible platter to audio-owned phase and
   covers half-speed forward motion, full-speed reverse motion and zero-rate
   hold. It rejects nominal-RPM animation.
@@ -188,6 +188,10 @@ measured audio-thread reason to make either change.
   must record within 512 frames of its independent browser-clock projection.
   Requested and applied output frames are exposed separately and must agree
   with latency telemetry.
+- Pointer-cancel and canvas-destroy paths release contact and grip, free record
+  ownership for the next pointer and retain `cancelled: true` in the normalized
+  performance trace. A valid zero DOM timestamp is preserved rather than
+  replaced by main-thread time.
 - It restored the pre-replay Rust state.
 - A second trusted touch moved and released XFADE.
 - The record touch remained active until its own release.

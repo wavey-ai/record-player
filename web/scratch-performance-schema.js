@@ -122,7 +122,10 @@ function normalizeEvent(value, index, sourceScale, outputScale) {
       event.rate = clamp(finite(value.rate, 0), -MAX_RATE, MAX_RATE);
       event.impulse = clamp(value.impulse, 0, 1);
       event.grip = value.type === "scratch-end" ? 0 : clamp(value.grip ?? 1, 0, 1);
-      if (value.type === "scratch-end") event.resumePlayback = value.resumePlayback !== false;
+      if (value.type === "scratch-end") {
+        event.resumePlayback = value.resumePlayback !== false;
+        event.cancelled = Boolean(value.cancelled);
+      }
     }
   } else if (value.type === "manual-crossfader") {
     event.value = clamp(value.value, 0, 1);

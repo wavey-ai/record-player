@@ -3832,7 +3832,7 @@ const api = Object.freeze({
     publishState();
     return Promise.resolve();
   },
-  endScratch: ({ rotationDegrees = state.rotation, resumePlayback = true, inputTimeMs, outputFrame } = {}) => {
+  endScratch: ({ rotationDegrees = state.rotation, resumePlayback = true, cancelled = false, inputTimeMs, outputFrame } = {}) => {
     if (!state.scratching || state.scratchReplayRequests.size) return Promise.resolve(false);
     state.scratching = false;
     state.scratchGrip = 0;
@@ -3840,7 +3840,7 @@ const api = Object.freeze({
     publishState();
     const timing = pointerAudioTiming(inputTimeMs, outputFrame);
     recordScratchEvent(
-      { type: "scratch-end", positionFrames: state.positionFrames, rate: 0, impulse: 0, grip: 0, resumePlayback: Boolean(resumePlayback) },
+      { type: "scratch-end", positionFrames: state.positionFrames, rate: 0, impulse: 0, grip: 0, resumePlayback: Boolean(resumePlayback), cancelled: Boolean(cancelled) },
       timing.outputFrame,
     );
     state.node?.port.postMessage({ type: "scratch", active: false, position: state.positionFrames, rate: 0, impulse: 0, grip: 0, ...timing });

@@ -34,6 +34,7 @@ test("schema v1 migrates source positions and timestamps onto separate clocks", 
   assert.equal(migrated.initialState.stylusTracingLimit, 0);
   assert.equal(migrated.events[1].frameOffset, 24_000);
   assert.ok(Math.abs(migrated.events[1].positionFrames - 96_000) < 1e-9);
+  assert.equal(migrated.events[2].cancelled, false);
 });
 
 test("schema v2 preserves equal-frame ordering and normalizes controls", () => {
@@ -148,4 +149,19 @@ test("scratch grip is bounded and old takes default to full contact", () => {
   });
 
   assert.deepEqual(normalized.events.map(event => event.grip), [0, 0.37, 1, 0]);
+});
+
+test("scratch cancellation remains distinct from an ordinary release", () => {
+  const normalized = normalizeScratchPerformance({
+    schemaVersion: 2,
+    sourceSampleRate: 48_000,
+    outputSampleRate: 48_000,
+    events: [
+      { type: "scratch-start", frameOffset: 0, positionFrames: 100 },
+      { type: "scratch-end", frameOffset: 128, positionFrames: 120, cancelled: true },
+    ],
+  });
+
+  assert.equal(normalized.events[1].cancelled, true);
+  assert.equal(normalized.events[1].resumePlayback, true);
 });

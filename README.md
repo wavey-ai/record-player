@@ -392,7 +392,8 @@ await player.updateScratch({
 
 await player.endScratch({
   rotationDegrees: -18,
-  resumePlayback: true
+  resumePlayback: true,
+  cancelled: false
 });
 ```
 
@@ -408,6 +409,8 @@ once onto the output audio clock and carries the resulting integer
 performance capture. Programmatic callers may supply either field; omitted
 timing means the current output frame. The requested input frame and later
 worklet-applied frame remain separate latency telemetry.
+Pointer cancellation uses the same safe physical release as pointer-up but is
+retained as `cancelled: true` in the performance trace for hardware audits.
 
 ### State subscription
 

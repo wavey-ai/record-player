@@ -165,6 +165,7 @@ test("record and crossfader pointers retain independent canvas gesture ownership
   const recordStart = recordPoint(0);
   canvas.emit("pointerdown", pointer(1, recordStart.x, recordStart.y, 0));
   assert.equal(calls.begin.length, 1);
+  assert.equal(calls.begin[0].inputTimeMs, 0, "a valid zero DOM timestamp must not be replaced");
 
   const coalesced = [0.08, 0.16].map((angle, index) => {
     const point = recordPoint(angle);
@@ -197,7 +198,22 @@ test("record and crossfader pointers retain independent canvas gesture ownership
   assert.equal(calls.end.length, 1);
   assert.equal(calls.end[0].cancelled, false);
   assert.equal(calls.end[0].inputTimeMs, 45);
+
+  canvas.emit("pointerdown", pointer(3, recordStart.x, recordStart.y, 50));
+  canvas.emit("pointercancel", pointer(3, recordStart.x, recordStart.y, 55));
+  assert.equal(calls.end.length, 2);
+  assert.equal(calls.end[1].cancelled, true);
+  assert.equal(calls.end[1].grip, 0);
+  assert.equal(calls.end[1].handContact, false);
+  assert.equal(calls.end[1].inputTimeMs, 55);
+
+  canvas.emit("pointerdown", pointer(4, recordStart.x, recordStart.y, 60));
+  assert.equal(calls.begin.length, 3, "a cancelled pointer must release record ownership");
   mounted.destroy();
+  assert.equal(calls.end.length, 3, "destroy must release an active record pointer");
+  assert.equal(calls.end[2].cancelled, true);
+  assert.equal(calls.end[2].grip, 0);
+  assert.equal(calls.end[2].handContact, false);
 });
 
 test("canvas rotation follows audio-owned phase and effective rate", t => {
