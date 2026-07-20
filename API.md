@@ -231,6 +231,7 @@ const unsubscribe = player.subscribe(state => {
   state.recordProfile;
   state.payloadContainer;
   state.releaseId;
+  state.stylusCalibrationHasGaps;
   state.currentTrackIndex;
   state.currentTrackTitle;
   state.trackCount;
@@ -731,6 +732,13 @@ player.canvas.setComponentVisible("needlePoint", true);
 The physical sync dots continuously rotate. Inside the lamp beam, the renderer draws the calibrated stroboscopic sample so the matching pitch row appears stationary while the same dots continue moving elsewhere.
 
 Dragging the record scratches. Dragging either the subtle stylus point or its dotted travel arc seeks through the record. Radial PITCH, CH and XFADE controls call the same player methods as non-canvas controls; pitch also has a dedicated RESET button for the 0% detent.
+
+For a published record with programme gaps, the default canvas uses the
+record's decoded radial gap anchors. Rust supplies a monotone forward/inverse
+calibration. The tonearm therefore reaches each visible gap edge at the matching
+source sample, and dragging into the gap seeks into its silent PCM interval.
+No-gap records keep the linear mapping and do not initialize calibration WASM
+on the main thread. `stylusCalibrationHasGaps` reports the active path.
 
 ## WASM crate boundary
 

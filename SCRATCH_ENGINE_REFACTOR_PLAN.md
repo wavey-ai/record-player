@@ -8,10 +8,14 @@ is made.
 
 Current automated evidence:
 
-- `cargo test --workspace`: 90 tests (85 `record-player`, 5 `player-wasm`).
-- `node --test test/*.test.mjs`: 67 tests. Canvas tests check audio-owned phase
+- `cargo test --workspace`: 92 tests (87 `record-player`, 5 `player-wasm`).
+- `node --test test/*.test.mjs`: 71 tests. Canvas tests check audio-owned phase
   at half-speed forward, full-speed reverse and rest, plus all eight preset and
   click-count selections through independent mouse and touch gestures.
+- The default tonearm now consumes decoded programme-gap anchors through the
+  Rust monotone calibration. Its inverse projects the pointer onto physical arm
+  length and recovers groove radius before seeking. Release WASM pinned a test
+  gap to `0.421..0.429` and mapped its midpoint into the matching PCM interval.
 - The canvas is the only bundled scratch surface. The permanently hidden legacy
   platter and its separate single-turn, event-rate-dependent differentiator
   were removed, so every bundled gesture uses the canonical tracker.
@@ -19,6 +23,10 @@ Current automated evidence:
 - `npm run bench:worklet`: three release-WASM runs measured p95 at `1.47%`
   normal and `8.10–8.14%` for alternating `±8×` crab/8. Fresh six-second
   stereo PCM window p95 was `2.90–3.08%` against a `2.667 ms` quantum.
+- The post-calibration release run measured p95 `1.49%` normal, `8.70%` for
+  alternating `±8×` crab/8 and `2.90%` for a fresh six-second window. Replay
+  hashes remained unchanged, confirming that presentation calibration does not
+  enter the audio renderer.
 - The release-WASM harness requires identical output SHA-256 and gate traces
   when 2,176 live frames separate two runs of the same take. It verifies
   preset, click and manual-fader events at four exact sub-quantum offsets. A

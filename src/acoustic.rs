@@ -3239,6 +3239,23 @@ pub struct CalibrationAnchor {
     pub radial: f64,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProgrammeCalibrationGap {
+    start_sample: f64,
+    end_sample: f64,
+    radial_start_normalized: f64,
+    radial_end_normalized: f64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProgrammeCalibrationMap {
+    total_samples: f64,
+    #[serde(default)]
+    gaps: Vec<ProgrammeCalibrationGap>,
+}
+
 #[derive(Clone, Debug)]
 struct MonotoneInterpolant {
     xs: Vec<f64>,
@@ -3423,6 +3440,13 @@ impl StylusCalibration {
         })
     }
 
+    #[wasm_bindgen(js_name = fromProgrammeMap)]
+    pub fn from_programme_map(programme: JsValue) -> Result<StylusCalibration, JsValue> {
+        let programme: ProgrammeCalibrationMap = serde_wasm_bindgen::from_value(programme)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        Self::try_from_programme_map(programme).map_err(|error| JsValue::from_str(&error))
+    }
+
     #[wasm_bindgen(getter, js_name = hasGaps)]
     pub fn has_gaps(&self) -> bool {
         self.interpolant.is_some()
@@ -3453,6 +3477,97 @@ impl StylusCalibration {
                     .clamp(0.0, self.total_samples)
             })
             .unwrap_or(groove * self.total_samples)
+    }
+}
+
+impl StylusCalibration {
+    fn try_from_programme_map(
+        programme: ProgrammeCalibrationMap,
+    ) -> Result<StylusCalibration, String> {
+        let total_samples = programme.total_samples;
+        if !total_samples.is_finite() || total_samples <= 0.0 || total_samples.fract() != 0.0 {
+            return Err("programme map requires a positive integer totalSamples".to_owned());
+        }
+        if programme.gaps.is_empty() {
+            return Ok(Self {
+                total_samples,
+                interpolant: None,
+            });
+        }
+
+        let mut indexed_gaps = programme.gaps.into_iter().enumerate().collect::<Vec<_>>();
+        for (index, gap) in &indexed_gaps {
+            if !gap.start_sample.is_finite()
+                || !gap.end_sample.is_finite()
+                || gap.start_sample.fract() != 0.0
+                || gap.end_sample.fract() != 0.0
+            {
+                return Err(format!(
+                    "gap {index}: startSample and endSample must be finite integers"
+                ));
+            }
+            if !gap.radial_start_normalized.is_finite() || !gap.radial_end_normalized.is_finite() {
+                return Err(format!(
+                    "gap {index}: radialStartNormalized and radialEndNormalized must be finite"
+                ));
+            }
+        }
+        indexed_gaps.sort_by(|left, right| left.1.start_sample.total_cmp(&right.1.start_sample));
+
+        let mut anchors = Vec::with_capacity(indexed_gaps.len() * 2 + 2);
+        anchors.push(CalibrationAnchor {
+            sample: 0.0,
+            radial: 0.0,
+        });
+        let mut previous_end_sample = 0.0;
+        let mut previous_radial_end = 0.0;
+        for (index, gap) in indexed_gaps {
+            if gap.start_sample < previous_end_sample {
+                return Err(format!("gap {index}: sample regions must not overlap"));
+            }
+            if !(gap.start_sample > 0.0
+                && gap.start_sample < gap.end_sample
+                && gap.end_sample <= total_samples)
+            {
+                return Err(format!(
+                    "gap {index}: requires 0 < startSample < endSample <= totalSamples"
+                ));
+            }
+            if gap.radial_start_normalized < previous_radial_end {
+                return Err(format!("gap {index}: radial regions must not overlap"));
+            }
+            if !(gap.radial_start_normalized > 0.0
+                && gap.radial_start_normalized < gap.radial_end_normalized
+                && gap.radial_end_normalized <= 1.0)
+            {
+                return Err(format!(
+                    "gap {index}: requires 0 < radialStartNormalized < radialEndNormalized <= 1"
+                ));
+            }
+            anchors.push(CalibrationAnchor {
+                sample: gap.start_sample,
+                radial: gap.radial_start_normalized,
+            });
+            anchors.push(CalibrationAnchor {
+                sample: gap.end_sample,
+                radial: gap.radial_end_normalized,
+            });
+            previous_end_sample = gap.end_sample;
+            previous_radial_end = gap.radial_end_normalized;
+        }
+        anchors.push(CalibrationAnchor {
+            sample: total_samples,
+            radial: 1.0,
+        });
+        validate_anchors(total_samples, &anchors)?;
+        let interpolant = MonotoneInterpolant::new(
+            anchors.iter().map(|anchor| anchor.sample).collect(),
+            anchors.iter().map(|anchor| anchor.radial).collect(),
+        )?;
+        Ok(Self {
+            total_samples,
+            interpolant: Some(interpolant),
+        })
     }
 }
 
@@ -3745,6 +3860,77 @@ mod scratch_tests {
             let radial = interpolant.evaluate(sample);
             assert_abs_diff_eq!(interpolant.evaluate_inverse(radial), sample, epsilon = 1e-8);
         }
+    }
+
+    #[test]
+    fn programme_gap_calibration_pins_both_visible_edges_and_round_trips() {
+        let calibration = StylusCalibration::try_from_programme_map(ProgrammeCalibrationMap {
+            total_samples: 9_000_000.0,
+            gaps: vec![ProgrammeCalibrationGap {
+                start_sample: 4_000_000.0,
+                end_sample: 4_096_000.0,
+                radial_start_normalized: 0.421,
+                radial_end_normalized: 0.429,
+            }],
+        })
+        .unwrap();
+
+        assert!(calibration.has_gaps());
+        assert_abs_diff_eq!(
+            calibration.sample_to_groove(4_000_000.0),
+            0.421,
+            epsilon = 1e-12
+        );
+        assert_abs_diff_eq!(
+            calibration.sample_to_groove(4_096_000.0),
+            0.429,
+            epsilon = 1e-12
+        );
+        for sample in [0.0, 1_000_000.0, 4_000_000.0, 4_048_000.0, 8_000_000.0] {
+            let groove = calibration.sample_to_groove(sample);
+            assert_abs_diff_eq!(calibration.groove_to_sample(groove), sample, epsilon = 1e-4);
+        }
+        let gap_midpoint = calibration.groove_to_sample(0.425);
+        assert!((4_000_000.0..=4_096_000.0).contains(&gap_midpoint));
+    }
+
+    #[test]
+    fn programme_gap_calibration_rejects_overlapping_or_flat_anchors() {
+        let overlapping = StylusCalibration::try_from_programme_map(ProgrammeCalibrationMap {
+            total_samples: 10_000.0,
+            gaps: vec![
+                ProgrammeCalibrationGap {
+                    start_sample: 2_000.0,
+                    end_sample: 3_000.0,
+                    radial_start_normalized: 0.2,
+                    radial_end_normalized: 0.3,
+                },
+                ProgrammeCalibrationGap {
+                    start_sample: 2_500.0,
+                    end_sample: 4_000.0,
+                    radial_start_normalized: 0.4,
+                    radial_end_normalized: 0.5,
+                },
+            ],
+        });
+        assert_eq!(
+            overlapping.err().unwrap(),
+            "gap 1: sample regions must not overlap"
+        );
+
+        let flat = StylusCalibration::try_from_programme_map(ProgrammeCalibrationMap {
+            total_samples: 10_000.0,
+            gaps: vec![ProgrammeCalibrationGap {
+                start_sample: 2_000.0,
+                end_sample: 3_000.0,
+                radial_start_normalized: 0.2,
+                radial_end_normalized: 0.2,
+            }],
+        });
+        assert_eq!(
+            flat.err().unwrap(),
+            "gap 0: requires 0 < radialStartNormalized < radialEndNormalized <= 1"
+        );
     }
 
     #[test]

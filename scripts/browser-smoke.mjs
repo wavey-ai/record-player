@@ -160,6 +160,39 @@ async function runBrowserScenario() {
     typeof player.measureAcousticLoopbackLatency === "function",
     "The public acoustic-loopback diagnostic API was not published",
   );
+  const { createProgrammeStylusCalibration } = await import("./player-stylus-calibration.js");
+  const programmeGapMap = {
+    totalSamples: 9_000_000,
+    gaps: [{
+      startSample: 4_000_000,
+      endSample: 4_096_000,
+      radialStartNormalized: 0.421,
+      radialEndNormalized: 0.429,
+    }],
+  };
+  const programmeGapCalibration = await createProgrammeStylusCalibration(programmeGapMap, {
+    loadModule: async () => {
+      const module = await import("./record-player/record_player.js");
+      await module.default({ module_or_path: "./record-player/record_player_bg.wasm" });
+      return module;
+    },
+  });
+  const gapStartGroove = programmeGapCalibration.sampleRatioToGroove(4_000_000 / 9_000_000);
+  const gapEndGroove = programmeGapCalibration.sampleRatioToGroove(4_096_000 / 9_000_000);
+  const gapMidSampleRatio = programmeGapCalibration.grooveToSampleRatio(0.425);
+  assert(Math.abs(gapStartGroove - 0.421) < 1e-9, "Rust stylus calibration missed the outer gap edge");
+  assert(Math.abs(gapEndGroove - 0.429) < 1e-9, "Rust stylus calibration missed the inner gap edge");
+  assert(
+    gapMidSampleRatio >= 4_000_000 / 9_000_000
+      && gapMidSampleRatio <= 4_096_000 / 9_000_000,
+    "A needle drop in the visible gap did not map into gap PCM",
+  );
+  const programmeGapStylusCalibration = {
+    gapStartGroove,
+    gapEndGroove,
+    gapMidSample: gapMidSampleRatio * 9_000_000,
+  };
+  programmeGapCalibration.destroy();
   const { measureAcousticLoopbackLatency } = await import("./audio-loopback-latency.js");
   const loopbackContext = new AudioContext({ sampleRate: 48_000 });
   const loopbackDestination = loopbackContext.createMediaStreamDestination();
@@ -618,6 +651,7 @@ async function runBrowserScenario() {
       expectedLandingFrames: expectedCuePosition,
       workletSeekPositions: observedSeekPositions,
     },
+    programmeGapStylusCalibration,
     maximumPointerToAudioLatencyMs: maximumLatencyMs,
     pointerAppliedCommandId,
     captureBytes,

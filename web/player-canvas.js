@@ -348,15 +348,17 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
     const resolved = resolveStylusGeometry(latestGeometry, snapshot, {
       calibrateProgress: options.calibrateStylusProgress
     });
-    const angle0 = Math.atan2(resolved.outerTip.y - resolved.anchorY, resolved.outerTip.x - resolved.anchorX);
-    let angle1 = Math.atan2(resolved.innerTip.y - resolved.anchorY, resolved.innerTip.x - resolved.anchorX);
-    while (angle1 - angle0 > Math.PI) angle1 -= Math.PI * 2;
-    while (angle1 - angle0 < -Math.PI) angle1 += Math.PI * 2;
-    let angle = Math.atan2(point.y - resolved.anchorY, point.x - resolved.anchorX);
-    while (angle - angle0 > Math.PI) angle -= Math.PI * 2;
-    while (angle - angle0 < -Math.PI) angle += Math.PI * 2;
-    const denominator = angle1 - angle0;
-    const visualRatio = Math.abs(denominator) > 0.0001 ? clamp((angle - angle0) / denominator, 0, 1) : 0;
+    const angle = Math.atan2(point.y - resolved.anchorY, point.x - resolved.anchorX);
+    const projectedTipX = resolved.anchorX + Math.cos(angle) * resolved.armLength;
+    const projectedTipY = resolved.anchorY + Math.sin(angle) * resolved.armLength;
+    const grooveRadius = Math.hypot(
+      projectedTipX - latestGeometry.cx,
+      projectedTipY - latestGeometry.cy,
+    );
+    const denominator = resolved.innerGroove - resolved.outerGroove;
+    const visualRatio = Math.abs(denominator) > 0.0001
+      ? clamp((grooveRadius - resolved.outerGroove) / denominator, 0, 1)
+      : 0;
     player.seekRatio(typeof options.inverseStylusProgress === "function" ? options.inverseStylusProgress(visualRatio) : visualRatio);
   }
 

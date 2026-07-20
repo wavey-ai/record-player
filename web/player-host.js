@@ -2,6 +2,7 @@ import { createLogger, setPlayerLoggingEnabled, isPlayerLoggingEnabled, isPlayer
 import { readAudioPlaybackStats } from "./audio-playback-stats.js";
 import { measureAcousticLoopbackLatency } from "./audio-loopback-latency.js";
 import { createVinylPlayerCanvas } from "./player-canvas.js";
+import { createProgrammeStylusCalibration } from "./player-stylus-calibration.js";
 import { RecordDecoderClient } from "./record-decoder-client.js";
 import { createPcmChunkCacheHandler, recordCacheKey } from "./pcm-cache.js";
 import { createRemoteOpusChunkCacheHandler, createRemoteOpusPrecache, decodeRecordDescriptorJson } from "./opus-cache.js";
@@ -29,6 +30,19 @@ const DEFAULT_TAPE_MASTER_API_URL = "https://yl.vin/api/bitneedle-source-audio";
 
 let tapePcmHelpersPromise = null;
 let tapePlayerWasmPromise = null;
+let stylusCalibrationWasmPromise = null;
+
+function loadStylusCalibrationWasm() {
+  if (!stylusCalibrationWasmPromise) {
+    stylusCalibrationWasmPromise = import(versionedAssetUrl("./record-player/record_player.js")).then(async module => {
+      await module.default({
+        module_or_path: versionedAssetUrl("./record-player/record_player_bg.wasm"),
+      });
+      return module;
+    });
+  }
+  return stylusCalibrationWasmPromise;
+}
 
 function queryParams() {
   return new URLSearchParams(globalThis.location?.search || "");
@@ -492,6 +506,7 @@ const state = {
   cacheHandler: null,
   postMessageBridge: null,
   programmeMap: null,
+  stylusCalibration: null,
   recordHeaderProof: null,
   recordDescriptorJson: "",
   tape: {
@@ -752,6 +767,44 @@ function parseJsonObject(json, fallback = null) {
   } catch {
     return fallback;
   }
+}
+
+function clearStylusCalibration() {
+  state.stylusCalibration?.destroy();
+  state.stylusCalibration = null;
+}
+
+async function setStylusCalibrationFromProgrammeMap(programmeMap, loadSequence) {
+  clearStylusCalibration();
+  let calibration = null;
+  try {
+    calibration = await createProgrammeStylusCalibration(programmeMap, {
+      loadModule: loadStylusCalibrationWasm,
+    });
+    if (loadSequence !== state.loadSequence) {
+      calibration?.destroy();
+      throw loadSupersededError();
+    }
+    state.stylusCalibration = calibration;
+  } catch (error) {
+    calibration?.destroy();
+    if (loadSequence !== state.loadSequence) throw loadSupersededError();
+    log.warn("stylus-calibration-failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+function canvasOptionsWithStylusCalibration(options = {}) {
+  return {
+    calibrateStylusProgress(progress) {
+      return state.stylusCalibration?.sampleRatioToGroove(progress) ?? progress;
+    },
+    inverseStylusProgress(progress) {
+      return state.stylusCalibration?.grooveToSampleRatio(progress) ?? progress;
+    },
+    ...options,
+  };
 }
 
 function programmeTracks() {
@@ -1347,6 +1400,7 @@ function failCurrentLoad(loadSequence, error, label = "Player load failed") {
     state.lastReportedPosition = 0;
     state.basePcmSource = null;
     state.pendingAutomaticDeadwax = null;
+    clearStylusCalibration();
     if (state.recordObjectUrl) URL.revokeObjectURL(state.recordObjectUrl);
     state.recordObjectUrl = "";
     elements.play.disabled = true;
@@ -1384,6 +1438,7 @@ async function loadAudioFile(file, options = {}) {
   invalidateEndTransition();
   clearPendingSeekTransaction();
   clearLiveScratchInteraction();
+  clearStylusCalibration();
   cancelPendingStreamReady(loadSupersededError());
   try {
     await cancelScratchReplays(new Error("Player load cancelled scratch replay"));
@@ -1447,6 +1502,7 @@ async function loadAudioFileForSequence(
   state.recordReleaseId = "";
   state.recordHeaderProof = null;
   state.recordDescriptorJson = "";
+  clearStylusCalibration();
   state.programmeMap = {
     sampleRate: audioBuffer.sampleRate,
     durationMs: Math.round(audioBuffer.duration * 1000),
@@ -2746,6 +2802,7 @@ async function loadFile(file, options = {}) {
   invalidateEndTransition();
   clearPendingSeekTransaction();
   clearLiveScratchInteraction();
+  clearStylusCalibration();
   cancelPendingStreamReady(loadSupersededError());
   try {
     await cancelScratchReplays(new Error("Player load cancelled scratch replay"));
@@ -2870,6 +2927,8 @@ async function loadFileForSequence(
     });
   }
   state.programmeMap = parseJsonObject(inspected.programmeMapJson, null);
+  await setStylusCalibrationFromProgrammeMap(state.programmeMap, loadSequence);
+  assertCurrentLoad(loadSequence);
   const programmeSampleRate = Math.max(1, Number(state.programmeMap?.sampleRate) || 48000);
   const programmeDuration = Number(state.programmeMap?.durationMs) > 0
     ? Number(state.programmeMap.durationMs) / 1000
@@ -2997,6 +3056,7 @@ async function loadRecordFromUrl(url, options = {}) {
   invalidateEndTransition();
   clearPendingSeekTransaction();
   clearLiveScratchInteraction();
+  clearStylusCalibration();
   cancelPendingStreamReady(loadSupersededError());
   try {
     await cancelScratchReplays(new Error("Player load cancelled scratch replay"));
@@ -3413,6 +3473,7 @@ function publicState() {
     releaseId: elements.metaRelease?.textContent || "",
     recordHash: state.recordHash,
     recordImageUrl: state.recordObjectUrl,
+    stylusCalibrationHasGaps: Boolean(state.stylusCalibration?.hasGaps),
     rotationDegrees: state.rotation,
     sampleRate: state.sampleRate,
     outputSampleRate: state.context?.sampleRate || null,
@@ -3618,6 +3679,7 @@ const api = Object.freeze({
     state.recordHash = "";
     state.recordReleaseId = "";
     state.recordDescriptorJson = "";
+    clearStylusCalibration();
     state.programmeMap = null;
     state.cleanEnd = false;
     state.failedLoadSequence = 0;
@@ -3799,7 +3861,11 @@ const api = Object.freeze({
   canvas: Object.freeze({
     mount(canvas, options = {}) {
       state.canvasController?.destroy();
-      state.canvasController = createVinylPlayerCanvas(api, canvas, options);
+      state.canvasController = createVinylPlayerCanvas(
+        api,
+        canvas,
+        canvasOptionsWithStylusCalibration(options),
+      );
       return state.canvasController;
     },
     configure(options = {}) {
@@ -3839,10 +3905,13 @@ async function initialise() {
   render();
   const canvas = playerRoot.querySelector("#player-canvas");
   if (canvas) {
-    state.canvasController = createVinylPlayerCanvas(api, canvas);
+    state.canvasController = createVinylPlayerCanvas(
+      api,
+      canvas,
+      canvasOptionsWithStylusCalibration(HOST_CONFIG.canvasOptions || {}),
+    );
     const embedOptions = embedCanvasOptions();
     if (embedOptions) state.canvasController.configure(embedOptions);
-    if (HOST_CONFIG.canvasOptions) state.canvasController.configure(HOST_CONFIG.canvasOptions);
   }
   globalThis.addEventListener("message", event => { void handleBridgeMessage(event); });
   if (document.documentElement.classList.contains("embed-mode")) {

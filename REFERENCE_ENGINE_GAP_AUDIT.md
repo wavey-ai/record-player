@@ -71,6 +71,7 @@ The audit compared those files with:
 | Drum acceleration | Event-time rate changes | Filtered audio-rate intent | Beyond reference |
 | Gate application | Main-thread fader automation | Rust per output sample | Beyond reference |
 | Gesture input | One pointer EMA | Coalesced multi-pointer tracker | Beyond reference |
+| Programme-gap tonearm | Monotone visible-gap calibration | Same Rust-owned map with radius-exact inverse cueing | Beyond reference |
 | PCM windows | Four-second reference windows | Two six-second bounded banks | Covered |
 | Seam repair | Reference window assembly | Authoritative 24-sample repair | Covered |
 | Capture | Throttled telemetry | Versioned output-frame events | Beyond reference |
@@ -122,6 +123,7 @@ Rust owns all audio-rate and state-critical behavior:
 - sampling, resampling and cartridge response
 - wow, flutter, surface texture and foley
 - the HF acceleration limiter and stylus limit
+- programme-gap anchor validation and monotone stylus calibration
 - preset intent, gate timing and de-clicking
 - manual replay fader and final output gain
 - replay state snapshots.
@@ -129,6 +131,7 @@ Rust owns all audio-rate and state-critical behavior:
 JavaScript owns browser-bound work:
 
 - DOM pointer collection and coalesced sample order
+- lazy presentation-WASM lifecycle and tonearm pointer projection
 - AudioWorklet output-frame event scheduling
 - bounded bank coordination, direct WASM-window input copies and planar output
   copies
@@ -142,16 +145,24 @@ measured audio-thread reason to make either change.
 
 ## Automated evidence
 
-- `cargo test --workspace`: 90 tests.
-- `node --test test/*.test.mjs`: 67 tests.
+- `cargo test --workspace`: 92 tests.
+- `node --test test/*.test.mjs`: 71 tests.
 - The canvas regression anchors the visible platter to audio-owned phase and
   covers half-speed forward motion, full-speed reverse motion and zero-rate
   hold. It rejects nominal-RPM animation.
 - Both pages now expose only the canonical canvas record gesture. The
   permanently hidden legacy platter and its single-turn, event-rate-dependent
   differentiator were removed; no `abs(rate) / 3` move-impulse path remains.
+- Rust programme-gap calibration tests pin both visible gap edges, reject
+  overlapping or flat anchors and round-trip source samples through the
+  monotone inverse. Canvas tests recover exact groove radius from the physical
+  arm projection. Chrome mapped samples `4,000,000..4,096,000` to visible
+  progress `0.421..0.429` and mapped the band midpoint back to sample
+  `4,048,382.81` through release WASM.
 - Three current worklet runs measured normal p95 at `1.47%` of a quantum.
 - They measured `8.10–8.14%` for alternating `±8×` Crab/8.
+- The post-calibration release run measured p95 `1.49%` normal and `8.70%`
+  under the same stress. Deterministic audio hashes remained unchanged.
 - Direct copy into prepared Rust window storage reduced fresh six-second window
   application to p95 `2.90–3.08%` across the same runs.
 - Regression gates now require window-application p95 below `25%` and maximum

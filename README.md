@@ -961,6 +961,13 @@ than an audio clock:
 - the row matching the current pitch appears steady under the lamp
 - the same dots remain visibly moving outside the beam.
 
+Published records with programme gaps use their decoded radial gap anchors for
+the default tonearm. Rust validates the anchors and owns the monotone
+sample-to-groove map and its inverse. Needle dragging projects the pointer onto
+the physical arm length before recovering groove radius, so a visible gap band
+maps back into the matching silent PCM interval. Records without gaps retain
+the linear path and do not load the extra presentation-side WASM instance.
+
 ## Human validation status
 
 Automated tests can establish deterministic state transitions, bounded memory,

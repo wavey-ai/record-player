@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { createVinylPlayerCanvas } from "../web/player-canvas.js";
 import { buildCanvasGeometry, minuteToDegrees } from "../web/player-canvas-geometry.js";
+import { resolveStylusGeometry } from "../web/player-canvas-stylus.js";
 
 function noopContext({ rotations = null } = {}) {
   const values = {
@@ -328,6 +329,126 @@ test("canvas rotation follows audio-owned phase and effective rate", t => {
     Math.abs(stoppedDegrees - 55) < 0.01,
     `A stopped audio platter drifted to ${stoppedDegrees} degrees`,
   );
+  mounted.destroy();
+});
+
+test("tonearm drawing and needle cueing round-trip exact calibrated groove radius", t => {
+  const animationFrames = new Map();
+  let nextAnimationFrame = 1;
+  const classList = { toggle() {}, remove() {} };
+  const ownerDocument = {
+    documentElement: { classList },
+    addEventListener() {},
+    removeEventListener() {},
+    querySelector() { return null; },
+  };
+  const globals = {
+    HTMLCanvasElement: globalThis.HTMLCanvasElement,
+    document: globalThis.document,
+    window: globalThis.window,
+    requestAnimationFrame: globalThis.requestAnimationFrame,
+    cancelAnimationFrame: globalThis.cancelAnimationFrame,
+  };
+  globalThis.HTMLCanvasElement = FakeCanvas;
+  globalThis.document = ownerDocument;
+  globalThis.window = { devicePixelRatio: 1 };
+  globalThis.requestAnimationFrame = callback => {
+    const id = nextAnimationFrame;
+    nextAnimationFrame += 1;
+    animationFrames.set(id, callback);
+    return id;
+  };
+  globalThis.cancelAnimationFrame = id => animationFrames.delete(id);
+  t.after(() => {
+    for (const [name, value] of Object.entries(globals)) {
+      if (value === undefined) delete globalThis[name];
+      else globalThis[name] = value;
+    }
+  });
+
+  const geometry = buildCanvasGeometry(800, 840, { recordFill: false });
+  const baseState = {
+    ready: true,
+    playing: false,
+    motorRunning: false,
+    scratching: false,
+    loading: false,
+    decoding: false,
+    rotationDegrees: 0,
+    rpm: 33.3333333333,
+    nativeRpm: 33.3333333333,
+    positionRatio: 0.4,
+    positionSeconds: 24,
+    positionFrames: 1_152_000,
+    durationSeconds: 60,
+    sampleRate: 48_000,
+    needleLifted: false,
+    volume: 1,
+    crossfader: 0.5,
+    recordImageUrl: "",
+    recordProfile: "lp33",
+  };
+  const calibrated = resolveStylusGeometry(geometry, baseState, {
+    calibrateProgress: progress => progress + 0.2,
+  });
+  assert.ok(
+    Math.abs(
+      calibrated.grooveRadius
+      - (calibrated.outerGroove + (calibrated.innerGroove - calibrated.outerGroove) * 0.6)
+    ) < 1e-9,
+    "the drawn stylus did not use calibrated groove progress",
+  );
+
+  const sought = [];
+  const inverseInputs = [];
+  const player = {
+    getState: () => ({ ...baseState }),
+    subscribe: () => () => {},
+    setCrossfader() {},
+    setRpm() {},
+    setVolume() {},
+    setNeedleLifted() {},
+    toggleTransport() {},
+    seekRatio(value) { sought.push(value); },
+  };
+  const canvas = new FakeCanvas(ownerDocument);
+  const mounted = createVinylPlayerCanvas(player, canvas, {
+    inverseStylusProgress(progress) {
+      inverseInputs.push(progress);
+      return progress * 0.5;
+    },
+    components: {
+      syncRings: false,
+      strobe: false,
+      strobeLamp: false,
+      spindle: false,
+      startStop: false,
+      needle: false,
+      loadRecord: false,
+      rpm: false,
+      volume: false,
+      crossfader: false,
+      scratchPreset: false,
+      scratchClicks: false,
+      labels: false,
+    },
+  });
+  const firstFrame = animationFrames.entries().next().value;
+  animationFrames.delete(firstFrame[0]);
+  firstFrame[1](performance.now());
+
+  const desiredVisualProgress = 0.425;
+  const desiredTip = resolveStylusGeometry(geometry, {
+    ...baseState,
+    positionRatio: desiredVisualProgress,
+  }).tip;
+  canvas.emit("pointerdown", pointer(9, desiredTip.x, desiredTip.y, performance.now()));
+  assert.equal(inverseInputs.length, 1);
+  assert.ok(
+    Math.abs(inverseInputs[0] - desiredVisualProgress) < 1e-9,
+    `needle cue recovered ${inverseInputs[0]} instead of ${desiredVisualProgress}`,
+  );
+  assert.ok(Math.abs(sought[0] - desiredVisualProgress * 0.5) < 1e-9);
   mounted.destroy();
 });
 
