@@ -3387,6 +3387,8 @@ async function beginScratch(event) {
       pointer_id: event.pointerId,
       playback_seconds: framesToSeconds(state.positionFrames),
       rotation_degrees: state.rotation,
+      rate: 0,
+      impulse: 0.22,
       grip: state.scratchGrip,
     },
     { loadSequence },
@@ -3790,6 +3792,8 @@ const api = Object.freeze({
     const loadSequence = state.loadSequence;
     invalidateEndTransition();
     const position = Number(positionFrames) || 0;
+    const nextRate = Number(rate) || 0;
+    const nextImpulse = Number(impulse) || 0;
     const nextGrip = resolveScratchGrip({ pressure, grip, pointerType });
     // The hand owns the record from the first touch: publish the scratching
     // state immediately so the canvas stops advancing the motor's visual
@@ -3798,18 +3802,18 @@ const api = Object.freeze({
     state.scratchGrip = nextGrip;
     if (Number.isFinite(Number(rotationDegrees))) state.rotation = Number(rotationDegrees);
     publishState();
-    recordScratchEvent({ type: "scratch-start", positionFrames: position, rate: Number(rate) || 0, impulse: Number(impulse) || 0, grip: nextGrip });
+    recordScratchEvent({ type: "scratch-start", positionFrames: position, rate: nextRate, impulse: nextImpulse, grip: nextGrip });
     state.node?.port.postMessage({
       type: "scratch",
       active: true,
       position,
-      rate: Number(rate) || 0,
-      impulse: Number(impulse) || 0,
+      rate: nextRate,
+      impulse: nextImpulse,
       grip: nextGrip,
       ...pointerAudioTiming(inputTimeMs),
     });
     return dispatch(
-      { type: "begin_scratch", deck: "a", pointer_id: pointerId, playback_seconds: framesToSeconds(position), rotation_degrees: rotationDegrees, grip: nextGrip },
+      { type: "begin_scratch", deck: "a", pointer_id: pointerId, playback_seconds: framesToSeconds(position), rotation_degrees: rotationDegrees, rate: nextRate, impulse: nextImpulse, grip: nextGrip },
       { loadSequence },
     );
   },

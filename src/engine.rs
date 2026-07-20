@@ -209,8 +209,18 @@ impl PlayerEngine {
                 pointer_id,
                 playback_seconds,
                 rotation_degrees,
+                rate,
+                impulse,
                 grip,
-            } => self.begin_scratch(deck, pointer_id, playback_seconds, rotation_degrees, grip)?,
+            } => self.begin_scratch(
+                deck,
+                pointer_id,
+                playback_seconds,
+                rotation_degrees,
+                rate,
+                impulse,
+                grip,
+            )?,
             PlayerEvent::MoveScratch {
                 deck,
                 position_frames,
@@ -627,9 +637,16 @@ impl PlayerEngine {
         pointer_id: i32,
         seconds: f64,
         rotation: f64,
+        rate: f32,
+        impulse: f32,
         grip: f32,
     ) -> Result<(), PlayerError> {
-        if !seconds.is_finite() || !rotation.is_finite() || !grip.is_finite() {
+        if !seconds.is_finite()
+            || !rotation.is_finite()
+            || !rate.is_finite()
+            || !impulse.is_finite()
+            || !grip.is_finite()
+        {
             return Err(PlayerError::InvalidNumber);
         }
         if self.deck(deck).scratch.active {
@@ -653,7 +670,7 @@ impl PlayerEngine {
             started_at_seconds: seconds,
             target_position_frames: frames,
             rendered_position_frames: frames,
-            target_rate: 0.0,
+            target_rate: rate,
             grip: grip.clamp(0.0, 1.0),
             base_rotation_degrees: rotation,
         };
@@ -675,8 +692,8 @@ impl PlayerEngine {
         self.commands.push(HostCommand::SetScratchTarget {
             deck,
             position_frames: frames,
-            rate: 0.0,
-            impulse: 0.0,
+            rate,
+            impulse: impulse.clamp(0.0, 1.0),
         });
         self.commands.push(HostCommand::CaptureScratchStart {
             deck,
@@ -1010,6 +1027,8 @@ mod tests {
             pointer_id: 1,
             playback_seconds: 2.0,
             rotation_degrees: 40.0,
+            rate: 0.0,
+            impulse: 0.22,
             grip: 1.0,
         })
         .unwrap();
@@ -1059,6 +1078,8 @@ mod tests {
                 pointer_id: 1,
                 playback_seconds: 2.0,
                 rotation_degrees: 0.0,
+                rate: 0.0,
+                impulse: 0.22,
                 grip: 1.0,
             })
             .unwrap();
@@ -1088,6 +1109,8 @@ mod tests {
             pointer_id: 7,
             playback_seconds: 2.0,
             rotation_degrees: 0.0,
+            rate: 0.0,
+            impulse: 0.22,
             grip: 1.0,
         })
         .unwrap();
@@ -1098,7 +1121,7 @@ mod tests {
         ));
     }
     #[test]
-    fn scratch_grip_is_clamped_and_forwarded_to_the_audio_engine() {
+    fn scratch_begin_intent_is_clamped_and_forwarded_to_the_audio_engine() {
         let mut e = PlayerEngine::default();
         ready(&mut e);
         e.dispatch(PlayerEvent::BeginScratch {
@@ -1106,14 +1129,24 @@ mod tests {
             pointer_id: 7,
             playback_seconds: 2.0,
             rotation_degrees: 0.0,
+            rate: -1.25,
+            impulse: 0.6,
             grip: 0.25,
         })
         .unwrap();
+        assert!((e.state().decks[0].scratch.target_rate - -1.25).abs() < f32::EPSILON);
         assert!((e.state().decks[0].scratch.grip - 0.25).abs() < f32::EPSILON);
-        assert!(e.drain_commands().iter().any(|command| matches!(
+        let commands = e.drain_commands();
+        assert!(commands.iter().any(|command| matches!(
             command,
             HostCommand::SetScratchTransport { hand_contact: true, grip, .. }
                 if (*grip - 0.25).abs() < f32::EPSILON
+        )));
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            HostCommand::SetScratchTarget { rate, impulse, .. }
+                if (*rate - -1.25).abs() < f32::EPSILON
+                    && (*impulse - 0.6).abs() < f32::EPSILON
         )));
 
         e.dispatch(PlayerEvent::MoveScratch {
@@ -1145,6 +1178,8 @@ mod tests {
             pointer_id: 1,
             playback_seconds: 2.0,
             rotation_degrees: 0.0,
+            rate: 0.0,
+            impulse: 0.22,
             grip: 1.0,
         })
         .unwrap();
@@ -1174,6 +1209,8 @@ mod tests {
             pointer_id: 1,
             playback_seconds: 2.0,
             rotation_degrees: 0.0,
+            rate: 0.0,
+            impulse: 0.22,
             grip: 1.0,
         })
         .unwrap();
@@ -1232,6 +1269,8 @@ mod tests {
                                 pointer_id: 1,
                                 playback_seconds: 1.0,
                                 rotation_degrees: 0.0,
+                                rate: 0.0,
+                                impulse: 0.22,
                                 grip: 1.0,
                             })
                             .unwrap();
@@ -1370,6 +1409,8 @@ mod tests {
             pointer_id: 1,
             playback_seconds: 0.0,
             rotation_degrees: 0.0,
+            rate: 0.0,
+            impulse: 0.22,
             grip: 1.0,
         })
         .unwrap();

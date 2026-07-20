@@ -166,6 +166,9 @@ measured audio-thread reason to make either change.
 - It captured rendered output and replayed an engine-version-4 take with more
   than 400 events. Capture preserved grip values `0.25`, `0.35` and `0.85`, and
   public grip returned to zero on release.
+- Browser scratch begin used `-1.4×` intent and a `0.37` grab impulse. Reverse
+  intent remained active after the Rust-core round trip, and capture retained
+  both values. This rejects a later zero-rate command overwrite.
 - It restored the pre-replay Rust state.
 - A second trusted touch moved and released XFADE.
 - The record touch remained active until its own release.

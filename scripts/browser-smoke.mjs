@@ -464,11 +464,16 @@ async function runBrowserScenario() {
     pointerId: 41,
     positionFrames,
     rotationDegrees: 0,
+    rate: -1.4,
+    impulse: 0.37,
     grip: 0.25,
     inputTimeMs: performance.now(),
   });
   assert(began !== false, "The browser scratch gesture did not start");
   assert(Math.abs(player.getState().scratchGrip - 0.25) < 1e-9, "The browser did not expose begin grip");
+  await wait(80);
+  const beginDirectionAfterCore = player.getState().scratchDirection;
+  assert(beginDirectionAfterCore === -1, "The Rust begin command overwrote initial reverse intent");
 
   for (const preset of presetNames) {
     activePreset = preset;
@@ -513,6 +518,9 @@ async function runBrowserScenario() {
     .map(event => event.grip);
   assert(recordedGrip.includes(0.25), "The browser take did not record begin grip");
   assert(recordedGrip.includes(0.35) && recordedGrip.includes(0.85), "The browser take did not record motion grip");
+  const recordedStart = recordedTake.events.find(event => event.type === "scratch-start");
+  assert(recordedStart?.rate === -1.4, "The browser take did not record begin rate");
+  assert(recordedStart?.impulse === 0.37, "The browser take did not record grab impulse");
   let replayObserved = false;
   const unsubscribeReplay = player.subscribe(snapshot => {
     replayObserved ||= Boolean(snapshot.scratchReplayActive);
@@ -621,6 +629,11 @@ async function runBrowserScenario() {
       replaySeedStored: Number.isInteger(recordedTake.replaySeed),
       rotationStored: Number.isFinite(recordedTake.initialState.rotationDegrees),
       completedAndRestored: true,
+    },
+    beginIntent: {
+      rate: recordedStart.rate,
+      impulse: recordedStart.impulse,
+      directionAfterCore: beginDirectionAfterCore,
     },
     traces: Object.fromEntries(Object.entries(traces).map(([name, trace]) => [name, {
       minimumGate: trace.minimumGate,

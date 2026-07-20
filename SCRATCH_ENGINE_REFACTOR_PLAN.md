@@ -26,6 +26,8 @@ Current automated evidence:
   It recorded, replayed and restored an engine-version-4 take with more than
   400 events. The take retained begin/motion grip values `0.25`, `0.35` and
   `0.85`; public grip returned to zero on release.
+  Scratch begin also retained `-1.4×` reverse intent and a `0.37` grab impulse
+  after the Rust-core round trip instead of replacing them with zeros.
   It kept a trusted record touch active while a second touch moved XFADE. The
   API, trusted mouse, trusted touch and trusted keyboard paths each selected
   all eight presets and all eight click counts while XFADE remained at `0.37`.
@@ -67,6 +69,9 @@ pen pressure reach Rust slipmat coupling, public state and deterministic
 capture/replay. Missing historical values, mouse input and finger touch default
 to full grip. iPhone Haptic Touch is not treated as force input; any
 intent-derived touch grip needs target-device measurements before tuning.
+Initial hand rate and grab impulse now cross the same ordered Rust protocol.
+Historical begin events default to `0×`, the canonical `0.22` grab and full
+grip, so the asynchronous core response cannot overwrite a newer live intent.
 
 ## Objective and proof standard
 

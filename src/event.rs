@@ -5,6 +5,10 @@ fn default_scratch_grip() -> f32 {
     1.0
 }
 
+fn default_scratch_grab_impulse() -> f32 {
+    0.22
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PlayerEvent {
@@ -84,6 +88,10 @@ pub enum PlayerEvent {
         pointer_id: i32,
         playback_seconds: f64,
         rotation_degrees: f64,
+        #[serde(default)]
+        rate: f32,
+        #[serde(default = "default_scratch_grab_impulse")]
+        impulse: f32,
         #[serde(default = "default_scratch_grip")]
         grip: f32,
     },
@@ -129,7 +137,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn historical_scratch_events_default_to_full_grip() {
+    fn historical_scratch_events_default_to_compatible_begin_intent() {
         let begin: PlayerEvent = serde_json::from_value(serde_json::json!({
             "type": "begin_scratch",
             "deck": "a",
@@ -149,7 +157,11 @@ mod tests {
         }))
         .unwrap();
 
-        assert!(matches!(begin, PlayerEvent::BeginScratch { grip, .. } if grip == 1.0));
+        assert!(matches!(
+            begin,
+            PlayerEvent::BeginScratch { rate, impulse, grip, .. }
+                if rate == 0.0 && impulse == 0.22 && grip == 1.0
+        ));
         assert!(matches!(movement, PlayerEvent::MoveScratch { grip, .. } if grip == 1.0));
     }
 }

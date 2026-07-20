@@ -519,7 +519,7 @@ coordinates and rendered audio are not stored. Schema v2 separates its clocks:
     stylusTracingLimit: 0.72
   },
   events: [
-    { type: "scratch-motion", frameOffset, positionFrames, rate, impulse },
+    { type: "scratch-motion", frameOffset, positionFrames, rate, impulse, grip },
     { type: "manual-crossfader", frameOffset, value }
   ]
 }
