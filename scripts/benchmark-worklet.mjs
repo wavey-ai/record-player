@@ -526,6 +526,120 @@ function verifyLiveScratchReleasePolicy() {
   );
 }
 
+function verifyProgressiveFrontierResume() {
+  const totalFrames = 16_384;
+  const availableEnd = 4_096;
+  const windowFrames = 4_096;
+  const makeWindowMessage = ({ generation, start, length, available, position, workletRequestId = 0 }) => {
+    const progressiveLeft = new Float32Array(length).fill(0.4);
+    const progressiveRight = new Float32Array(length).fill(-0.35);
+    return {
+      type: "window-ready",
+      generation,
+      requestId: generation,
+      workletRequestId,
+      start,
+      totalFrames,
+      length,
+      availableEnd: available,
+      sampleRate: SAMPLE_RATE,
+      bankIndex: -1,
+      channelBuffers: [progressiveLeft.buffer, progressiveRight.buffer],
+      position,
+      resetPosition: generation === 1,
+    };
+  };
+
+  globalThis.currentFrame = 0;
+  globalThis.currentTime = 0;
+  const processor = createProcessor();
+  processor.handleMessage({ type: "set-effects", acoustic: false, surface: false });
+  warmStablePlayback(processor, 64);
+  processor.handleMessage({
+    type: "window-transport-init",
+    totalFrames,
+    sampleRate: SAMPLE_RATE,
+    channelCount: CHANNEL_COUNT,
+    windowFrames,
+    bankBuffers: [],
+  });
+  const initialPosition = availableEnd - FRAME_COUNT - 12;
+  processor.handleMessage(makeWindowMessage({
+    generation: 1,
+    start: 0,
+    length: availableEnd,
+    available: availableEnd,
+    position: initialPosition,
+  }));
+  processor.handleMessage({ type: "needle", lifted: false });
+  processor.handleMessage({
+    type: "play",
+    position: initialPosition,
+    rate: 1,
+    handoff: true,
+    playbackEpoch: 2,
+  });
+  processor.port.messages.length = 0;
+
+  let frontierOutput = null;
+  for (let quantum = 0; quantum < 128 && !processor.waitingForData; quantum += 1) {
+    frontierOutput = createOutput();
+    renderQuantum(processor, frontierOutput);
+  }
+  assert.equal(processor.waitingForData, true, "progressive playback crossed its availability frontier");
+  assert.ok(frontierOutput, "progressive playback did not render its frontier quantum");
+  assert.ok(
+    channelEnergy(frontierOutput[0][0], 0, FRAME_COUNT) > 0.01,
+    "progressive playback dropped directly to zero at the availability frontier",
+  );
+  const heldPosition = processor.dsp.position;
+  assert.ok(heldPosition <= availableEnd - 2, "progressive playback sampled unwritten PCM");
+  const firstRequest = processor.port.messages.find(message => message?.type === "window-request");
+  assert.ok(firstRequest, "the progressive frontier did not request another window");
+
+  let waitingOutput = frontierOutput;
+  for (let quantum = 0; quantum < 4; quantum += 1) {
+    waitingOutput = createOutput();
+    renderQuantum(processor, waitingOutput);
+    assert.equal(processor.dsp.position, heldPosition, "buffering advanced the rendered source frame");
+  }
+  processor.handleMessage({
+    type: "window-unavailable",
+    availableEnd,
+    workletRequestId: firstRequest.workletRequestId,
+  });
+  processor.port.messages.length = 0;
+  const nextAvailableEnd = 8_192;
+  processor.handleMessage({
+    type: "stream-availability",
+    decodedLength: nextAvailableEnd,
+    totalLength: totalFrames,
+  });
+  const resumedRequest = processor.port.messages.find(message => message?.type === "window-request");
+  assert.ok(resumedRequest, "new progressive availability did not request its ready bank");
+  processor.handleMessage(makeWindowMessage({
+    generation: 2,
+    start: 2_048,
+    length: windowFrames,
+    available: nextAvailableEnd,
+    position: resumedRequest.position,
+    workletRequestId: resumedRequest.workletRequestId,
+  }));
+  assert.equal(processor.waitingForData, false, "a ready progressive bank did not resume playback");
+  assert.equal(processor.dsp.position, heldPosition, "progressive resume reset the rendered source frame");
+
+  const resumedOutput = createOutput();
+  renderQuantum(processor, resumedOutput);
+  const boundaryJump = Math.abs(resumedOutput[0][0][0] - waitingOutput[0][0][FRAME_COUNT - 1]);
+  assert.ok(boundaryJump < 0.02, `progressive resume introduced a ${boundaryJump} sample discontinuity`);
+  assert.ok(processor.dsp.position > heldPosition, "progressive playback did not advance after resume");
+  for (let quantum = 0; quantum < 4; quantum += 1) renderQuantum(processor, resumedOutput);
+  assert.ok(
+    channelEnergy(resumedOutput[0][0], 0, FRAME_COUNT) > 0.01,
+    "progressive playback did not fade back in after resume",
+  );
+}
+
 function verifyScratchGateVersionReplay() {
   globalThis.currentFrame = 0;
   globalThis.currentTime = 0;
@@ -939,6 +1053,7 @@ function benchmark(label, processor, beforeQuantum, afterQuantum) {
 
 verifyEofHandoffs();
 verifyLiveScratchReleasePolicy();
+verifyProgressiveFrontierResume();
 verifyReplayDurationBoundary();
 verifyScratchGateVersionReplay();
 verifyReplayControlInterruption();

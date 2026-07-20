@@ -278,11 +278,12 @@ Rust owns a copy of only the active source window rather than a full-record
 floating-point allocation.
 
 Source chunks are normally one second. The Rust engine requests a replacement
-window before the stylus reaches a bank edge, with extra projection in the
-current direction of travel. A six-millisecond fade masks a temporary window
-miss. If shared memory is unavailable, the worker can transfer an individual
-bounded window, although production deployments should provide the isolation
-headers listed above.
+window before the stylus reaches a bank edge. It projects the request farther in
+the current direction of travel. A six-millisecond fade-out and fade-in mask a
+temporary window miss. The readhead stays on the exact rendered source frame.
+If shared memory is unavailable, the worker can transfer an individual bounded
+window. Production deployments should provide the isolation headers listed
+above.
 
 ## JavaScript API
 
@@ -969,8 +970,10 @@ copying a region into either bank. Progressive availability is tracked as a
 contiguous written range, so an undecoded tail is never exposed as valid
 zero-filled PCM. At rates above `2×`, request checks are throttled to roughly
 `30 ms`; otherwise they run at roughly `80 ms`. Requests are coalesced while a
-bank is being filled or applied. The worklet fades through a short window miss
-instead of abruptly holding or exposing incomplete data.
+bank is being filled or applied. During a short window miss, the worklet holds
+the exact rendered source frame and fades program audio out. It fades the
+program back in when a completed bank covers that frame. It never exposes
+incomplete data as zero-filled audio.
 
 ### Scratch replay resolution
 

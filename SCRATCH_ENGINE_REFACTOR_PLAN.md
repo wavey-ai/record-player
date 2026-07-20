@@ -8,7 +8,7 @@ is made.
 
 Current automated evidence:
 
-- `cargo test --workspace`: 106 tests (101 `record-player`, 5 `player-wasm`).
+- `cargo test --workspace`: 107 tests (102 `record-player`, 5 `player-wasm`).
 - Rust gate conformance traverses one learned stroke for Transform, Flare, Crab
   and Orbit. Click values 1, 4 and 8 produce exactly that many pulses or notches.
   At `8x`, the de-click envelope stays within its analytical fastest-attack
@@ -61,6 +61,14 @@ Current automated evidence:
   that began during playback resumes, while a lifted powered platter keeps
   rotating silently. Chrome captured all 12 post-release packets as silence,
   spanning 5,760 contiguous frames.
+- The release-WASM progressive fixture stops at contiguous decoded coverage,
+  requests the next bank, and holds the exact rendered source frame through four
+  waiting quanta. New availability activates the requested bank without a
+  position reset. Rust fades program audio out and back in over 6 ms. The first
+  resumed-sample difference is less than `0.02`. The fixture does not expose
+  zero-filled PCM or return at full level. The current release run measured
+  `1.47%` normal, `6.40%` reversing Crab/8 and `2.94%` fresh-window p95 against
+  the audio quantum.
 - `npm run test:browser`: Chrome 150 loaded real release WASM at 48 kHz.
   It exercised all eight gates in both directions and captured rendered audio.
   It recorded, replayed and restored an engine-version-5 take with more than
@@ -84,6 +92,9 @@ Current automated evidence:
 - The current browser run measured less than `5.44 ms` maximum pointer-to-apply
   latency in this synthetic trace. It reported `5.33 ms` base latency and `32 ms`
   output latency. These are headless host results, not hardware population data.
+- The post-frontier-fix Chrome run reported zero underruns over `9.019 s`. Its
+  sampled Web Audio callback p95 was `5.02%`, and its maximum was `6.12%` of the
+  callback budget.
 - Three independent browser runs sampled Chrome's Web Audio render capacity by
   phase. The worst maximum was `13.33%`, and the worst run-level p95 was
   `10.65%`. A later build-and-test invocation produced a `62.66%` callback

@@ -365,6 +365,7 @@ struct AcousticReplaySnapshot {
     last_noise: f64,
     last_output_samples: Vec<f64>,
     window_miss_frames: usize,
+    window_programme_gain: f64,
     frames_since_motion: usize,
     frames_since_window_request: usize,
     scratch_gate: ScratchGate,
@@ -413,6 +414,7 @@ pub struct ScratchAcousticDsp {
     last_noise: f64,
     last_output_samples: Vec<f64>,
     window_miss_frames: usize,
+    window_programme_gain: f64,
     frames_since_motion: usize,
     frames_since_window_request: usize,
     output: Vec<f32>,
@@ -498,6 +500,7 @@ impl ScratchAcousticDsp {
             last_noise: 0.0,
             last_output_samples: Vec::new(),
             window_miss_frames: 0,
+            window_programme_gain: 1.0,
             frames_since_motion: output_sample_rate as usize,
             frames_since_window_request: output_sample_rate as usize,
             output: Vec::new(),
@@ -724,6 +727,7 @@ impl ScratchAcousticDsp {
         self.last_output_samples.clear();
         self.high_frequency_acceleration_limiter.reset();
         self.window_miss_frames = 0;
+        self.window_programme_gain = 1.0;
         self.ended = false;
     }
 
@@ -751,6 +755,7 @@ impl ScratchAcousticDsp {
         self.last_output_samples.clear();
         self.high_frequency_acceleration_limiter.reset();
         self.window_miss_frames = 0;
+        self.window_programme_gain = 1.0;
         self.ended = false;
     }
 
@@ -870,6 +875,7 @@ impl ScratchAcousticDsp {
             last_noise: self.last_noise,
             last_output_samples: self.last_output_samples.clone(),
             window_miss_frames: self.window_miss_frames,
+            window_programme_gain: self.window_programme_gain,
             frames_since_motion: self.frames_since_motion,
             frames_since_window_request: self.frames_since_window_request,
             scratch_gate: self.scratch_gate.clone(),
@@ -916,6 +922,7 @@ impl ScratchAcousticDsp {
         self.last_noise = snapshot.last_noise;
         self.last_output_samples = snapshot.last_output_samples;
         self.window_miss_frames = snapshot.window_miss_frames;
+        self.window_programme_gain = snapshot.window_programme_gain;
         self.frames_since_motion = snapshot.frames_since_motion;
         self.frames_since_window_request = snapshot.frames_since_window_request;
         self.scratch_gate = snapshot.scratch_gate;
@@ -976,6 +983,7 @@ impl ScratchAcousticDsp {
         self.last_noise = 0.0;
         self.last_output_samples.clear();
         self.window_miss_frames = 0;
+        self.window_programme_gain = 1.0;
         self.frames_since_motion = 0;
         self.frames_since_window_request = self.output_sample_rate as usize;
         self.requested_window_position = None;
@@ -1168,6 +1176,7 @@ impl ScratchAcousticDsp {
         self.last_output_samples.clear();
         self.high_frequency_acceleration_limiter.reset();
         self.window_miss_frames = 0;
+        self.window_programme_gain = 1.0;
         self.ended = false;
         if impulse > 0.0 {
             self.contact_impulse = self.contact_impulse.max(impulse).clamp(0.0, 1.0);
@@ -1347,11 +1356,6 @@ impl ScratchAcousticDsp {
             } else {
                 1.0
             };
-            let miss_fade = if self.window_miss_frames > 0 {
-                (1.0 - self.window_miss_frames as f64 / miss_fade_frames).clamp(0.0, 1.0)
-            } else {
-                1.0
-            };
             let mut missed_window = false;
             let mut programme = [0.0_f64; 2];
             let mut source_textures = [0.0_f64; 2];
@@ -1371,7 +1375,7 @@ impl ScratchAcousticDsp {
                 let (music, source_texture) = match detail {
                     None => {
                         missed_window = true;
-                        (self.last_output_samples[channel_index] * miss_fade, 0.0)
+                        (self.last_output_samples[channel_index], 0.0)
                     }
                     Some((sampled, slope, curvature)) => {
                         let drag_state = self.drag_lowpass_state[channel_index];
@@ -1407,8 +1411,9 @@ impl ScratchAcousticDsp {
                     self.output[output_index] = 0.0;
                     continue;
                 }
-                self.output[output_index] = (programme[channel_index]
-                    + source_textures[channel_index]
+                self.output[output_index] = ((programme[channel_index]
+                    + source_textures[channel_index])
+                    * self.window_programme_gain
                     + contact_texture
                     + dust_fleck
                     + impulse_noise)
@@ -1437,6 +1442,12 @@ impl ScratchAcousticDsp {
             } else {
                 0
             };
+            let programme_fade_step = 1.0 / miss_fade_frames;
+            self.window_programme_gain = if missed_window {
+                (self.window_programme_gain - programme_fade_step).max(0.0)
+            } else {
+                (self.window_programme_gain + programme_fade_step).min(1.0)
+            };
             if ended_this_render {
                 break;
             }
@@ -1460,12 +1471,14 @@ impl ScratchAcousticDsp {
             .round()
             .max(1.0);
         self.last_output_samples.resize(output_channel_count, 0.0);
+        let fade_step = 1.0 / fade_frames;
         for frame in 0..frame_count {
-            let fade = (1.0 - self.window_miss_frames as f64 / fade_frames).clamp(0.0, 1.0);
+            let fade = self.window_programme_gain;
             for channel_index in 0..output_channel_count {
                 self.output[frame * output_channel_count + channel_index] =
                     (self.last_output_samples[channel_index] * fade) as f32;
             }
+            self.window_programme_gain = (self.window_programme_gain - fade_step).max(0.0);
             self.window_miss_frames = self.window_miss_frames.saturating_add(1);
         }
         let gate_contact = self.active && self.hand_contact;
@@ -1954,6 +1967,7 @@ impl ScratchAcousticDsp {
         self.last_output_samples.clear();
         self.high_frequency_acceleration_limiter.reset();
         self.window_miss_frames = 0;
+        self.window_programme_gain = 1.0;
     }
 
     fn map_rate(&self, rate: f64) -> f64 {
@@ -2957,6 +2971,8 @@ mod tests {
         dsp.last_effective_rate = 1.0;
         dsp.platter_rotation_turns = 12.5;
         dsp.manual_fader_gain = 0.73;
+        dsp.window_miss_frames = 17;
+        dsp.window_programme_gain = 0.42;
         dsp.capture_replay_state();
 
         dsp.start();
@@ -2964,6 +2980,8 @@ mod tests {
         dsp.set_transport(true, 0.0, -4.0, 1.0);
         dsp.platter_rotation_turns = -3.0;
         dsp.manual_fader_gain = 0.0;
+        dsp.window_miss_frames = 0;
+        dsp.window_programme_gain = 1.0;
 
         assert!(dsp.restore_replay_state());
         assert!(!dsp.restore_replay_state());
@@ -2973,6 +2991,8 @@ mod tests {
         assert_eq!(dsp.last_effective_rate, 1.0);
         assert_eq!(dsp.platter_rotation_turns, 12.5);
         assert_eq!(dsp.manual_fader_gain, 0.73);
+        assert_eq!(dsp.window_miss_frames, 17);
+        assert_eq!(dsp.window_programme_gain, 0.42);
         dsp.render(32, 2);
         assert!(dsp.last_effective_rate > 0.99);
         assert!(dsp.output.iter().any(|sample| *sample != 0.0));
@@ -3112,6 +3132,38 @@ mod tests {
         default.render(2_048, 2);
         explicit_unity.render(2_048, 2);
         assert_eq!(default.output, explicit_unity.output);
+    }
+
+    #[test]
+    fn window_miss_holds_position_and_resumes_with_a_bounded_fade() {
+        let mut dsp = scratch_signal_dsp(ScratchPreset::Baby, 1.0);
+        dsp.render(512, 1);
+        let full_level = *dsp.output.last().unwrap();
+        let held_position = dsp.position;
+
+        dsp.render_window_missing(64, 1);
+        let short_miss_tail = *dsp.output.last().unwrap();
+        assert_eq!(dsp.position, held_position);
+        assert!(short_miss_tail.abs() < full_level.abs());
+
+        dsp.render(128, 1);
+        let short_resume_head = dsp.output[0];
+        assert!((short_resume_head - short_miss_tail).abs() < 0.01);
+        assert!(dsp.position > held_position);
+        assert!(dsp.output[127].abs() > short_resume_head.abs());
+
+        let second_held_position = dsp.position;
+        dsp.render_window_missing(512, 1);
+        let long_miss_tail = *dsp.output.last().unwrap();
+        assert_eq!(dsp.position, second_held_position);
+        assert!(long_miss_tail.abs() < 1e-7);
+
+        dsp.render(128, 1);
+        assert!(dsp.output[0].abs() < 1e-7);
+        assert!(dsp.output[127].abs() > dsp.output[0].abs());
+        assert!(dsp.position > second_held_position);
+        dsp.render(512, 1);
+        assert!((*dsp.output.last().unwrap()).abs() > full_level.abs() * 0.95);
     }
 
     #[test]
