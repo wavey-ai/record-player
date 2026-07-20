@@ -114,13 +114,20 @@ RPM accepts a continuous value from 16 through 90. Volume and crossfader accept 
 ## Scratch controls
 
 ```js
-await player.beginScratch({ pointerId, rotationDegrees, grip: 0.65 });
-await player.updateScratch({ positionFrames, rate, rotationDegrees, impulse, grip: 0.9 });
-await player.endScratch({ rotationDegrees, resumePlayback: true });
+await player.beginScratch({ pointerId, rotationDegrees, grip: 0.65, inputTimeMs });
+await player.updateScratch({ positionFrames, rate, rotationDegrees, impulse, grip: 0.9, inputTimeMs });
+await player.endScratch({ rotationDegrees, resumePlayback: true, inputTimeMs });
 
 player.setScratchPreset("flare");
 player.setScratchClicks(2);
 ```
+
+`inputTimeMs` uses the browser performance clock. The host projects it to an
+integer AudioContext `outputFrame` and sends that same frame through capture and
+the ordered Rust scratch protocol. A programmatic controller may supply
+`outputFrame` directly instead. Future frames are clamped to the current audio
+frame because live commands are not scheduled ahead. When both fields are
+omitted, the current output frame is used.
 
 The manual crossfader and the audio-rate technique gate are independent:
 
@@ -222,6 +229,8 @@ const unsubscribe = player.subscribe(state => {
   state.surfaceEffects;
   state.pointerToAudioLatencyMs;
   state.pointerAppliedCommandId;
+  state.pointerInputOutputFrame;
+  state.pointerAppliedOutputFrame;
   state.audioBaseLatencyMs;
   state.audioOutputLatencyMs;
   state.audioPlaybackStats;
@@ -248,7 +257,9 @@ overlapping replays cannot race it.
 target, and `scratchDirection` is `-1`, `0` or `1`. Gate phase and stroke
 progress are travel-derived values; the worklet publishes snapshots rather than
 calling JavaScript once per audio frame. Browser/command latency values can be
-`null` until measurable. `deadwaxProgress` reaches `1` at the end of the
+`null` until measurable. `pointerInputOutputFrame` is the pointer event's
+projected audio-clock frame; `pointerAppliedOutputFrame` is where the worklet
+accepted it. `deadwaxProgress` reaches `1` at the end of the
 two-turn traversal; `deadwaxActive` stays true during the persistent lock.
 
 `audioPlaybackStats` has `supported`, `api`, `underrunEvents`,
@@ -501,10 +512,14 @@ coordinates and rendered audio are not stored. Schema v2 separates its clocks:
 - `sourceSampleRate` defines every `positionFrames` value.
 - `outputSampleRate` defines event `frameOffset` and `durationFrames`.
 - `engine.gateAlgorithmVersion` identifies the gate behavior.
+- `engine.version` is `5` for projected-pointer-frame capture.
 - `initialState` captures preset, clicks, manual crossfader/fader curve, and the
   programme-HF and stylus-tracing strengths.
 - `scratch-preset`, `scratch-clicks` and `manual-crossfader` changes are stored
   as output-frame-timed events alongside scratch start/motion/end.
+- Pointer scratch offsets come from the pointer event's projected output frame.
+  `pointerInputOutputFrame` and `pointerAppliedOutputFrame` expose the requested
+  and worklet-applied clocks separately.
 
 ```js
 {
@@ -512,7 +527,7 @@ coordinates and rendered audio are not stored. Schema v2 separates its clocks:
   sourceSampleRate: 48000,
   outputSampleRate: 48000,
   durationFrames,
-  engine: { gateAlgorithmVersion: 3 },
+  engine: { version: 5, gateAlgorithmVersion: 3 },
   initialState: {
     positionFrames,
     preset: "flare",

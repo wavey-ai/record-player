@@ -532,7 +532,9 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
 
   captureInputTiming(message) {
     const inputAudioTime = Number(message.inputAudioTime);
+    const inputOutputFrame = Number(message.outputFrame);
     const hasInputTime = Number.isFinite(inputAudioTime);
+    const hasInputOutputFrame = Number.isFinite(inputOutputFrame);
     const hasCommandId = message.commandId !== undefined && message.commandId !== null;
     if (!hasInputTime && !hasCommandId) return;
     const appliedFrame = Math.max(0, Number(currentFrame) || 0);
@@ -542,6 +544,8 @@ class BitneedlePlayerProcessor extends AudioWorkletProcessor {
     this.lastInputTiming = {
       commandId: hasCommandId ? message.commandId : null,
       inputAudioTime: hasInputTime ? inputAudioTime : null,
+      inputOutputFrame: hasInputOutputFrame ? Math.max(0, Math.round(inputOutputFrame)) : null,
+      inputAppliedOutputFrame: appliedFrame,
       inputAppliedAudioTime: appliedAudioTime,
       inputLatencyMs: hasInputTime ? Math.max(0, (appliedAudioTime - inputAudioTime) * 1000) : null,
     };

@@ -531,6 +531,7 @@ export function createVinylPlayerCanvas(player, canvas, options = {}) {
         pressure: motion.pressure,
         grip: motion.grip,
         handContact: motion.handContact,
+        inputTimeMs: Number(event.timeStamp) || performance.now(),
       });
     }
     scheduleRender();

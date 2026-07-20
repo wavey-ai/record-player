@@ -146,7 +146,7 @@ measured audio-thread reason to make either change.
 ## Automated evidence
 
 - `cargo test --workspace`: 92 tests.
-- `node --test test/*.test.mjs`: 71 tests.
+- `node --test test/*.test.mjs`: 74 tests.
 - The canvas regression anchors the visible platter to audio-owned phase and
   covers half-speed forward motion, full-speed reverse motion and zero-rate
   hold. It rejects nominal-RPM animation.
@@ -177,12 +177,17 @@ measured audio-thread reason to make either change.
 - Chrome intercepted the actual worklet seek messages. It verified that active
   playback used one `50–140 ms` early landing and never exposed the exact visual
   aim before that landing.
-- It captured rendered output and replayed an engine-version-4 take with more
+- It captured rendered output and replayed an engine-version-5 take with more
   than 400 events. Capture preserved grip values `0.25`, `0.35` and `0.85`, and
   public grip returned to zero on release.
 - Browser scratch begin used `-1.4×` intent and a `0.37` grab impulse. Reverse
   intent remained active after the Rust-core round trip, and capture retained
   both values. This rejects a later zero-rate command overwrite.
+- Browser pointer timestamps projected onto explicit output frames carried by
+  host, worklet and Rust begin/move/end commands. A `40 ms` delayed marker
+  must record within 512 frames of its independent browser-clock projection.
+  Requested and applied output frames are exposed separately and must agree
+  with latency telemetry.
 - It restored the pre-replay Rust state.
 - A second trusted touch moved and released XFADE.
 - The record touch remained active until its own release.

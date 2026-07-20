@@ -2,6 +2,7 @@ import { createLogger, setPlayerLoggingEnabled, isPlayerLoggingEnabled, isPlayer
 import { readAudioPlaybackStats } from "./audio-playback-stats.js";
 import { measureAcousticLoopbackLatency } from "./audio-loopback-latency.js";
 import { createVinylPlayerCanvas } from "./player-canvas.js";
+import { projectPointerOutputFrame } from "./player-input-timing.js";
 import { createProgrammeStylusCalibration } from "./player-stylus-calibration.js";
 import { RecordDecoderClient } from "./record-decoder-client.js";
 import { createPcmChunkCacheHandler, recordCacheKey } from "./pcm-cache.js";
@@ -470,6 +471,8 @@ const state = {
   pointerToAudioLatencyMs: null,
   pointerCommandId: 0,
   pointerAppliedCommandId: null,
+  pointerInputOutputFrame: null,
+  pointerAppliedOutputFrame: null,
   lastDspRotationTurns: null,
   cleanEnd: false,
   canvasController: null,
@@ -2391,9 +2394,10 @@ function executeCommand(command) {
       handContact,
       motorRate: Number(command.motor_rate) || 0,
       grip: state.scratchGrip,
+      outputFrame: Math.max(0, Number(command.output_frame) || 0),
     });
   } else if (command.type === "set_scratch_target") {
-    state.node.port.postMessage({ type: "scratch", active: true, position: command.position_frames, rate: command.rate, impulse: command.impulse });
+    state.node.port.postMessage({ type: "scratch", active: true, position: command.position_frames, rate: command.rate, impulse: command.impulse, outputFrame: Math.max(0, Number(command.output_frame) || 0) });
   } else if (command.type === "set_scratch_position") {
     seekWorklet(command.position_frames, command.impulse);
   } else if (command.type === "start_surface_region") {
@@ -2653,6 +2657,12 @@ function handleWorkletMessage(event) {
       state.pointerToAudioLatencyMs = message.inputLatencyMs;
       state.pointerAppliedCommandId = Number.isFinite(Number(message.commandId))
         ? Number(message.commandId)
+        : null;
+      state.pointerInputOutputFrame = Number.isFinite(Number(message.inputOutputFrame))
+        ? Number(message.inputOutputFrame)
+        : null;
+      state.pointerAppliedOutputFrame = Number.isFinite(Number(message.inputAppliedOutputFrame))
+        ? Number(message.inputAppliedOutputFrame)
         : null;
     }
 
@@ -3147,16 +3157,21 @@ function audioFrameNow() {
   return Math.max(0, Math.round((state.context?.currentTime || 0) * outputSampleRate));
 }
 
-function pointerAudioTiming(inputTimeMs) {
-  if (!state.context || !Number.isFinite(Number(inputTimeMs))) return {};
-  let timestamp = Number(inputTimeMs);
-  if (timestamp > 1_000_000_000_000 && Number.isFinite(performance.timeOrigin)) {
-    timestamp -= performance.timeOrigin;
-  }
-  const ageMs = clamp(performance.now() - timestamp, 0, 1000);
+function pointerAudioTiming(inputTimeMs, requestedOutputFrame) {
+  const outputSampleRate = state.context?.sampleRate || state.sampleRate;
+  const outputFrame = projectPointerOutputFrame({
+    sampleRate: outputSampleRate,
+    currentAudioTime: state.context?.currentTime || 0,
+    inputTimeMs,
+    nowMs: performance.now(),
+    timeOriginMs: performance.timeOrigin,
+    requestedOutputFrame,
+  });
+  if (!state.context) return { outputFrame };
   return {
     commandId: ++state.pointerCommandId,
-    inputAudioTime: Math.max(0, state.context.currentTime - ageMs / 1000),
+    inputAudioTime: outputFrame / outputSampleRate,
+    outputFrame,
   };
 }
 
@@ -3182,8 +3197,8 @@ function scratchInitialState() {
   };
 }
 
-function recordScratchEvent(event) {
-  const frame = audioFrameNow();
+function recordScratchEvent(event, outputFrame = audioFrameNow()) {
+  const frame = Math.max(0, Math.round(Number(outputFrame) || 0));
   for (const recorder of state.scratchRecorders) recorder.capture(event, frame);
 }
 
@@ -3230,7 +3245,7 @@ function createScratchRecorder({ name = "" } = {}) {
         durationMs: durationFrames / outputSampleRate * 1000,
         engine: {
           name: "vin.yl.player.acoustic",
-          version: 4,
+          version: 5,
           gateAlgorithmVersion: SCRATCH_GATE_ALGORITHM_VERSION,
           recordProfile: elements.metaProfile?.textContent || "",
           nativeRpm: state.baseRpm
@@ -3461,6 +3476,8 @@ function publicState() {
     surfaceEffects: state.surfaceEffects,
     pointerToAudioLatencyMs: state.pointerToAudioLatencyMs,
     pointerAppliedCommandId: state.pointerAppliedCommandId,
+    pointerInputOutputFrame: state.pointerInputOutputFrame,
+    pointerAppliedOutputFrame: state.pointerAppliedOutputFrame,
     audioBaseLatencyMs: Number.isFinite(state.context?.baseLatency)
       ? state.context.baseLatency * 1000
       : null,
@@ -3666,6 +3683,8 @@ const api = Object.freeze({
     state.replayScratching = false;
     state.pointerToAudioLatencyMs = null;
     state.pointerAppliedCommandId = null;
+    state.pointerInputOutputFrame = null;
+    state.pointerAppliedOutputFrame = null;
     state.effectiveRate = 0;
     state.packetGain = 1;
     state.mixerGain = 1;
@@ -3746,7 +3765,7 @@ const api = Object.freeze({
     // stylus re-placement with needle-drop foley, never a brake/restart.
     if (lowering && view?.transport_on) state.node?.port.postMessage({ type: "needle-drop" });
   },
-  beginScratch: ({ pointerId = 0, rotationDegrees = state.rotation, positionFrames = state.positionFrames, rate = 0, impulse = 0.22, pressure, grip, pointerType, inputTimeMs } = {}) => {
+  beginScratch: ({ pointerId = 0, rotationDegrees = state.rotation, positionFrames = state.positionFrames, rate = 0, impulse = 0.22, pressure, grip, pointerType, inputTimeMs, outputFrame } = {}) => {
     if (!grooveInteractionReady() || state.scratching || state.scratchReplayRequests.size) {
       return Promise.resolve(false);
     }
@@ -3763,7 +3782,11 @@ const api = Object.freeze({
     state.scratchGrip = nextGrip;
     if (Number.isFinite(Number(rotationDegrees))) state.rotation = Number(rotationDegrees);
     publishState();
-    recordScratchEvent({ type: "scratch-start", positionFrames: position, rate: nextRate, impulse: nextImpulse, grip: nextGrip });
+    const timing = pointerAudioTiming(inputTimeMs, outputFrame);
+    recordScratchEvent(
+      { type: "scratch-start", positionFrames: position, rate: nextRate, impulse: nextImpulse, grip: nextGrip },
+      timing.outputFrame,
+    );
     state.node?.port.postMessage({
       type: "scratch",
       active: true,
@@ -3771,14 +3794,14 @@ const api = Object.freeze({
       rate: nextRate,
       impulse: nextImpulse,
       grip: nextGrip,
-      ...pointerAudioTiming(inputTimeMs),
+      ...timing,
     });
     return dispatch(
-      { type: "begin_scratch", deck: "a", pointer_id: pointerId, playback_seconds: framesToSeconds(position), rotation_degrees: rotationDegrees, rate: nextRate, impulse: nextImpulse, grip: nextGrip },
+      { type: "begin_scratch", deck: "a", pointer_id: pointerId, playback_seconds: framesToSeconds(position), rotation_degrees: rotationDegrees, rate: nextRate, impulse: nextImpulse, grip: nextGrip, output_frame: timing.outputFrame },
       { loadSequence },
     );
   },
-  updateScratch: ({ positionFrames, rate = 0, rotationDegrees = state.rotation, impulse = 0, pressure, grip, pointerType, inputTimeMs } = {}) => {
+  updateScratch: ({ positionFrames, rate = 0, rotationDegrees = state.rotation, impulse = 0, pressure, grip, pointerType, inputTimeMs, outputFrame } = {}) => {
     if (!grooveInteractionReady() || !state.scratching || state.scratchReplayRequests.size) {
       return Promise.resolve(false);
     }
@@ -3793,27 +3816,35 @@ const api = Object.freeze({
     state.scratchGrip = nextGrip;
     if (Number.isFinite(Number(rotationDegrees))) state.rotation = Number(rotationDegrees);
     state.positionFrames = position;
-    recordScratchEvent({ type: "scratch-motion", positionFrames: position, rate: nextRate, impulse: nextImpulse, grip: nextGrip });
+    const timing = pointerAudioTiming(inputTimeMs, outputFrame);
+    recordScratchEvent(
+      { type: "scratch-motion", positionFrames: position, rate: nextRate, impulse: nextImpulse, grip: nextGrip },
+      timing.outputFrame,
+    );
     state.node?.port.postMessage({
       type: "motion",
       position,
       rate: nextRate,
       impulse: nextImpulse,
       grip: nextGrip,
-      ...pointerAudioTiming(inputTimeMs),
+      ...timing,
     });
     publishState();
     return Promise.resolve();
   },
-  endScratch: ({ rotationDegrees = state.rotation, resumePlayback = true } = {}) => {
+  endScratch: ({ rotationDegrees = state.rotation, resumePlayback = true, inputTimeMs, outputFrame } = {}) => {
     if (!state.scratching || state.scratchReplayRequests.size) return Promise.resolve(false);
     state.scratching = false;
     state.scratchGrip = 0;
     if (Number.isFinite(Number(rotationDegrees))) state.rotation = Number(rotationDegrees);
     publishState();
-    recordScratchEvent({ type: "scratch-end", positionFrames: state.positionFrames, rate: 0, impulse: 0, grip: 0, resumePlayback: Boolean(resumePlayback) });
-    state.node?.port.postMessage({ type: "scratch", active: false, position: state.positionFrames, rate: 0, impulse: 0, grip: 0 });
-    return dispatch({ type: "end_scratch", deck: "a", rendered_position_frames: state.positionFrames, rotation_degrees: rotationDegrees, resume_playback: Boolean(resumePlayback), save_sample: false, can_platter_handoff: true });
+    const timing = pointerAudioTiming(inputTimeMs, outputFrame);
+    recordScratchEvent(
+      { type: "scratch-end", positionFrames: state.positionFrames, rate: 0, impulse: 0, grip: 0, resumePlayback: Boolean(resumePlayback) },
+      timing.outputFrame,
+    );
+    state.node?.port.postMessage({ type: "scratch", active: false, position: state.positionFrames, rate: 0, impulse: 0, grip: 0, ...timing });
+    return dispatch({ type: "end_scratch", deck: "a", rendered_position_frames: state.positionFrames, rotation_degrees: rotationDegrees, resume_playback: Boolean(resumePlayback), save_sample: false, can_platter_handoff: true, output_frame: timing.outputFrame });
   },
   createScratchRecorder,
   startScratchRecording,

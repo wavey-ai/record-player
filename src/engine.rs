@@ -177,6 +177,7 @@ impl PlayerEngine {
                         hand_contact: self.deck(deck).scratch.active,
                         motor_rate: rate,
                         grip: self.deck(deck).scratch.grip,
+                        output_frame: 0,
                     });
                 }
                 if self.deck(deck).playback.playing {
@@ -212,6 +213,7 @@ impl PlayerEngine {
                 rate,
                 impulse,
                 grip,
+                output_frame,
             } => self.begin_scratch(
                 deck,
                 pointer_id,
@@ -220,6 +222,7 @@ impl PlayerEngine {
                 rate,
                 impulse,
                 grip,
+                output_frame,
             )?,
             PlayerEvent::MoveScratch {
                 deck,
@@ -229,6 +232,7 @@ impl PlayerEngine {
                 rotation_degrees,
                 impulse,
                 grip,
+                output_frame,
             } => self.move_scratch(
                 deck,
                 position_frames,
@@ -237,6 +241,7 @@ impl PlayerEngine {
                 rotation_degrees,
                 impulse,
                 grip,
+                output_frame,
             )?,
             PlayerEvent::ScratchRenderedPosition {
                 deck,
@@ -257,6 +262,7 @@ impl PlayerEngine {
                 resume_playback,
                 save_sample,
                 can_platter_handoff,
+                output_frame,
             } => self.end_scratch(
                 deck,
                 rendered_position_frames,
@@ -264,6 +270,7 @@ impl PlayerEngine {
                 resume_playback,
                 save_sample,
                 can_platter_handoff,
+                output_frame,
             )?,
             PlayerEvent::SetCrossfader { value } => {
                 if !value.is_finite() {
@@ -307,6 +314,7 @@ impl PlayerEngine {
             hand_contact: false,
             motor_rate: rate,
             grip: 0.0,
+            output_frame: 0,
         });
         if running {
             let should_play = self.deck(deck).playback.load_status == LoadStatus::Ready
@@ -349,7 +357,7 @@ impl PlayerEngine {
         if self.deck(deck).scratch.active {
             let rendered = self.deck(deck).scratch.rendered_position_frames;
             let rot = self.deck(deck).scratch.base_rotation_degrees;
-            self.end_scratch(deck, rendered, rot, false, false, false)?;
+            self.end_scratch(deck, rendered, rot, false, false, false, 0)?;
             self.set_needle(deck, true, self.deck(deck).playback.current_seconds)?;
             return Ok(());
         }
@@ -553,6 +561,7 @@ impl PlayerEngine {
             hand_contact: false,
             motor_rate: self.deck(deck).playback.playback_rate,
             grip: 0.0,
+            output_frame: 0,
         });
         self.deck_mut(deck).needle.lifted = false;
         let target = match region {
@@ -640,6 +649,7 @@ impl PlayerEngine {
         rate: f32,
         impulse: f32,
         grip: f32,
+        output_frame: u64,
     ) -> Result<(), PlayerError> {
         if !seconds.is_finite()
             || !rotation.is_finite()
@@ -688,17 +698,20 @@ impl PlayerEngine {
                 0.0
             },
             grip: grip.clamp(0.0, 1.0),
+            output_frame,
         });
         self.commands.push(HostCommand::SetScratchTarget {
             deck,
             position_frames: frames,
             rate,
             impulse: impulse.clamp(0.0, 1.0),
+            output_frame,
         });
         self.commands.push(HostCommand::CaptureScratchStart {
             deck,
             start_seconds: seconds,
             rotation_degrees: rotation,
+            output_frame,
         });
         self.commands.push(HostCommand::RefreshView);
         Ok(())
@@ -713,6 +726,7 @@ impl PlayerEngine {
         rotation: f64,
         impulse: f32,
         grip: f32,
+        output_frame: u64,
     ) -> Result<(), PlayerError> {
         if !position.is_finite()
             || !rendered.is_finite()
@@ -743,12 +757,14 @@ impl PlayerEngine {
                 0.0
             },
             grip: grip.clamp(0.0, 1.0),
+            output_frame,
         });
         self.commands.push(HostCommand::SetScratchTarget {
             deck,
             position_frames: position.max(0.0),
             rate,
             impulse: impulse.clamp(0.0, 1.0),
+            output_frame,
         });
         self.commands.push(HostCommand::RefreshView);
         Ok(())
@@ -762,6 +778,7 @@ impl PlayerEngine {
         resume: bool,
         save: bool,
         handoff: bool,
+        output_frame: u64,
     ) -> Result<(), PlayerError> {
         if !rendered.is_finite() || !rotation.is_finite() {
             return Err(PlayerError::InvalidNumber);
@@ -776,6 +793,7 @@ impl PlayerEngine {
             end_seconds: seconds,
             rotation_degrees: rotation,
             save_sample: save,
+            output_frame,
         });
         let should_resume = was_playing && resume;
         {
@@ -793,6 +811,7 @@ impl PlayerEngine {
                 0.0
             },
             grip: 0.0,
+            output_frame,
         });
         if should_resume {
             if !handoff {
@@ -1030,6 +1049,7 @@ mod tests {
             rate: 0.0,
             impulse: 0.22,
             grip: 1.0,
+            output_frame: 0,
         })
         .unwrap();
         e.drain_commands();
@@ -1041,6 +1061,7 @@ mod tests {
             rotation_degrees: 80.0,
             impulse: 0.0,
             grip: 1.0,
+            output_frame: 0,
         })
         .unwrap();
         e.drain_commands();
@@ -1051,9 +1072,25 @@ mod tests {
             resume_playback: true,
             save_sample: true,
             can_platter_handoff: true,
+            output_frame: 34_567,
         })
         .unwrap();
         let commands = e.drain_commands();
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            HostCommand::CaptureScratchFinish {
+                output_frame: 34_567,
+                ..
+            }
+        )));
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            HostCommand::SetScratchTransport {
+                hand_contact: false,
+                output_frame: 34_567,
+                ..
+            }
+        )));
         assert!(!commands
             .iter()
             .any(|c| matches!(c, HostCommand::StartPacketPlayback { .. })));
@@ -1081,6 +1118,7 @@ mod tests {
                 rate: 0.0,
                 impulse: 0.22,
                 grip: 1.0,
+                output_frame: 0,
             })
             .unwrap();
             let expected_start = source_rate * 2.0;
@@ -1094,6 +1132,7 @@ mod tests {
                 resume_playback: true,
                 save_sample: false,
                 can_platter_handoff: true,
+                output_frame: 0,
             })
             .unwrap();
             assert!((e.state().decks[0].playback.current_seconds - 3.0).abs() < f64::EPSILON);
@@ -1112,6 +1151,7 @@ mod tests {
             rate: 0.0,
             impulse: 0.22,
             grip: 1.0,
+            output_frame: 0,
         })
         .unwrap();
         let commands = e.drain_commands();
@@ -1132,6 +1172,7 @@ mod tests {
             rate: -1.25,
             impulse: 0.6,
             grip: 0.25,
+            output_frame: 12_345,
         })
         .unwrap();
         assert!((e.state().decks[0].scratch.target_rate - -1.25).abs() < f32::EPSILON);
@@ -1139,12 +1180,12 @@ mod tests {
         let commands = e.drain_commands();
         assert!(commands.iter().any(|command| matches!(
             command,
-            HostCommand::SetScratchTransport { hand_contact: true, grip, .. }
+            HostCommand::SetScratchTransport { hand_contact: true, grip, output_frame: 12_345, .. }
                 if (*grip - 0.25).abs() < f32::EPSILON
         )));
         assert!(commands.iter().any(|command| matches!(
             command,
-            HostCommand::SetScratchTarget { rate, impulse, .. }
+            HostCommand::SetScratchTarget { rate, impulse, output_frame: 12_345, .. }
                 if (*rate - -1.25).abs() < f32::EPSILON
                     && (*impulse - 0.6).abs() < f32::EPSILON
         )));
@@ -1157,12 +1198,13 @@ mod tests {
             rotation_degrees: 20.0,
             impulse: 0.0,
             grip: 2.0,
+            output_frame: 23_456,
         })
         .unwrap();
         assert_eq!(e.state().decks[0].scratch.grip, 1.0);
         assert!(e.drain_commands().iter().any(|command| matches!(
             command,
-            HostCommand::SetScratchTransport { hand_contact: true, grip, .. }
+            HostCommand::SetScratchTransport { hand_contact: true, grip, output_frame: 23_456, .. }
                 if (*grip - 1.0).abs() < f32::EPSILON
         )));
     }
@@ -1181,6 +1223,7 @@ mod tests {
             rate: 0.0,
             impulse: 0.22,
             grip: 1.0,
+            output_frame: 0,
         })
         .unwrap();
         e.drain_commands();
@@ -1191,6 +1234,7 @@ mod tests {
             resume_playback: true,
             save_sample: false,
             can_platter_handoff: false,
+            output_frame: 0,
         })
         .unwrap();
         assert!(e.drain_commands().iter().any(|command| matches!(command,
@@ -1212,6 +1256,7 @@ mod tests {
             rate: 0.0,
             impulse: 0.22,
             grip: 1.0,
+            output_frame: 0,
         })
         .unwrap();
         e.drain_commands();
@@ -1222,6 +1267,7 @@ mod tests {
             resume_playback: false,
             save_sample: false,
             can_platter_handoff: true,
+            output_frame: 0,
         })
         .unwrap();
         assert!(!e.state().decks[0].playback.playing);
@@ -1272,6 +1318,7 @@ mod tests {
                                 rate: 0.0,
                                 impulse: 0.22,
                                 grip: 1.0,
+                                output_frame: 0,
                             })
                             .unwrap();
                             e.drain_commands();
@@ -1282,6 +1329,7 @@ mod tests {
                                 resume_playback: resume,
                                 save_sample: false,
                                 can_platter_handoff: handoff,
+                                output_frame: 0,
                             })
                             .unwrap();
                             let commands = e.drain_commands();
@@ -1412,6 +1460,7 @@ mod tests {
             rate: 0.0,
             impulse: 0.22,
             grip: 1.0,
+            output_frame: 0,
         })
         .unwrap();
         assert!(!e.state().lead_in.active);

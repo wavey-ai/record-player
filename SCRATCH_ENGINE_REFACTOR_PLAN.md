@@ -9,7 +9,7 @@ is made.
 Current automated evidence:
 
 - `cargo test --workspace`: 92 tests (87 `record-player`, 5 `player-wasm`).
-- `node --test test/*.test.mjs`: 71 tests. Canvas tests check audio-owned phase
+- `node --test test/*.test.mjs`: 74 tests. Canvas tests check audio-owned phase
   at half-speed forward, full-speed reverse and rest, plus all eight preset and
   click-count selections through independent mouse and touch gestures.
 - The default tonearm now consumes decoded programme-gap anchors through the
@@ -34,11 +34,16 @@ Current automated evidence:
   prior `890df8bd...` output and must differ.
 - `npm run test:browser`: Chrome 150 loaded real release WASM at 48 kHz.
   It exercised all eight gates in both directions and captured rendered audio.
-  It recorded, replayed and restored an engine-version-4 take with more than
+  It recorded, replayed and restored an engine-version-5 take with more than
   400 events. The take retained begin/motion grip values `0.25`, `0.35` and
   `0.85`; public grip returned to zero on release.
   Scratch begin also retained `-1.4×` reverse intent and a `0.37` grab impulse
   after the Rust-core round trip instead of replacing them with zeros.
+  Pointer input timestamps now project onto one bounded integer output frame
+  carried through the worklet message, Rust command protocol and capture. A
+  deliberately delayed browser marker must record within 512 frames of its
+  independently calculated intent offset while applied-frame telemetry remains
+  separate.
   It kept a trusted record touch active while a second touch moved XFADE. The
   API, trusted mouse, trusted touch and trusted keyboard paths each selected
   all eight presets and all eight click counts while XFADE remained at `0.37`.

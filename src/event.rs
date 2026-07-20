@@ -94,6 +94,8 @@ pub enum PlayerEvent {
         impulse: f32,
         #[serde(default = "default_scratch_grip")]
         grip: f32,
+        #[serde(default)]
+        output_frame: u64,
     },
     MoveScratch {
         deck: DeckId,
@@ -104,6 +106,8 @@ pub enum PlayerEvent {
         impulse: f32,
         #[serde(default = "default_scratch_grip")]
         grip: f32,
+        #[serde(default)]
+        output_frame: u64,
     },
     ScratchRenderedPosition {
         deck: DeckId,
@@ -116,6 +120,8 @@ pub enum PlayerEvent {
         resume_playback: bool,
         save_sample: bool,
         can_platter_handoff: bool,
+        #[serde(default)]
+        output_frame: u64,
     },
     SetCrossfader {
         value: f32,
@@ -156,12 +162,30 @@ mod tests {
             "impulse": 0.0
         }))
         .unwrap();
+        let end: PlayerEvent = serde_json::from_value(serde_json::json!({
+            "type": "end_scratch",
+            "deck": "a",
+            "rendered_position_frames": 96_000.0,
+            "rotation_degrees": 0.0,
+            "resume_playback": true,
+            "save_sample": false,
+            "can_platter_handoff": true
+        }))
+        .unwrap();
 
         assert!(matches!(
             begin,
-            PlayerEvent::BeginScratch { rate, impulse, grip, .. }
-                if rate == 0.0 && impulse == 0.22 && grip == 1.0
+            PlayerEvent::BeginScratch { rate, impulse, grip, output_frame, .. }
+                if rate == 0.0 && impulse == 0.22 && grip == 1.0 && output_frame == 0
         ));
-        assert!(matches!(movement, PlayerEvent::MoveScratch { grip, .. } if grip == 1.0));
+        assert!(matches!(
+            movement,
+            PlayerEvent::MoveScratch { grip, output_frame, .. }
+                if grip == 1.0 && output_frame == 0
+        ));
+        assert!(matches!(
+            end,
+            PlayerEvent::EndScratch { output_frame, .. } if output_frame == 0
+        ));
     }
 }

@@ -478,6 +478,8 @@ async function runBrowserScenario() {
   }]));
   let activePreset = "baby";
   let maximumLatencyMs = 0;
+  let collectPointerLatency = true;
+  let lastCollectedPointerCommandId = null;
   const unsubscribe = player.subscribe(snapshot => {
     if (!snapshot.scratching) return;
     const trace = traces[activePreset];
@@ -485,13 +487,20 @@ async function runBrowserScenario() {
     trace.maximumGate = Math.max(trace.maximumGate, Number(snapshot.scratchGate));
     trace.directions.add(Number(snapshot.scratchDirection));
     trace.samples += 1;
-    if (Number.isFinite(snapshot.pointerToAudioLatencyMs)) {
+    if (
+      collectPointerLatency
+      && Number.isInteger(snapshot.pointerAppliedCommandId)
+      && snapshot.pointerAppliedCommandId !== lastCollectedPointerCommandId
+      && Number.isFinite(snapshot.pointerToAudioLatencyMs)
+    ) {
+      lastCollectedPointerCommandId = snapshot.pointerAppliedCommandId;
       maximumLatencyMs = Math.max(maximumLatencyMs, snapshot.pointerToAudioLatencyMs);
     }
   });
 
   setPhase("scratch-presets");
   let positionFrames = player.getState().positionFrames;
+  const recordingStartedAtMs = performance.now();
   player.startScratchRecording({ name: "Chrome smoke" });
   const began = await player.beginScratch({
     pointerId: 41,
@@ -507,6 +516,30 @@ async function runBrowserScenario() {
   await wait(80);
   const beginDirectionAfterCore = player.getState().scratchDirection;
   assert(beginDirectionAfterCore === -1, "The Rust begin command overwrote initial reverse intent");
+
+  const delayedInputTimeMs = performance.now() - 40;
+  const delayedInputExpectedOffsetFrames = Math.max(
+    0,
+    Math.round((delayedInputTimeMs - recordingStartedAtMs) * loaded.outputSampleRate / 1_000),
+  );
+  const delayedInputPriorCommandId = player.getState().pointerAppliedCommandId;
+  positionFrames += 0.333 * loaded.sampleRate * 0.008;
+  collectPointerLatency = false;
+  await player.updateScratch({
+    positionFrames,
+    rate: 0.333,
+    rotationDegrees: 1,
+    impulse: 0.019,
+    grip: 0.55,
+    inputTimeMs: delayedInputTimeMs,
+  });
+  await waitUntil(
+    () => player.getState().pointerAppliedCommandId !== delayedInputPriorCommandId,
+    1_000,
+    "The worklet did not acknowledge the delayed pointer marker",
+  );
+  lastCollectedPointerCommandId = player.getState().pointerAppliedCommandId;
+  collectPointerLatency = true;
 
   for (const preset of presetNames) {
     activePreset = preset;
@@ -542,7 +575,7 @@ async function runBrowserScenario() {
   const recordedTake = await player.stopScratchRecording({ save: false });
   assert(recordedTake?.events?.length > 10, "The browser scratch take did not record engine events");
   assert(recordedTake.schemaVersion === 2, "The browser scratch take did not use schema version 2");
-  assert(recordedTake.engine?.version === 4, "The browser scratch take did not use variable-grip replay engine version 4");
+  assert(recordedTake.engine?.version === 5, "The browser scratch take did not identify projected-input capture engine version 5");
   assert(recordedTake.engine?.gateAlgorithmVersion === 3, "The browser scratch take did not identify gate algorithm version 3");
   assert(Number.isInteger(recordedTake.replaySeed) && recordedTake.replaySeed > 0, "The browser scratch take did not store a replay seed");
   assert(Number.isFinite(recordedTake.initialState?.rotationDegrees), "The browser scratch take did not store its platter angle");
@@ -554,6 +587,16 @@ async function runBrowserScenario() {
   const recordedStart = recordedTake.events.find(event => event.type === "scratch-start");
   assert(recordedStart?.rate === -1.4, "The browser take did not record begin rate");
   assert(recordedStart?.impulse === 0.37, "The browser take did not record grab impulse");
+  const delayedInputEvent = recordedTake.events.find(event => (
+    event.type === "scratch-motion"
+    && event.rate === 0.333
+    && event.impulse === 0.019
+  ));
+  assert(delayedInputEvent, "The browser take did not retain the projected-input marker");
+  assert(
+    Math.abs(delayedInputEvent.frameOffset - delayedInputExpectedOffsetFrames) <= 512,
+    `Projected pointer frame ${delayedInputEvent.frameOffset} missed ${delayedInputExpectedOffsetFrames}`,
+  );
   let replayObserved = false;
   const unsubscribeReplay = player.subscribe(snapshot => {
     replayObserved ||= Boolean(snapshot.scratchReplayActive);
@@ -636,6 +679,23 @@ async function runBrowserScenario() {
     Number.isInteger(pointerAppliedCommandId) && pointerAppliedCommandId > 0,
     "The public player state did not identify the applied pointer command",
   );
+  const pointerInputOutputFrame = player.getState().pointerInputOutputFrame;
+  const pointerAppliedOutputFrame = player.getState().pointerAppliedOutputFrame;
+  assert(
+    Number.isInteger(pointerInputOutputFrame) && Number.isInteger(pointerAppliedOutputFrame),
+    "The public player state did not expose pointer input/applied output frames",
+  );
+  assert(
+    pointerAppliedOutputFrame >= pointerInputOutputFrame,
+    "The pointer command was reported applied before its projected input frame",
+  );
+  assert(
+    Math.abs(
+      (pointerAppliedOutputFrame - pointerInputOutputFrame) / loaded.outputSampleRate * 1_000
+      - player.getState().pointerToAudioLatencyMs
+    ) < 0.1,
+    "Pointer frame telemetry disagreed with pointer latency telemetry",
+  );
 
   return {
     chrome: navigator.userAgent,
@@ -654,6 +714,12 @@ async function runBrowserScenario() {
     programmeGapStylusCalibration,
     maximumPointerToAudioLatencyMs: maximumLatencyMs,
     pointerAppliedCommandId,
+    pointerInputOutputFrame,
+    pointerAppliedOutputFrame,
+    delayedInputCapture: {
+      expectedFrameOffset: delayedInputExpectedOffsetFrames,
+      recordedFrameOffset: delayedInputEvent.frameOffset,
+    },
     captureBytes,
     continuity,
     replay: {

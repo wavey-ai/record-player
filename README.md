@@ -402,6 +402,13 @@ engine commands expressed in source frames, rates, rotation degrees and a
 platter bleed through; firm contact gives the hand record ownership. Rust owns
 the smoothing and physical blend.
 
+Canvas gestures also supply `inputTimeMs`. The host projects that timestamp
+once onto the output audio clock and carries the resulting integer
+`outputFrame` through the worklet message, Rust begin/move/end protocol and
+performance capture. Programmatic callers may supply either field; omitted
+timing means the current output frame. The requested input frame and later
+worklet-applied frame remain separate latency telemetry.
+
 ### State subscription
 
 ```js
@@ -511,7 +518,7 @@ manual-crossfader changes are frame-timed events. The essential shape is:
   outputSampleRate: 48000,
   durationFrames,
   replaySeed,
-  engine: { version: 4, gateAlgorithmVersion: 3 },
+  engine: { version: 5, gateAlgorithmVersion: 3 },
   initialState: {
     positionFrames,
     rotationDegrees,
@@ -943,7 +950,13 @@ complete normalized performance and divides processing at any event boundary
 inside the current Web Audio render quantum. It does not wait for a main-thread
 timer or animation frame.
 
-This is at least as precise as the legacy telemetry format, which intentionally throttled pointer-derived events. The current format records the normalized commands actually sent to the engine and preserves their audio-frame timing.
+This is at least as precise as the legacy telemetry format, which intentionally
+throttled pointer-derived events. The current format records the normalized
+commands actually sent to the engine. Pointer commands use the pointer event's
+projected output frame, not the later main-thread send or worklet-application
+time, so capture preserves gesture intent while latency remains measurable.
+New captures identify this timing contract as engine version `5`; earlier takes
+remain valid because stored frame offsets replay unchanged.
 
 ### Motion and canvas sync
 

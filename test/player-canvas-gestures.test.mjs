@@ -196,6 +196,7 @@ test("record and crossfader pointers retain independent canvas gesture ownership
   canvas.emit("pointerup", pointer(1, finalPoint.x, finalPoint.y, 45));
   assert.equal(calls.end.length, 1);
   assert.equal(calls.end[0].cancelled, false);
+  assert.equal(calls.end[0].inputTimeMs, 45);
   mounted.destroy();
 });
 
