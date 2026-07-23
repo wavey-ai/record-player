@@ -1569,6 +1569,96 @@ impl ScratchAcousticDsp {
 }
 
 impl ScratchAcousticDsp {
+    /// Creates the shared player for a native host.
+    pub fn new_native(output_sample_rate: f64, config: AcousticConfig) -> Result<Self, String> {
+        if !output_sample_rate.is_finite() || output_sample_rate <= 0.0 {
+            return Err("output sample rate must be positive".to_owned());
+        }
+        if !config.max_rate.is_finite() || config.max_rate <= 0.0 {
+            return Err("maximum rate must be positive".to_owned());
+        }
+        if !valid_unit_interval(config.high_frequency_acceleration_limit) {
+            return Err("high-frequency acceleration limit must be between 0 and 1".to_owned());
+        }
+        if !valid_unit_interval(config.stylus_tracing_limit) {
+            return Err("stylus tracing limit must be between 0 and 1".to_owned());
+        }
+        Ok(Self::new_internal(output_sample_rate, config))
+    }
+
+    /// Replaces the complete source window with host-owned PCM.
+    pub fn replace_window_native(
+        &mut self,
+        channels: &[&[f32]],
+        source_sample_rate: f64,
+        reset_position: Option<f64>,
+    ) -> Result<(), String> {
+        if !source_sample_rate.is_finite() || source_sample_rate <= 0.0 {
+            return Err("source sample rate must be positive".to_owned());
+        }
+        if !(1..=2).contains(&channels.len()) {
+            return Err("source must have one or two channels".to_owned());
+        }
+        let length = channels[0].len();
+        if length == 0 {
+            return Err("source must contain samples".to_owned());
+        }
+        if channels.iter().any(|channel| channel.len() != length) {
+            return Err("source channels must have equal lengths".to_owned());
+        }
+
+        self.channels.clear();
+        self.channels
+            .extend(channels.iter().map(|channel| channel.to_vec()));
+        self.source_sample_rate = source_sample_rate;
+        self.window_start = 0;
+        self.window_end = length;
+        self.total_frames = length;
+        if let Some(position) = reset_position {
+            self.reset_position(position);
+        }
+        Ok(())
+    }
+
+    /// Extends the current native source without resetting transport state.
+    pub fn extend_window_native(
+        &mut self,
+        channels: &[&[f32]],
+        source_sample_rate: f64,
+    ) -> Result<(), String> {
+        if !source_sample_rate.is_finite() || source_sample_rate <= 0.0 {
+            return Err("source sample rate must be positive".to_owned());
+        }
+        if channels.len() != self.channels.len() || channels.is_empty() {
+            return Err("source channel count must match the current window".to_owned());
+        }
+        if (source_sample_rate - self.source_sample_rate).abs() > f64::EPSILON {
+            return Err("source sample rate must match the current window".to_owned());
+        }
+        let length = channels[0].len();
+        if length == 0 {
+            return Err("source must contain samples".to_owned());
+        }
+        if channels.iter().any(|channel| channel.len() != length) {
+            return Err("source channels must have equal lengths".to_owned());
+        }
+
+        for (destination, source) in self.channels.iter_mut().zip(channels) {
+            destination.extend_from_slice(source);
+        }
+        self.window_end = self.window_end.saturating_add(length);
+        self.total_frames = self.total_frames.saturating_add(length);
+        if self.active && self.motor_rate != 0.0 {
+            self.ended = false;
+        }
+        Ok(())
+    }
+
+    /// Returns the interleaved output from the most recent render call.
+    pub fn rendered_samples(&self) -> &[f32] {
+        &self.output
+    }
+
     // Original `selectNeedleSurfaceSample`: pad 0.05 s, loop when the asset is shorter
     // than the requested duration + pad, random offset within the remaining span.
     // Divergence noted in the audit: uses the DSP LCG instead of Math.random().
@@ -2149,6 +2239,28 @@ mod tests {
         dsp.rate = rate;
         dsp.rate_velocity = 0.0;
         dsp
+    }
+
+    #[test]
+    fn native_host_uses_the_shared_transport_and_renderer() {
+        let mut dsp = ScratchAcousticDsp::new_native(48_000.0, AcousticConfig::default()).unwrap();
+        let source = vec![0.25_f32; 48_000];
+
+        dsp.replace_window_native(&[source.as_slice()], 48_000.0, Some(24_000.0))
+            .unwrap();
+        dsp.set_effects(false, false);
+        dsp.start();
+        dsp.set_transport(false, 1.0, 0.0, 0.0);
+        let mut rendered_programme = false;
+        for _ in 0..32 {
+            assert_eq!(dsp.render(512, 1), 512);
+            rendered_programme |= dsp.rendered_samples().iter().any(|sample| *sample != 0.0);
+        }
+
+        assert_eq!(dsp.rendered_samples().len(), 512);
+        assert!(rendered_programme);
+        assert!(dsp.position() > 0.0);
+        assert!(dsp.platter_rotation_turns() > 0.0);
     }
 
     #[test]

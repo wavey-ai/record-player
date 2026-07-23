@@ -1,13 +1,2 @@
-__pycache__
-.wrangler
 .DS_Store
-.secrets
-/**/node_modules/
-.venv*/
-/**/dist/
-/**/target/
-.cache/
-/vendor/
-.tmp-local/
-/tmp/
-/tmp-wrangler/
+/target/
