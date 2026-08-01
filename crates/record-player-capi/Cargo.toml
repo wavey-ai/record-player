@@ -1,0 +1,12 @@
+[package]
+name = "record-player-capi"
+version = "0.1.0"
+edition = "2021"
+description = "Native C ABI for the record-player physical engine"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+record-player = { path = "../.." }

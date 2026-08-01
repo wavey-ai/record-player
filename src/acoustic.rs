@@ -1,5 +1,6 @@
 use js_sys::{Array, Float32Array};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 
 use crate::{
@@ -338,6 +339,7 @@ pub struct AcousticStatus {
 
 #[derive(Clone, Debug)]
 struct AcousticReplaySnapshot {
+    restore_pending: bool,
     config: AcousticConfig,
     native_rpm: f64,
     position: f64,
@@ -385,7 +387,7 @@ pub struct ScratchAcousticDsp {
     output_sample_rate: f64,
     source_sample_rate: f64,
     native_rpm: f64,
-    channels: Vec<Vec<f32>>,
+    channels: Arc<Vec<Vec<f32>>>,
     total_frames: usize,
     window_start: usize,
     window_end: usize,
@@ -426,7 +428,7 @@ pub struct ScratchAcousticDsp {
     output_gain_step: f64,
     output_gain_remaining_frames: usize,
     requested_window_position: Option<f64>,
-    surface_asset: Vec<Vec<f32>>,
+    surface_asset: Arc<Vec<Vec<f32>>>,
     surface_asset_rate: f64,
     surface_gain_multiplier: f64,
     surface_bed: Option<SurfaceBed>,
@@ -471,7 +473,7 @@ impl ScratchAcousticDsp {
             output_sample_rate,
             source_sample_rate: 48_000.0,
             native_rpm,
-            channels: Vec::new(),
+            channels: Arc::new(Vec::new()),
             total_frames: 0,
             window_start: 0,
             window_end: 0,
@@ -512,7 +514,7 @@ impl ScratchAcousticDsp {
             output_gain_step: 0.0,
             output_gain_remaining_frames: 0,
             requested_window_position: None,
-            surface_asset: Vec::new(),
+            surface_asset: Arc::new(Vec::new()),
             surface_asset_rate: 48_000.0,
             surface_gain_multiplier: 1.0,
             surface_bed: None,
@@ -539,8 +541,9 @@ impl ScratchAcousticDsp {
         // Window swaps are realtime control work. Reuse the active channel
         // allocations when geometry is stable so a normal progressive swap is
         // one bounded copy per channel rather than allocation + copy + drop.
-        self.channels.resize_with(channel_count, Vec::new);
-        for channel in &mut self.channels {
+        let channels = Arc::make_mut(&mut self.channels);
+        channels.resize_with(channel_count, Vec::new);
+        for channel in channels {
             channel.resize(length, 0.0);
         }
         Ok(())
@@ -548,7 +551,7 @@ impl ScratchAcousticDsp {
 
     #[wasm_bindgen(js_name = windowChannelPtr)]
     pub fn window_channel_ptr(&mut self, channel_index: u32) -> *mut f32 {
-        self.channels
+        Arc::make_mut(&mut self.channels)
             .get_mut(channel_index as usize)
             .map_or(std::ptr::null_mut(), |channel| channel.as_mut_ptr())
     }
@@ -592,7 +595,7 @@ impl ScratchAcousticDsp {
 
     #[wasm_bindgen(js_name = clearWindow)]
     pub fn clear_window(&mut self) {
-        self.channels.clear();
+        self.channels = Arc::new(Vec::new());
         self.total_frames = 0;
         self.window_start = 0;
         self.window_end = 0;
@@ -726,7 +729,58 @@ impl ScratchAcousticDsp {
 
     #[wasm_bindgen(js_name = captureReplayState)]
     pub fn capture_replay_state(&mut self) {
+        if let Some(snapshot) = self.replay_snapshot.as_mut() {
+            snapshot.config = self.config;
+            snapshot.native_rpm = self.native_rpm;
+            snapshot.position = self.position;
+            snapshot.target_position = self.target_position;
+            snapshot.rate = self.rate;
+            snapshot.rate_velocity = self.rate_velocity;
+            snapshot.target_rate = self.target_rate;
+            snapshot.wow_phase = self.wow_phase;
+            snapshot.flutter_phase = self.flutter_phase;
+            snapshot.platter_rotation_turns = self.platter_rotation_turns;
+            snapshot
+                .drag_lowpass_state
+                .clone_from(&self.drag_lowpass_state);
+            snapshot
+                .high_frequency_acceleration_limiter
+                .clone_from(&self.high_frequency_acceleration_limiter);
+            snapshot.active = self.active;
+            snapshot.needle_lifted = self.needle_lifted;
+            snapshot.hand_contact = self.hand_contact;
+            snapshot.grip = self.grip;
+            snapshot.grip_target = self.grip_target;
+            snapshot.motor_rate = self.motor_rate;
+            snapshot.motor_delivered_rate = self.motor_delivered_rate;
+            snapshot.unpowered_throw_rate = self.unpowered_throw_rate;
+            snapshot.ended = self.ended;
+            snapshot.contact_impulse = self.contact_impulse;
+            snapshot.last_effective_rate = self.last_effective_rate;
+            snapshot.noise_seed = self.noise_seed;
+            snapshot.last_noise = self.last_noise;
+            snapshot
+                .last_output_samples
+                .clone_from(&self.last_output_samples);
+            snapshot.window_miss_frames = self.window_miss_frames;
+            snapshot.window_programme_gain = self.window_programme_gain;
+            snapshot.frames_since_motion = self.frames_since_motion;
+            snapshot.frames_since_window_request = self.frames_since_window_request;
+            snapshot.scratch_gate.clone_from(&self.scratch_gate);
+            snapshot.manual_fader_gain = self.manual_fader_gain;
+            snapshot.output_gain_current = self.output_gain_current;
+            snapshot.output_gain_target = self.output_gain_target;
+            snapshot.output_gain_step = self.output_gain_step;
+            snapshot.output_gain_remaining_frames = self.output_gain_remaining_frames;
+            snapshot.surface_bed.clone_from(&self.surface_bed);
+            snapshot.needle_thump = self.needle_thump;
+            snapshot.needle_burst.clone_from(&self.needle_burst);
+            snapshot.restore_pending = true;
+            return;
+        }
+
         self.replay_snapshot = Some(Box::new(AcousticReplaySnapshot {
+            restore_pending: true,
             config: self.config,
             native_rpm: self.native_rpm,
             position: self.position,
@@ -771,48 +825,60 @@ impl ScratchAcousticDsp {
 
     #[wasm_bindgen(js_name = restoreReplayState)]
     pub fn restore_replay_state(&mut self) -> bool {
-        let Some(snapshot) = self.replay_snapshot.take() else {
+        let Some(snapshot) = self.replay_snapshot.as_mut() else {
             return false;
         };
-        self.config = snapshot.config;
-        self.native_rpm = snapshot.native_rpm;
-        self.position = snapshot.position;
-        self.target_position = snapshot.target_position;
-        self.rate = snapshot.rate;
-        self.rate_velocity = snapshot.rate_velocity;
-        self.target_rate = snapshot.target_rate;
-        self.wow_phase = snapshot.wow_phase;
-        self.flutter_phase = snapshot.flutter_phase;
-        self.platter_rotation_turns = snapshot.platter_rotation_turns;
-        self.drag_lowpass_state = snapshot.drag_lowpass_state;
-        self.high_frequency_acceleration_limiter = snapshot.high_frequency_acceleration_limiter;
-        self.active = snapshot.active;
-        self.needle_lifted = snapshot.needle_lifted;
-        self.hand_contact = snapshot.hand_contact;
-        self.grip = snapshot.grip;
-        self.grip_target = snapshot.grip_target;
-        self.motor_rate = snapshot.motor_rate;
-        self.motor_delivered_rate = snapshot.motor_delivered_rate;
-        self.unpowered_throw_rate = snapshot.unpowered_throw_rate;
-        self.ended = snapshot.ended;
-        self.contact_impulse = snapshot.contact_impulse;
-        self.last_effective_rate = snapshot.last_effective_rate;
-        self.noise_seed = snapshot.noise_seed;
-        self.last_noise = snapshot.last_noise;
-        self.last_output_samples = snapshot.last_output_samples;
-        self.window_miss_frames = snapshot.window_miss_frames;
-        self.window_programme_gain = snapshot.window_programme_gain;
-        self.frames_since_motion = snapshot.frames_since_motion;
-        self.frames_since_window_request = snapshot.frames_since_window_request;
-        self.scratch_gate = snapshot.scratch_gate;
-        self.manual_fader_gain = snapshot.manual_fader_gain;
-        self.output_gain_current = snapshot.output_gain_current;
-        self.output_gain_target = snapshot.output_gain_target;
-        self.output_gain_step = snapshot.output_gain_step;
-        self.output_gain_remaining_frames = snapshot.output_gain_remaining_frames;
-        self.surface_bed = snapshot.surface_bed;
-        self.needle_thump = snapshot.needle_thump;
-        self.needle_burst = snapshot.needle_burst;
+        if !snapshot.restore_pending {
+            return false;
+        }
+
+        // Keep both ownership slots alive. The audio callback only swaps
+        // values and buffer handles; it never drops the snapshot or its Vecs.
+        macro_rules! swap_replay_field {
+            ($field:ident) => {
+                std::mem::swap(&mut self.$field, &mut snapshot.$field)
+            };
+        }
+        swap_replay_field!(config);
+        swap_replay_field!(native_rpm);
+        swap_replay_field!(position);
+        swap_replay_field!(target_position);
+        swap_replay_field!(rate);
+        swap_replay_field!(rate_velocity);
+        swap_replay_field!(target_rate);
+        swap_replay_field!(wow_phase);
+        swap_replay_field!(flutter_phase);
+        swap_replay_field!(platter_rotation_turns);
+        swap_replay_field!(drag_lowpass_state);
+        swap_replay_field!(high_frequency_acceleration_limiter);
+        swap_replay_field!(active);
+        swap_replay_field!(needle_lifted);
+        swap_replay_field!(hand_contact);
+        swap_replay_field!(grip);
+        swap_replay_field!(grip_target);
+        swap_replay_field!(motor_rate);
+        swap_replay_field!(motor_delivered_rate);
+        swap_replay_field!(unpowered_throw_rate);
+        swap_replay_field!(ended);
+        swap_replay_field!(contact_impulse);
+        swap_replay_field!(last_effective_rate);
+        swap_replay_field!(noise_seed);
+        swap_replay_field!(last_noise);
+        swap_replay_field!(last_output_samples);
+        swap_replay_field!(window_miss_frames);
+        swap_replay_field!(window_programme_gain);
+        swap_replay_field!(frames_since_motion);
+        swap_replay_field!(frames_since_window_request);
+        swap_replay_field!(scratch_gate);
+        swap_replay_field!(manual_fader_gain);
+        swap_replay_field!(output_gain_current);
+        swap_replay_field!(output_gain_target);
+        swap_replay_field!(output_gain_step);
+        swap_replay_field!(output_gain_remaining_frames);
+        swap_replay_field!(surface_bed);
+        swap_replay_field!(needle_thump);
+        swap_replay_field!(needle_burst);
+        snapshot.restore_pending = false;
         true
     }
 
@@ -1486,7 +1552,7 @@ impl ScratchAcousticDsp {
                 "surface asset requires at least one non-empty channel",
             ));
         }
-        self.surface_asset = copied;
+        self.surface_asset = Arc::new(copied);
         self.surface_asset_rate = sample_rate;
         Ok(())
     }
@@ -1586,6 +1652,59 @@ impl ScratchAcousticDsp {
         Ok(Self::new_internal(output_sample_rate, config))
     }
 
+    /// Installs host-decoded surface PCM without routing native audio through
+    /// JavaScript typed arrays. Native mono renderers use the first channel,
+    /// while stereo renderers preserve both channels exactly as the WASM host
+    /// does through `setSurfaceAsset`.
+    pub fn set_surface_asset_native(
+        &mut self,
+        channels: &[&[f32]],
+        sample_rate: f64,
+    ) -> Result<(), String> {
+        self.set_surface_asset_owned_native(
+            channels.iter().map(|channel| channel.to_vec()).collect(),
+            sample_rate,
+        )
+    }
+
+    /// Installs already-owned native surface PCM with an O(1) audio-state
+    /// swap. Hosts can allocate and copy the large asset before taking their
+    /// render-state lock.
+    pub fn set_surface_asset_owned_native(
+        &mut self,
+        channels: Vec<Vec<f32>>,
+        sample_rate: f64,
+    ) -> Result<(), String> {
+        self.set_surface_asset_owned_native_deferred(channels, sample_rate)
+            .map(drop)
+    }
+
+    /// Installs owned surface PCM and returns the previous allocation so a
+    /// native host can retire it after releasing its realtime-state mutex.
+    pub fn set_surface_asset_owned_native_deferred(
+        &mut self,
+        channels: Vec<Vec<f32>>,
+        sample_rate: f64,
+    ) -> Result<Arc<Vec<Vec<f32>>>, String> {
+        if !sample_rate.is_finite() || sample_rate <= 0.0 {
+            return Err("surface asset sample rate must be positive".to_owned());
+        }
+        if !(1..=2).contains(&channels.len()) {
+            return Err("surface asset must have one or two channels".to_owned());
+        }
+        let length = channels[0].len();
+        if length == 0 {
+            return Err("surface asset must contain samples".to_owned());
+        }
+        if channels.iter().any(|channel| channel.len() != length) {
+            return Err("surface asset channels must have equal lengths".to_owned());
+        }
+
+        let retired = std::mem::replace(&mut self.surface_asset, Arc::new(channels));
+        self.surface_asset_rate = sample_rate;
+        Ok(retired)
+    }
+
     /// Replaces the complete source window with host-owned PCM.
     pub fn replace_window_native(
         &mut self,
@@ -1593,6 +1712,34 @@ impl ScratchAcousticDsp {
         source_sample_rate: f64,
         reset_position: Option<f64>,
     ) -> Result<(), String> {
+        self.replace_window_owned_native(
+            channels.iter().map(|channel| channel.to_vec()).collect(),
+            source_sample_rate,
+            reset_position,
+        )
+    }
+
+    /// Replaces native source PCM with an O(1) ownership swap. The host must
+    /// build the channel vectors before entering its real-time state lock.
+    pub fn replace_window_owned_native(
+        &mut self,
+        channels: Vec<Vec<f32>>,
+        source_sample_rate: f64,
+        reset_position: Option<f64>,
+    ) -> Result<(), String> {
+        self.replace_window_owned_native_deferred(channels, source_sample_rate, reset_position)
+            .map(drop)
+    }
+
+    /// Publishes a complete native source window and returns the previous Arc
+    /// so its potentially large backing allocation can be dropped after the
+    /// host releases the realtime-state mutex.
+    pub fn replace_window_owned_native_deferred(
+        &mut self,
+        channels: Vec<Vec<f32>>,
+        source_sample_rate: f64,
+        reset_position: Option<f64>,
+    ) -> Result<Arc<Vec<Vec<f32>>>, String> {
         if !source_sample_rate.is_finite() || source_sample_rate <= 0.0 {
             return Err("source sample rate must be positive".to_owned());
         }
@@ -1607,9 +1754,7 @@ impl ScratchAcousticDsp {
             return Err("source channels must have equal lengths".to_owned());
         }
 
-        self.channels.clear();
-        self.channels
-            .extend(channels.iter().map(|channel| channel.to_vec()));
+        let retired = std::mem::replace(&mut self.channels, Arc::new(channels));
         self.source_sample_rate = source_sample_rate;
         self.window_start = 0;
         self.window_end = length;
@@ -1617,13 +1762,28 @@ impl ScratchAcousticDsp {
         if let Some(position) = reset_position {
             self.reset_position(position);
         }
-        Ok(())
+        Ok(retired)
     }
 
     /// Extends the current native source without resetting transport state.
     pub fn extend_window_native(
         &mut self,
         channels: &[&[f32]],
+        source_sample_rate: f64,
+    ) -> Result<(), String> {
+        self.extend_window_owned_native(
+            channels.iter().map(|channel| channel.to_vec()).collect(),
+            source_sample_rate,
+        )
+    }
+
+    /// Extends the current native source from already-owned PCM. Native hosts
+    /// can copy each decode chunk before entering their render-state lock. If
+    /// the initial window reserved the final programme capacity, publication
+    /// is a bounded O(chunk) copy with no allocation or prefix rebuild.
+    pub fn extend_window_owned_native(
+        &mut self,
+        mut channels: Vec<Vec<f32>>,
         source_sample_rate: f64,
     ) -> Result<(), String> {
         if !source_sample_rate.is_finite() || source_sample_rate <= 0.0 {
@@ -1643,8 +1803,11 @@ impl ScratchAcousticDsp {
             return Err("source channels must have equal lengths".to_owned());
         }
 
-        for (destination, source) in self.channels.iter_mut().zip(channels) {
-            destination.extend_from_slice(source);
+        for (destination, source) in Arc::make_mut(&mut self.channels)
+            .iter_mut()
+            .zip(&mut channels)
+        {
+            destination.append(source);
         }
         self.window_end = self.window_end.saturating_add(length);
         self.total_frames = self.total_frames.saturating_add(length);
@@ -1652,6 +1815,60 @@ impl ScratchAcousticDsp {
             self.ended = false;
         }
         Ok(())
+    }
+
+    /// Replaces a range in the current native source without resetting transport.
+    ///
+    /// The range can extend the source. Missing frames between the old source
+    /// end and the new range are silent.
+    pub fn replace_window_range_native(
+        &mut self,
+        channels: &[&[f32]],
+        start_frame: usize,
+        source_sample_rate: f64,
+    ) -> Result<(), String> {
+        if !source_sample_rate.is_finite() || source_sample_rate <= 0.0 {
+            return Err("source sample rate must be positive".to_owned());
+        }
+        if channels.len() != self.channels.len() || channels.is_empty() {
+            return Err("source channel count must match the current window".to_owned());
+        }
+        if (source_sample_rate - self.source_sample_rate).abs() > f64::EPSILON {
+            return Err("source sample rate must match the current window".to_owned());
+        }
+        let length = channels[0].len();
+        if length == 0 {
+            return Err("source must contain samples".to_owned());
+        }
+        if channels.iter().any(|channel| channel.len() != length) {
+            return Err("source channels must have equal lengths".to_owned());
+        }
+        let end_frame = start_frame
+            .checked_add(length)
+            .ok_or_else(|| "source range is too large".to_owned())?;
+
+        for (destination, source) in Arc::make_mut(&mut self.channels).iter_mut().zip(channels) {
+            if destination.len() < end_frame {
+                destination.resize(end_frame, 0.0);
+            }
+            destination[start_frame..end_frame].copy_from_slice(source);
+        }
+        self.window_end = self
+            .window_start
+            .saturating_add(self.channels.first().map_or(0, Vec::len));
+        self.total_frames = self.total_frames.max(self.window_end);
+        if self.active && self.motor_rate != 0.0 {
+            self.ended = false;
+        }
+        Ok(())
+    }
+
+    /// Returns an immutable, constant-time snapshot of the native PCM window.
+    /// Native hosts use it to build append/range replacements away from their
+    /// realtime render mutex, then publish the result with
+    /// `replace_window_owned_native` as one ownership swap.
+    pub fn native_window_snapshot(&self) -> (Arc<Vec<Vec<f32>>>, f64) {
+        (Arc::clone(&self.channels), self.source_sample_rate)
     }
 
     /// Returns the interleaved output from the most recent render call.
@@ -2215,7 +2432,7 @@ mod tests {
     fn simulation_dsp() -> ScratchAcousticDsp {
         let mut dsp = ScratchAcousticDsp::new_internal(48_000.0, AcousticConfig::default());
         dsp.source_sample_rate = 48_000.0;
-        dsp.channels = vec![vec![0.0_f32; 4_800_000]];
+        dsp.channels = Arc::new(vec![vec![0.0_f32; 4_800_000]]);
         dsp.window_start = 0;
         dsp.window_end = 4_800_000;
         dsp.total_frames = 4_800_000;
@@ -2225,7 +2442,7 @@ mod tests {
     fn scratch_signal_dsp(preset: ScratchPreset, rate: f64) -> ScratchAcousticDsp {
         let mut dsp = ScratchAcousticDsp::new_internal(48_000.0, AcousticConfig::default());
         dsp.source_sample_rate = 48_000.0;
-        dsp.channels = vec![vec![0.5_f32; 48_000]];
+        dsp.channels = Arc::new(vec![vec![0.5_f32; 48_000]]);
         dsp.window_start = 0;
         dsp.window_end = 48_000;
         dsp.total_frames = 48_000;
@@ -2269,8 +2486,8 @@ mod tests {
         let mut dsp = ScratchAcousticDsp::new_internal(48_000.0, AcousticConfig::default());
         dsp.prepare_window(2, WINDOW_FRAMES as u32).unwrap();
         let first_pointers = [dsp.channels[0].as_ptr(), dsp.channels[1].as_ptr()];
-        dsp.channels[0][17] = 0.25;
-        dsp.channels[1][17] = -0.25;
+        Arc::make_mut(&mut dsp.channels)[0][17] = 0.25;
+        Arc::make_mut(&mut dsp.channels)[1][17] = -0.25;
         dsp.commit_window(48_000.0, 500, 2_000_000, Some(144_000.0))
             .unwrap();
 
@@ -2296,7 +2513,7 @@ mod tests {
         for rate in [8.0, 10.0, 16.0, -8.0, -10.0, -16.0] {
             let mut dsp = ScratchAcousticDsp::new_internal(48_000.0, AcousticConfig::default());
             dsp.source_sample_rate = 48_000.0;
-            dsp.channels = vec![vec![0.0; WINDOW_FRAMES]];
+            dsp.channels = Arc::new(vec![vec![0.0; WINDOW_FRAMES]]);
             dsp.window_start = WINDOW_START;
             dsp.window_end = WINDOW_START + WINDOW_FRAMES;
             dsp.total_frames = 8_000_000;
@@ -2342,7 +2559,7 @@ mod tests {
         const WINDOW_FRAMES: usize = 48_000 * 6;
         let mut dsp = ScratchAcousticDsp::new_internal(48_000.0, AcousticConfig::default());
         dsp.source_sample_rate = 48_000.0;
-        dsp.channels = vec![vec![0.0; WINDOW_FRAMES]];
+        dsp.channels = Arc::new(vec![vec![0.0; WINDOW_FRAMES]]);
         dsp.total_frames = 2_000_000;
 
         dsp.window_start = 0;
@@ -2898,8 +3115,8 @@ mod tests {
                 (0.2 * (std::f64::consts::TAU * 8_000.0 * index as f64 / 48_000.0).sin()) as f32
             })
             .collect::<Vec<_>>();
-        bypass.surface_asset = vec![surface.clone(), surface.clone()];
-        limited.surface_asset = vec![surface.clone(), surface];
+        bypass.surface_asset = Arc::new(vec![surface.clone(), surface.clone()]);
+        limited.surface_asset = Arc::new(vec![surface.clone(), surface]);
         bypass.set_high_frequency_acceleration_limit(0.0).unwrap();
         limited.set_high_frequency_acceleration_limit(1.0).unwrap();
         bypass.trigger_needle_drop();
@@ -2999,7 +3216,7 @@ mod tests {
     fn programme_end_returns_the_exact_rendered_prefix_and_zeroes_the_suffix() {
         let mut dsp = ScratchAcousticDsp::new_internal(48_000.0, AcousticConfig::default());
         dsp.source_sample_rate = 48_000.0;
-        dsp.channels = vec![vec![0.5_f32; 512], vec![-0.5_f32; 512]];
+        dsp.channels = Arc::new(vec![vec![0.5_f32; 512], vec![-0.5_f32; 512]]);
         dsp.window_start = 0;
         dsp.window_end = 512;
         dsp.total_frames = 512;
@@ -3035,7 +3252,7 @@ mod tests {
     #[test]
     fn replay_snapshot_restores_dynamic_dsp_state_without_restarting_inertia() {
         let mut dsp = simulation_dsp();
-        dsp.channels[0].fill(0.5);
+        Arc::make_mut(&mut dsp.channels)[0].fill(0.5);
         dsp.set_effects(false, false);
         dsp.start();
         dsp.set_position(2_400_000.0, 0.0);
@@ -3070,6 +3287,70 @@ mod tests {
         dsp.render(32, 2);
         assert!(dsp.last_effective_rate > 0.99);
         assert!(dsp.output.iter().any(|sample| *sample != 0.0));
+    }
+
+    #[test]
+    fn replay_restore_retains_snapshot_and_swaps_heap_storage() {
+        let mut dsp = ScratchAcousticDsp::new_internal(48_000.0, AcousticConfig::default());
+        dsp.drag_lowpass_state = vec![0.1, 0.2];
+        dsp.last_output_samples = vec![0.3, 0.4];
+        dsp.capture_replay_state();
+
+        let snapshot = dsp.replay_snapshot.as_ref().unwrap();
+        let snapshot_address = (&**snapshot) as *const AcousticReplaySnapshot;
+        let captured_drag_address = snapshot.drag_lowpass_state.as_ptr();
+        let captured_output_address = snapshot.last_output_samples.as_ptr();
+
+        dsp.begin_deterministic_replay(0.0, 0.0, 1).unwrap();
+        let replay_drag_address = dsp.drag_lowpass_state.as_ptr();
+        let replay_output_address = dsp.last_output_samples.as_ptr();
+        assert_ne!(captured_drag_address, replay_drag_address);
+        assert_ne!(captured_output_address, replay_output_address);
+
+        assert!(dsp.restore_replay_state());
+        assert_eq!(dsp.drag_lowpass_state, vec![0.1, 0.2]);
+        assert_eq!(dsp.last_output_samples, vec![0.3, 0.4]);
+        assert_eq!(dsp.drag_lowpass_state.as_ptr(), captured_drag_address);
+        assert_eq!(dsp.last_output_samples.as_ptr(), captured_output_address);
+
+        let snapshot = dsp.replay_snapshot.as_ref().unwrap();
+        assert_eq!(
+            (&**snapshot) as *const AcousticReplaySnapshot,
+            snapshot_address
+        );
+        assert_eq!(snapshot.drag_lowpass_state.as_ptr(), replay_drag_address);
+        assert_eq!(snapshot.last_output_samples.as_ptr(), replay_output_address);
+        assert!(!snapshot.restore_pending);
+        assert!(!dsp.restore_replay_state());
+
+        dsp.capture_replay_state();
+        let snapshot = dsp.replay_snapshot.as_ref().unwrap();
+        assert_eq!(
+            (&**snapshot) as *const AcousticReplaySnapshot,
+            snapshot_address
+        );
+        assert!(snapshot.restore_pending);
+    }
+
+    #[test]
+    #[ignore = "manual replay-restore microbenchmark"]
+    fn benchmark_replay_restore_without_reclamation() {
+        const ITERATIONS: u32 = 1_000_000;
+
+        let mut dsp = ScratchAcousticDsp::new_internal(48_000.0, AcousticConfig::default());
+        dsp.drag_lowpass_state = vec![0.1, 0.2];
+        dsp.last_output_samples = vec![0.3, 0.4];
+        dsp.capture_replay_state();
+        dsp.begin_deterministic_replay(0.0, 0.0, 1).unwrap();
+
+        let started = std::time::Instant::now();
+        for _ in 0..ITERATIONS {
+            dsp.replay_snapshot.as_mut().unwrap().restore_pending = true;
+            std::hint::black_box(dsp.restore_replay_state());
+        }
+        let nanoseconds_per_restore =
+            started.elapsed().as_secs_f64() * 1_000_000_000.0 / f64::from(ITERATIONS);
+        eprintln!("replay restore: {nanoseconds_per_restore:.2} ns/operation");
     }
 
     #[test]
@@ -3384,15 +3665,22 @@ mod tests {
     }
 
     #[test]
-    fn scratch_gate_phase_waits_for_the_rendered_spring_to_reverse() {
+    fn scratch_gate_reversal_waits_for_a_physically_plausible_rendered_spring() {
         let mut dsp = scratch_signal_dsp(ScratchPreset::Transform, 8.0);
         dsp.render(512, 1);
         assert_eq!(dsp.scratch_direction(), 1);
 
         dsp.set_motion(dsp.position, -8.0, 0.0);
         dsp.render(320, 1);
-        assert_eq!(dsp.scratch_direction(), -1);
+        assert_eq!(dsp.scratch_direction(), 1);
         assert!(dsp.last_effective_rate > 0.0);
+
+        let mut confirmation_frames = 0;
+        while dsp.scratch_direction() > 0 && confirmation_frames < 4_800 {
+            dsp.render(1, 1);
+            confirmation_frames += 1;
+        }
+        assert_eq!(dsp.scratch_direction(), -1);
         assert_eq!(dsp.scratch_gate_phase(), 0.0);
 
         let mut reversal_frames = 0;
@@ -3403,6 +3691,7 @@ mod tests {
         }
         assert!(dsp.last_effective_rate < 0.0);
         assert!(dsp.scratch_gate_phase() > 0.0);
+        assert!(confirmation_frames < 4_800);
         assert!(reversal_frames < 4_800);
     }
 
@@ -3668,6 +3957,13 @@ impl StylusCalibration {
 }
 
 impl StylusCalibration {
+    /// Creates the shared stylus calibration from a programme-map JSON object.
+    pub fn from_programme_map_json_native(value: &str) -> Result<StylusCalibration, String> {
+        let programme: ProgrammeCalibrationMap =
+            serde_json::from_str(value).map_err(|error| error.to_string())?;
+        Self::try_from_programme_map(programme)
+    }
+
     fn try_from_programme_map(
         programme: ProgrammeCalibrationMap,
     ) -> Result<StylusCalibration, String> {

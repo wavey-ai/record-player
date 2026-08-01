@@ -1,0 +1,73 @@
+{
+  "caseId": "PVC-004",
+  "generator": {
+    "sampleCount": 4096,
+    "sampleRateHz": 192000.0,
+    "frequencyHz": 8000.0,
+    "wallVelocityPeakMPerS": 0.05,
+    "displacementAmplitudeM": 9.94718394324346e-7,
+    "displacementAmplitudeF64BitsHex": "3eb0b04870e04883",
+    "phase": "sin(2*pi*frequencyHz*frame/sampleRateHz), then cast each sample to f32"
+  },
+  "trace": {
+    "centerFrame": 258.0,
+    "nominalGrooveRadiusM": 0.06,
+    "nominalSpeedRpm": 33.333333333333336,
+    "metersPerSourceFrame": 1.0908307824964558e-6,
+    "metersPerSourceFrameF64BitsHex": "3eb24d1521193473",
+    "wavelengthM": 2.6179938779914938e-5,
+    "tracingRadiusM": 0.000018
+  },
+  "support": {
+    "firstFrame": 240,
+    "lastFrameInclusive": 277,
+    "wallDisplacementF32BitsHex": [
+      "9e3387c4", "348a37f1", "35058244", "353ccf5d", "35673e7d", "3580f5ab",
+      "35858244", "3580f5ab", "35673e7d", "353ccf5d", "35058244", "348a37f1",
+      "9c937471", "b48a37f1", "b5058244", "b53ccf5d", "b5673e7d", "b580f5ab",
+      "b5858244", "b580f5ab", "b5673e7d", "b53ccf5d", "b5058244", "b48a37f1",
+      "9e3821ea", "348a37f1", "35058244", "353ccf5d", "35673e7d", "3580f5ab",
+      "35858244", "3580f5ab", "35673e7d", "353ccf5d", "35058244", "348a37f1",
+      "1def5bb8", "b48a37f1"
+    ]
+  },
+  "outwardIntervalReference": {
+    "heightToleranceM": 1e-13,
+    "positionCellToleranceM": 1e-10,
+    "left": {
+      "centerDisplacementLowerM": -9.93385894471199e-7,
+      "heightErrorBoundM": 9.999508884220473e-14,
+      "chosenContactOffsetM": -1.754011989385828e-6,
+      "contactOffsetEnclosureM": [-1.8021611096566203e-6, -1.7042233605689562e-6],
+      "searchedCells": 74250
+    },
+    "right": {
+      "centerDisplacementLowerM": -9.93385894471199e-7,
+      "heightErrorBoundM": 9.999713188567351e-14,
+      "chosenContactOffsetM": 1.754011989385828e-6,
+      "contactOffsetEnclosureM": [1.7068199426317835e-6, 1.8004966339753207e-6],
+      "searchedCells": 69346
+    },
+    "commonHeightIntervalM": [-9.93385894471199e-7, -9.933857944761103e-7],
+    "contactSeparationBoundsM": [3.4110433032007397e-6, 3.6026577436319407e-6]
+  },
+  "denseCorroboration": {
+    "pointCount": 1000001,
+    "leftHeightM": -9.933858944719375e-7,
+    "leftOffsetM": -1.754027999999997e-6,
+    "rightHeightM": -9.933858944719307e-7,
+    "rightOffsetM": 1.7540280000000004e-6,
+    "absoluteHeightDifferenceM": 6.776263578034403e-21
+  },
+  "productionResult": {
+    "scalarApi": "GlobalContactNotIsolated",
+    "contactSetApi": "ContactHeightOrderNotIsolated"
+  },
+  "claimLimits": [
+    "The position enclosures prove two separated possible global maxima.",
+    "The overlapping height enclosures do not prove exact equal height.",
+    "The dense height difference corroborates a near tie but does not certify its sign.",
+    "No production asset certificate proves algebraic common-height symmetry.",
+    "The mechanics solver must not treat this ambiguity as simultaneous rigid contact."
+  ]
+}

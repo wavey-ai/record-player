@@ -1,0 +1,139 @@
+PVC-003 midpoint solver deadline evidence
+Observation date: 2026-08-01
+
+Computer
+Model: MacBook Air MacBookAir10,1
+Processor: Apple M1, 4 performance cores, 4 efficiency cores
+Memory: 16 GB
+Operating system: macOS 26.5 build 25F71
+rustc: 1.96.0 (ac68faa20 2026-05-25)
+LLVM: 22.1.2
+Cargo: 1.96.0 (30a34c682 2026-05-25)
+Target: aarch64-apple-darwin
+Build: Cargo default release profile
+RUSTFLAGS: not set
+
+Internal rate: 192000 Hz
+One-sample budget: 5208.333333 nanoseconds
+Block size: 128 frames
+Block deadline: 666666.666667 nanoseconds
+
+Failed core baseline, 8192 samples per sequential fixture
+Values use minimum / p50 / p95 / p99 / maximum.
+Normal branches: 1 / 1 / 13 / 13 / 41
+Normal linear solves: 1 / 1 / 13 / 13 / 41
+Normal elapsed ns: 916 / 1000 / 8666 / 8792 / 49500
+Normal elapsed mean ns: 1905
+Reversal branches: 1 / 1 / 97 / 289 / 369
+Reversal linear solves: 1 / 1 / 85 / 265 / 333
+Reversal elapsed ns: 708 / 833 / 42708 / 144083 / 212125
+Reversal elapsed mean ns: 7397
+Constructed successful search maximum: 311 branches, 311 linear solves
+
+Continuation optimization checkpoint, 8192 samples per sequential fixture
+Values use minimum / p50 / p95 / p99 / maximum.
+Normal branches: 1 / 1 / 1 / 1 / 28
+Normal linear solves: 1 / 1 / 1 / 1 / 28
+Normal elapsed ns: 666 / 1000 / 1125 / 1209 / 55208
+Normal elapsed mean ns: 1009
+Reversal branches: 1 / 1 / 1 / 1 / 118
+Reversal linear solves: 1 / 1 / 1 / 1 / 109
+Reversal elapsed ns: 625 / 916 / 959 / 2875 / 69541
+Reversal elapsed mean ns: 1182
+Constructed successful search maximum: 255 branches, 255 linear solves
+
+Complete player, 1024 warm-up frames, 512 measured 128-frame blocks
+Values use minimum / p50 / p95 / p99 / maximum.
+Normal elapsed ns: 477458 / 495250 / 551458 / 567292 / 602125
+Normal elapsed mean ns: 500997
+Normal deadline misses: 0 / 512
+Reversal elapsed ns: 476834 / 507375 / 592750 / 621417 / 812750
+Reversal elapsed mean ns: 524789
+Reversal deadline misses: 2 / 512
+
+Static-slip prediction checkpoint, five release runs
+Each run has 8192 normal samples and 8192 reversal samples.
+Values use minimum / p50 / p95 / p99 / maximum.
+
+Run 1
+Normal branches: 1 / 1 / 1 / 1 / 28
+Normal linear solves: 1 / 1 / 1 / 1 / 28
+Normal elapsed ns: 791 / 1167 / 2625 / 2709 / 73875
+Normal elapsed mean ns: 1342
+Reversal branches: 1 / 1 / 1 / 1 / 28
+Reversal linear solves: 1 / 1 / 1 / 1 / 28
+Reversal elapsed ns: 708 / 1042 / 1125 / 1542 / 34791
+Reversal elapsed mean ns: 1102
+
+Run 2
+Normal branches: 1 / 1 / 1 / 1 / 28
+Normal linear solves: 1 / 1 / 1 / 1 / 28
+Normal elapsed ns: 667 / 1000 / 1042 / 1125 / 56583
+Normal elapsed mean ns: 992
+Reversal branches: 1 / 1 / 1 / 1 / 28
+Reversal linear solves: 1 / 1 / 1 / 1 / 28
+Reversal elapsed ns: 625 / 917 / 959 / 1083 / 27209
+Reversal elapsed mean ns: 932
+
+Run 3
+Normal branches: 1 / 1 / 1 / 1 / 28
+Normal linear solves: 1 / 1 / 1 / 1 / 28
+Normal elapsed ns: 791 / 1083 / 1125 / 1625 / 39083
+Normal elapsed mean ns: 1118
+Reversal branches: 1 / 1 / 1 / 1 / 28
+Reversal linear solves: 1 / 1 / 1 / 1 / 28
+Reversal elapsed ns: 708 / 1041 / 1125 / 1167 / 51042
+Reversal elapsed mean ns: 1041
+
+Run 4
+Normal branches: 1 / 1 / 1 / 1 / 28
+Normal linear solves: 1 / 1 / 1 / 1 / 28
+Normal elapsed ns: 791 / 1083 / 1167 / 2291 / 75917
+Normal elapsed mean ns: 1124
+Reversal branches: 1 / 1 / 1 / 1 / 28
+Reversal linear solves: 1 / 1 / 1 / 1 / 28
+Reversal elapsed ns: 708 / 959 / 1042 / 2417 / 25167
+Reversal elapsed mean ns: 1033
+
+Run 5
+Normal branches: 1 / 1 / 1 / 1 / 28
+Normal linear solves: 1 / 1 / 1 / 1 / 28
+Normal elapsed ns: 791 / 1167 / 1209 / 1292 / 34958
+Normal elapsed mean ns: 1185
+Reversal branches: 1 / 1 / 1 / 1 / 28
+Reversal linear solves: 1 / 1 / 1 / 1 / 28
+Reversal elapsed ns: 750 / 1083 / 1167 / 1250 / 24750
+Reversal elapsed mean ns: 1084
+
+Each constructed search found 255 branches and 255 linear solves.
+The predictor changes search order only.
+The complete 1296-branch fallback remains available.
+The debug allocation guard found no allocation during one active-mode solve.
+
+Provisional cross-track complete-player measurement
+The shared checkpoint included changing certified-tracer work.
+This is not a final certified-tracer checkpoint.
+Normal elapsed ns: 1997166 / 2256167 / 2421583 / 2501500 / 2638667
+Normal elapsed mean ns: 2250275
+Normal deadline misses: 512 / 512
+Reversal elapsed ns: 2002791 / 2249375 / 2422542 / 2660709 / 5076833
+Reversal elapsed mean ns: 2242475
+Reversal deadline misses: 512 / 512
+The approximately 1-microsecond core solve did not dominate this result.
+
+Current static-slip mechanics SHA-256: e812f74edc616b2652ccd41bcaf6e2a0e05822bc451f89f933f7255afb9425a7
+Current static-slip contact SHA-256: 2fc537815e1cb990384e76361c8124b367a61a78114d9b6ddfdb6674970ac862
+Provisional tracer SHA-256: 4d62068171287ea1dd6f4c2a1e1c4ce4daf9363587e59bd99842c0aaa2428ce7
+Formatting and an allocation test followed the five core measurements.
+The production solver tokens did not change.
+The current hashes do not identify the measured files byte-for-byte.
+
+Core reproduction
+cargo test --release --lib physical::contact::tests::midpoint_release_work_benchmark -- --ignored --nocapture
+
+Complete-player reproduction
+cargo test --release --lib physical::player::tests::midpoint_player_release_block_benchmark -- --ignored --nocapture
+
+Result
+The rapid-reversal callback deadline failed.
+The midpoint path is not production-ready at this checkpoint.

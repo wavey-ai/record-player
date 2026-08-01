@@ -1,0 +1,4 @@
+module RecordPlayerCAPI {
+    header "record_player.h"
+    export *
+}

@@ -33,6 +33,11 @@ fn cubic(channel: &[f32], position: f64) -> f64 {
     let p1 = clamped_sample(channel, index);
     let p2 = clamped_sample(channel, index + 1);
     let p3 = clamped_sample(channel, index + 2);
+    catmull_rom_sample(p0, p1, p2, p3, t)
+}
+
+/// Interpolates one sample from four consecutive values.
+pub(crate) fn catmull_rom_sample(p0: f64, p1: f64, p2: f64, p3: f64, t: f64) -> f64 {
     let a = p2 - p0;
     let b = 2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3;
     let c = 3.0 * (p1 - p2) + p3 - p0;

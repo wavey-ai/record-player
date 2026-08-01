@@ -1,0 +1,192 @@
+{
+  "schemaVersion": 1,
+  "caseId": "PVC-005",
+  "sampleRateHz": 48000.0,
+  "algorithmVersion": 6,
+  "snapshotVersions": {
+    "gate": 1,
+    "performance": 1
+  },
+  "limits": {
+    "minimumClicks": 1,
+    "maximumClicks": 8,
+    "maximumRecordRate": 20.0,
+    "maximumFrameDeltaSeconds": 0.000125,
+    "minimumLearnedSpanSourceSeconds": 0.04,
+    "maximumLearnedSpanSourceSeconds": 0.8
+  },
+  "motionModel": {
+    "onsetRate": 0.035,
+    "restRate": 0.018,
+    "intentReversalRate": 0.055,
+    "maximumPredictedReversalOutgoingRate": 0.35,
+    "onsetConfirmSeconds": 0.004,
+    "reversalConfirmSeconds": 0.006,
+    "restConfirmSeconds": 0.012,
+    "predictionObservationWeights": [1.0, 0.7, 0.55, 0.4],
+    "observationsForFullConfidence": 4
+  },
+  "declickEnvelope": {
+    "openSlowTimeConstantSeconds": 0.0015,
+    "openFastTimeConstantSeconds": 0.00035,
+    "closeSlowTimeConstantSeconds": 0.002,
+    "closeFastTimeConstantSeconds": 0.00045
+  },
+  "techniques": [
+    {
+      "id": 0,
+      "name": "baby",
+      "defaultClicks": 1,
+      "usesClicks": false,
+      "usesManualCrossfader": true,
+      "initialStrokeSpanSourceSeconds": 0.22
+    },
+    {
+      "id": 1,
+      "name": "stab",
+      "defaultClicks": 1,
+      "usesClicks": false,
+      "usesManualCrossfader": false,
+      "initialStrokeSpanSourceSeconds": 0.22,
+      "forwardOpenStartFraction": 0.04,
+      "forwardOpenWidthFraction": 0.24,
+      "forwardOpenEndFraction": 0.28
+    },
+    {
+      "id": 2,
+      "name": "chirp",
+      "defaultClicks": 1,
+      "usesClicks": false,
+      "usesManualCrossfader": false,
+      "initialStrokeSpanSourceSeconds": 0.22,
+      "forwardCloseFractionSlow": 0.32,
+      "forwardCloseFractionFast": 0.18,
+      "reverseOpenFractionSlow": 0.26,
+      "reverseOpenFractionFast": 0.14,
+      "forwardEndpointPauseTarget": 0.0
+    },
+    {
+      "id": 3,
+      "name": "transform",
+      "acceptedAlias": "transformer",
+      "defaultClicks": 2,
+      "usesClicks": true,
+      "usesManualCrossfader": false,
+      "initialStrokeSpanSourceSeconds": 0.21052631578947367,
+      "openFraction": 0.24
+    },
+    {
+      "id": 4,
+      "name": "flare",
+      "defaultClicks": 1,
+      "usesClicks": true,
+      "usesManualCrossfader": false,
+      "initialStrokeSpanSourceSeconds": 0.15625,
+      "notchHalfWidth": 0.07,
+      "notchedDirections": [1]
+    },
+    {
+      "id": 5,
+      "name": "crab",
+      "defaultClicks": 4,
+      "usesClicks": true,
+      "usesManualCrossfader": false,
+      "initialStrokeSpanSourceSeconds": 0.2222222222222222,
+      "burstFirstCenterFraction": 0.18,
+      "burstLastCenterFraction": 0.72,
+      "maximumPulseHalfWidthFraction": 0.035,
+      "pulseWidthBudgetFraction": 0.22
+    },
+    {
+      "id": 6,
+      "name": "orbit",
+      "defaultClicks": 2,
+      "usesClicks": true,
+      "usesManualCrossfader": false,
+      "initialStrokeSpanSourceSeconds": 0.2777777777777778,
+      "notchHalfWidth": 0.07,
+      "notchedDirections": [1, -1]
+    },
+    {
+      "id": 7,
+      "name": "drum",
+      "defaultClicks": 1,
+      "usesClicks": false,
+      "usesManualCrossfader": false,
+      "initialStrokeSpanSourceSeconds": 0.12,
+      "maximumOpenSeconds": 0.055,
+      "openSpanFraction": 0.18,
+      "accelerationFilterSeconds": 0.008,
+      "accelerationTriggerRatePerSecond": 6.0,
+      "minimumTriggerRate": 0.14,
+      "refractorySeconds": 0.045
+    }
+  ],
+  "fixtures": {
+    "sampleRateInvariance": {
+      "sampleRatesHz": [44100.0, 48000.0, 96000.0],
+      "durationSeconds": 0.073,
+      "recordRate": 0.9,
+      "maximumPhaseDifference": 0.001,
+      "maximumAudibleGainDifference": 0.01
+    },
+    "physicalTravelClock": {
+      "deltaSeconds": 0.000020833333333333333,
+      "intentRecordRate": 4.0,
+      "renderedRecordRate": 0.5,
+      "renderedSourceTravelSeconds": 0.0,
+      "renderedFrames": 2000,
+      "expectedStrokeProgress": 0.0
+    },
+    "firstStrokePrediction": {
+      "initialConfidence": 0.0,
+      "firstObservedSpanSourceSeconds": 0.123,
+      "confidenceAfterFirstObservation": 0.25,
+      "fullConfidenceObservationCount": 4
+    },
+    "clickEndpoint": {
+      "clickCounts": [1, 4, 8],
+      "renderedPredictedSpans": 3.0,
+      "expectedRunCountRule": "selected click count"
+    },
+    "drumPacketization": {
+      "frameCount": 8000,
+      "renderedRateBeforeFrame3000": 0.5,
+      "renderedRateFromFrame3000": 1.5,
+      "intentRates": [0.35, 0.85],
+      "intentPacketFrames": [1, 64],
+      "expectedEquality": "exact target, automatic gate, and audible gain"
+    },
+    "rapidReversal": {
+      "strokeCount": 32,
+      "recordRates": [8.0, -8.0],
+      "framesPerStroke": 400,
+      "expectedEndpointTarget": 0.0
+    },
+    "maximumRateReversal": {
+      "strokeCount": 64,
+      "recordRates": [20.0, -20.0],
+      "framesPerStroke": 300,
+      "expectedGainBounds": [0.0, 1.0]
+    },
+    "snapshotReplay": {
+      "preset": "crab",
+      "clicks": 5,
+      "replayedFrames": 128,
+      "expectedEquality": "exact output structure"
+    },
+    "allocation": {
+      "preset": "crab",
+      "clicks": 8,
+      "renderedFrames": 10000,
+      "expectedAllocations": 0
+    }
+  },
+  "claimLimits": [
+    "This case validates helper topology, state, ownership, and deterministic timing.",
+    "This case does not validate the timing against measured DJ crossfader traces.",
+    "The technique fractions and Drum thresholds are provisional calibration values.",
+    "The first-stroke seed is not a measured endpoint prediction.",
+    "This case does not prove integration with the physical player, C ABI, or WASM."
+  ]
+}
