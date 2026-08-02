@@ -16,6 +16,8 @@ pub mod stylus;
 pub(crate) mod tangential_identity;
 pub mod tonearm;
 pub mod trace_admission;
+#[allow(dead_code)]
+pub(crate) mod verified_interval;
 
 #[cfg(test)]
 mod rapid_scratch_reference;

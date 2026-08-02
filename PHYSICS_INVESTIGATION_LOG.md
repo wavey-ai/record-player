@@ -662,6 +662,14 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Proof catalog**: Add 48 solve-only systems to the 288 contacting labels.
 - **Proof total**: The initial catalog therefore contains 336 records before safe equivalence aggregation.
 - **Interval method**: Use outward arithmetic and adaptive radius-and-slope subdivision.
+- **Implementation status**: Finite outward interval arithmetic is implemented as a non-gating core.
+- **Arithmetic result**: Addition, subtraction, multiplication, division, square, and square root have outward bounds.
+- **Zero result**: Algebraically exact zero and identity operations keep exact finite bounds.
+- **Overflow rule**: An operation rejects when finite outward widening cannot contain its result.
+- **Rounding rule**: The implementation does not change the process rounding mode.
+- **Exact tests**: Rational oracles cover exhaustive dyadic pairs and 4,096 deterministic random cases.
+- **Edge tests**: The tests cover subnormals, cancellation, sign quadrants, overflow, and maximum finite identities.
+- **Portability result**: Native workspace and `wasm32-unknown-unknown` checks pass.
 - **Work rule**: Reject the profile when the fixed depth or box limit cannot resolve a proof.
 - **Oracle rule**: Use exact dyadic rational arithmetic in tests for interval operations and representative solves.
 - **Physical gate**: Require strict positive diagonal and determinant lower bounds.

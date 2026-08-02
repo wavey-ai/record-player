@@ -1813,9 +1813,16 @@ The accepted profile domain needs a P-matrix proof or an equivalent bounded proo
 - **Subdivision**: Split the largest normalized radius or slope width when a result is inconclusive.
 - **Work cap**: Fail closed when the fixed box or depth limit is exhausted.
 - **Arithmetic**: Expand round-to-nearest results with adjacent finite `f64` values.
+- **Arithmetic status**: The finite outward interval core is implemented.
+- **Supported operations**: It includes add, subtract, multiply, divide, square, square root, negation, and interval queries.
+- **Finite rule**: An operation rejects if its outward result would require an infinite bound.
+- **Identity rule**: Exact zero, one, and negative-one operations preserve maximum finite operands.
 - **Concurrency rule**: Do not change the process rounding mode.
 - **Exact oracle**: Decode finite `f64` values into exact dyadic rationals in tests.
 - **Square-root oracle**: Verify each returned bound by exact rational squaring.
+- **Random oracle**: Check 4,096 deterministic normal and subnormal bit-pattern cases.
+- **Focused result**: Thirteen interval tests pass with no failure.
+- **Build result**: Workspace, all-target, and WASM checks pass.
 - **Conditioning gate**: Require dimensionless solve margins above `6.4e-9` initially.
 - **Failure classes**: Distinguish bad minors, singular mobility, singular Schur updates, weak margins, and exhausted work.
 - **Scope**: The result proves fixed-mode normal-contact uniqueness only.
