@@ -2762,6 +2762,27 @@ mod tests {
         assert!(dsp.platter_rotation_turns > 2_000.5);
     }
 
+    #[test]
+    fn stopped_contact_from_build_23_diagnostic_never_recovers() {
+        let mut dsp = simulation_dsp();
+        let turns = 61.250_890_548_885_84;
+        let residual_rate = -2.246_824_675_286_976e-23;
+        seed_deck_rates(&mut dsp, residual_rate, residual_rate, turns);
+        dsp.position = 3_714_943.0;
+        dsp.target_position = 3_714_943.0;
+        dsp.hand_contact = true;
+        dsp.grip = 0.988_256_371_542_977_2;
+        dsp.grip_target = dsp.grip;
+        dsp.motor_rate = 0.0;
+        dsp.active = true;
+
+        assert_eq!(dsp.render(12_000, 2), 12_000);
+
+        assert_eq!(dsp.deck_recovery_count(), 0);
+        assert!(dsp.deck_recovery_diagnostic().is_none());
+        assert_eq!(dsp.effective_rate(), 0.0);
+    }
+
     fn scratch_signal_dsp(preset: ScratchPreset, rate: f64) -> ScratchAcousticDsp {
         let mut dsp = ScratchAcousticDsp::new_internal(48_000.0, AcousticConfig::default());
         dsp.source_sample_rate = 48_000.0;

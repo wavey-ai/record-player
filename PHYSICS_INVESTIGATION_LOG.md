@@ -3079,3 +3079,22 @@ Measure the audio during slow drags, accelerations, stops, and reversals.
 Run level-matched listening tests with vocal material.
 
 Do not claim hardware calibration before these tests pass.
+
+## 2026-08-02: Stopped Hand-Contact Recovery Loop
+
+- **Source**: The build 23 device diagnostic has identifier `18A78668-6783-48D2-8CFD-45FDECEC06C1`.
+- **Observed result**: The player rejected 2,559 consecutive `MechanicalAdvance` operations.
+- **Reported error**: Each rejected operation reported `ContactSolveFailure`.
+- **Motor state**: The motor was off.
+- **Hand state**: The hand rate was zero. The normalized grip was `0.9882563715429772`.
+- **Position state**: The rendered and target positions were both `3714943`.
+- **Velocity state**: Both normalized deck rates were approximately `-2.25e-23`.
+- **Physical result**: The record, platter, and hand were at rest.
+- **Solver gap**: Bearing, slipmat, and hand sticking produced three static constraints for two velocities.
+- **Cause**: The velocity was unique, but the static torque distribution was not unique.
+- **Correction**: Select the zero-load rest equilibrium only when all applied torques and velocities are at rest.
+- **Scope**: Moving contact and loaded static contact continue through the full friction solver.
+- **Regression result**: The exact device state renders 12,000 samples with zero recoveries.
+- **Mechanical result**: A direct 12,000-step deck test remains at exact rest.
+- **Suite result**: The two new tests pass.
+- **Separate issue**: One Transform click-count test expects four transitions and observes five.

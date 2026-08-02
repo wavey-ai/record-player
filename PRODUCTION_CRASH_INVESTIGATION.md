@@ -196,3 +196,31 @@ The named exception is intended to include the reason in the Apple report. A fin
 Retrieve the saved build 23 diagnostic from the device. It is the primary evidence for the initial invariant failure.
 
 Confirm that the next TestFlight report contains the named exception reason.
+
+### Saved diagnostic result
+
+The saved diagnostic has identifier `18A78668-6783-48D2-8CFD-45FDECEC06C1`.
+
+The diagnostic reports 2,559 rejected `MechanicalAdvance` operations. The solver reported `ContactSolveFailure` for each operation.
+
+The motor was off. The hand rate was zero, and the normalized grip was `0.9882563715429772`.
+
+The target and rendered positions were both `3714943`. The platter and record rates were both approximately `-2.25e-23`.
+
+This state is a valid physical rest state. The bearing, slipmat, and hand can all stick without motion.
+
+The three static constraints give only two velocity equations. The velocity solution is unique, but the internal torque distribution is not unique.
+
+The mechanical solver rejected this redundant multiplier system. The audio renderer then used its last valid state for 2,559 samples.
+
+### Canonical correction
+
+The mechanical solver now selects the zero-load equilibrium for this exact rest state.
+
+The correction requires an active hand and zero hand speed. It also requires zero motor and stylus torque.
+
+Both deck velocities must be inside the mechanical rest tolerance. Other contact states continue through the full friction solver.
+
+The exact diagnostic state now renders 12,000 samples with zero recoveries. A direct mechanical test gives the same result.
+
+The complete test suite has one separate failure in a Transform click-count test. Both stopped-contact regression tests pass.

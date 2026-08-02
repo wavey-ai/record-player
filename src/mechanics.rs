@@ -1098,6 +1098,27 @@ fn solve_friction_step(
     let hand_kinetic_limit = config.hand_kinetic_friction_coefficient
         * control.hand_normal_force_n
         * control.hand_contact_radius_m;
+    if hand_active
+        && motor_torque_nm == 0.0
+        && stylus_torque_nm == 0.0
+        && previous_platter_velocity_rad_s.abs() <= REST_ANGULAR_VELOCITY_RAD_S
+        && previous_record_velocity_rad_s.abs() <= REST_ANGULAR_VELOCITY_RAD_S
+        && hand_velocity.abs() <= REST_ANGULAR_VELOCITY_RAD_S
+    {
+        // Bearing, slipmat, and hand sticking constraints are redundant here.
+        // The unique physical motion is rest, but the full multiplier system
+        // has no unique torque distribution. Select the zero-load equilibrium.
+        return Ok(ContactSolution {
+            platter_velocity_rad_s: 0.0,
+            record_velocity_rad_s: 0.0,
+            bearing_torque_nm: 0.0,
+            slipmat_torque_nm: 0.0,
+            hand_torque_nm: 0.0,
+            slipmat_mode: ContactMode::Sticking,
+            hand_mode: ContactMode::Sticking,
+            bearing_sticking: true,
+        });
+    }
     let bearing_static_limit = if previous_bearing_sticking {
         config.bearing_static_torque_nm
     } else {
@@ -1800,6 +1821,40 @@ mod tests {
         assert_eq!(telemetry.slipmat_mode, ContactMode::Sticking);
         assert_eq!(telemetry.hand_mode, ContactMode::Sticking);
         assert_eq!(telemetry.platter_rate, telemetry.record_rate);
+    }
+
+    #[test]
+    fn stationary_hand_holds_an_unpowered_stopped_deck_without_rank_failure() {
+        let mut config = PhysicalDeckConfig::high_torque_dj_seed();
+        config.nominal_rpm = 45.0;
+        config.integration_hz = 48_000.0;
+        let mut state = DeckMechanicalState::new(config).unwrap();
+        let turns = 61.250_890_548_885_84;
+        let residual_rate = -2.246_824_675_286_976e-23;
+        state
+            .reset(residual_rate, residual_rate, turns, turns)
+            .unwrap();
+        let control = DeckMechanicalControl::from_normalized(
+            config,
+            NormalizedDeckControl {
+                motor_mode: MotorMode::Off,
+                motor_rate: 0.0,
+                hand_contact: true,
+                hand_target_angle_turns: Some(turns),
+                hand_rate: 0.0,
+                grip: 0.988_256_371_542_977_2,
+                stylus_torque_nm: 0.0,
+            },
+        );
+
+        for _ in 0..12_000 {
+            let telemetry = state.advance(1.0 / 48_000.0, control).unwrap();
+            assert_eq!(telemetry.platter_rate, 0.0);
+            assert_eq!(telemetry.record_rate, 0.0);
+            assert_eq!(telemetry.slipmat_mode, ContactMode::Sticking);
+            assert_eq!(telemetry.hand_mode, ContactMode::Sticking);
+            assert!(telemetry.bearing_sticking);
+        }
     }
 
     #[test]
