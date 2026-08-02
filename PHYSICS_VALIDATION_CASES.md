@@ -35,6 +35,7 @@ Each case must contain these items:
 | `PVC-005` | `RP-003`, `RP-005`, `RP-034` | Named scratch presets need canonical timing and production integration | Stab and Chirp topology passes; calibration remains open |
 | `PVC-006` | `RP-008`, `RP-020`, `RP-024` | Passive cartridge magnetic-loss invariants | Implemented and green; cartridge measurement remains open |
 | `PVC-007` | `RP-008`, `RP-013`, `RP-026`, `RP-033`, `RP-035`, `RP-036`, `RP-038`, `RP-039` | Passive groove compliance, coupled patches, and vector friction | Zero-speed regularization passes; identified tangential state and compliance remain open |
+| `PVC-008` | `RP-008`, `RP-013`, `RP-028`, `RP-033` | One contact solve skips rapid groove events | Bounded sweep improves the reduced phono reference; callback deadline fails |
 
 ## PVC-001: Spherical Envelope Global-Maximum Failure
 
@@ -702,7 +703,7 @@ The maximum-rate fixture also covers plus and minus 20 record rate.
 - **Accepted result**: Transform, Flare, Crab, and Orbit retain the selected event count at `20x`.
 - **Observed rate drift**: One exact-`20x` physical result divided to `20.0000000000003268`.
 - **Former result**: Input validation rejected that physical frame.
-- **Correction**: Accept `1e-12` rate roundoff and clamp it to exact `20x`.
+- **Correction**: Accept `1e-10` rate roundoff and clamp it to exact `20x`.
 - **Limit**: Values above the roundoff allowance still reject.
 
 ### Physical Travel Fixture
@@ -2976,3 +2977,116 @@ Future mechanics can replace this rejection with explicit nonnegative one-sided 
 - No `N + 1` prefix reduction without a theorem for the identified operator.
 - No rigid acceptance from overlapping height intervals.
 - No silent eviction of material state.
+
+## PVC-008: Rapid Travel Skips Contact Events
+
+### Assertion Under Test
+
+One certified trace and one contact solve are sufficient for each 192-kilohertz sample.
+
+This assertion applies through signed `20x` record motion.
+
+### Counterexample Fixture
+
+- **Source**: Use the deterministic rapid-scratch programme fixture.
+- **Rates**: Sweep integer rates from signed `1x` through signed `20x`.
+- **Events**: Include contact loss, recapture, an impulse, and reverse travel.
+- **Second fixture**: Ramp to a stop, reverse, and return to a stop.
+- **Candidate**: Use one contact step for each output sample.
+- **Reference**: Use steps of at most `0.125` source frames.
+- **Observer**: Use equal cartridge and phono observers for both trajectories.
+- **Observer limit**: Do not return cartridge reaction force to either reduced trajectory.
+
+### Disproved Result
+
+The one-step rate sweep gives phono normalized RMS errors of `0.7743228579914596` and `0.7494342423073957`.
+
+The one-step stop and reversal case gives phono normalized RMS errors near `0.98`.
+
+Its phono absolute-integral errors are approximately `48%`.
+
+These values prove that the skipped contact events reach the electrical observer.
+
+### Production Correction
+
+- **Step limit**: Permit as many as four contact steps for each output sample.
+- **Travel limit**: Keep predicted travel at or below five source frames for each step.
+- **Trace rule**: Run the certified global tracer for each step.
+- **Solver rule**: Run the reciprocal deck, pickup, and cartridge solve for each step.
+- **Phono rule**: Process the final cartridge endpoint once for each output sample.
+- **Allocation rule**: Do not allocate memory in the render loop.
+- **Representation rule**: Apply the same rule to contiguous, paged, and real-time paged sources.
+
+The production telemetry field is `swept_contact_substeps`.
+
+Expected values are one at `1x`, two at `8x`, and four at `20x`.
+
+### Acceptance Evidence
+
+| Quantity | One step | Bounded sweep |
+|---|---:|---:|
+| Wall-height normalized RMS | `1.3655193973757973` | `0.5122237543419718` |
+| Wall-force normalized RMS | `1.0158164015715798` | `0.4924456991670574` |
+| Reaction-torque normalized RMS | `1.0024104080839553` | `0.6568966477312397` |
+| Contact-occupancy mean absolute | `0.21010711785380817` | `0.0911330880694634` |
+| Left phono normalized RMS | `0.7743228579914596` | `0.43714264111544443` |
+| Right phono normalized RMS | `0.7494342423073957` | `0.3959241852448356` |
+
+The permanent stop and reversal test requires lower phono normalized RMS error in both channels.
+
+The test also verifies the fixed four-step work limit.
+
+### Contrary Evidence
+
+The bounded rate-sweep candidate produces 225 contact transitions.
+
+The reference produces 269 contact transitions.
+
+The former one-step candidate produces 265 transitions.
+
+The stop and reversal cartridge absolute-integral error increases to approximately `52.5%`.
+
+These results keep the complete rapid-contact claim open.
+
+### Real-Time Result
+
+The measured 128-frame deadline is `0.667` milliseconds at 192 kilohertz.
+
+The one-step normal path misses 512 of 512 measured deadlines.
+
+The four-step rapid path also misses 512 of 512 measured deadlines.
+
+The measured medians are approximately `2.35` and `7.37` milliseconds.
+
+The current certified runtime trace is not real-time safe.
+
+Precompute certified contact-envelope data before product activation.
+
+### Numerical Boundary Result
+
+An exact `20x` render can derive `20.00000000000632383` from record-angle travel.
+
+The mechanics endpoint remains exact `20x` in this case.
+
+Accept at most `1e-10` derived-rate roundoff.
+
+Clamp an accepted value to exact `20x`.
+
+Reject a true rate excess of `0.001x`.
+
+### Permanent Tests
+
+```text
+physical::rapid_scratch_reference::bounded_swept_candidate_reduces_stop_and_reversal_phono_error
+physical::electromechanical::tests::record_player_midpoint_accepts_bounded_shorter_internal_steps
+physical::player::tests::stab_and_chirp_change_phono_audio_at_one_eight_and_twenty_times
+scratch_gate::tests::maximum_rate_roundoff_clamps_to_the_exact_supported_boundary
+```
+
+### Claim Limit
+
+The bounded sweep is a material improvement against the reduced reference.
+
+It does not prove complete coupled-player accuracy.
+
+It does not pass the current callback deadline.

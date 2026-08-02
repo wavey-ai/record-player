@@ -726,6 +726,31 @@ mod tests {
     }
 
     #[test]
+    fn record_player_midpoint_accepts_bounded_shorter_internal_steps() {
+        let (mut deck, mut pickup, mut cartridge) = record_player_states();
+        let pickup_sample_rate_hz = pickup.sample_rate_hz();
+        for completed_step in 1..=4 {
+            let telemetry = process_coupled_record_player_midpoint(
+                &mut deck,
+                &mut pickup,
+                &mut cartridge,
+                0.25 / SAMPLE_RATE_HZ,
+                DeckMechanicalControl::default(),
+                midpoint_geometry(PickupMechanicalInput::default()),
+                StylusTangentialMode::Separated,
+            )
+            .unwrap();
+            assert_eq!(telemetry.pickup.completed_steps, completed_step);
+            assert_eq!(telemetry.cartridge.completed_steps, completed_step);
+            assert_eq!(pickup.sample_rate_hz(), pickup_sample_rate_hz);
+        }
+        assert_eq!(
+            deck.telemetry().mechanical_time_seconds,
+            1.0 / SAMPLE_RATE_HZ
+        );
+    }
+
+    #[test]
     fn record_player_midpoint_commits_a_symmetric_bridge_atomically() {
         let (mut deck, mut pickup, mut cartridge) = record_player_states();
         let mut input = PickupMechanicalInput::default();

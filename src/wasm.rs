@@ -3221,6 +3221,11 @@ impl WasmPhysicalHostRenderer {
         self.inner.telemetry().groove_radius_m
     }
 
+    #[wasm_bindgen(js_name = telemetrySweptContactSubsteps)]
+    pub fn telemetry_swept_contact_substeps(&self) -> u8 {
+        self.inner.telemetry().swept_contact_substeps
+    }
+
     #[wasm_bindgen(js_name = telemetryGrooveLoaded)]
     pub fn telemetry_groove_loaded(&self) -> bool {
         self.inner.telemetry().groove_loaded
@@ -4548,6 +4553,7 @@ mod tests {
                 renderer.telemetry_absolute_internal_frame(),
                 renderer.current_internal_frame()
             );
+            assert_eq!(renderer.telemetry_swept_contact_substeps(), 1);
         }
 
         assert_eq!(

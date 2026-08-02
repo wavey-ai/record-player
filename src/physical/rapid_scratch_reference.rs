@@ -12,6 +12,7 @@ use super::groove::{
     GrooveAsset, GrooveCutReport, GrooveLayout, GrooveSourceKind, GrooveSpatialLevelSelection,
     GrooveSpatialPyramid, RecordCutConfig,
 };
+use super::player::{MAX_SWEPT_CONTACT_STEP_SOURCE_FRAMES, MAX_SWEPT_CONTACT_SUBSTEPS};
 use super::stylus::{
     trace_spherical_45_45_wall_multiresolution, trace_spherical_uniform,
     trace_spherical_uniform_contacts, StylusGeometry, StylusTraceError, StylusTraceSample,
@@ -1171,12 +1172,29 @@ fn run_rapid_scratch_case(
     initial_position_source_frames: f64,
     reference_step_frames: f64,
 ) -> Result<RapidScratchMetrics, RapidScratchCaseError> {
+    run_rapid_scratch_case_with_candidate_step(
+        fixture,
+        advances_source_frames,
+        initial_position_source_frames,
+        reference_step_frames,
+        f64::INFINITY,
+    )
+}
+
+fn run_rapid_scratch_case_with_candidate_step(
+    fixture: &RapidScratchFixture,
+    advances_source_frames: &[f64],
+    initial_position_source_frames: f64,
+    reference_step_frames: f64,
+    candidate_step_frames: f64,
+) -> Result<RapidScratchMetrics, RapidScratchCaseError> {
     let mut electrical_observers = OpenLoopElectricalObservers::scratch_seed();
     run_rapid_scratch_case_with_observers(
         fixture,
         advances_source_frames,
         initial_position_source_frames,
         reference_step_frames,
+        candidate_step_frames,
         &mut electrical_observers,
     )
 }
@@ -1186,6 +1204,7 @@ fn run_rapid_scratch_case_with_observers(
     advances_source_frames: &[f64],
     initial_position_source_frames: f64,
     reference_step_frames: f64,
+    candidate_step_frames: f64,
     electrical_observers: &mut OpenLoopElectricalObservers,
 ) -> Result<RapidScratchMetrics, RapidScratchCaseError> {
     let contact = StylusContactConfig::default();
@@ -1202,57 +1221,108 @@ fn run_rapid_scratch_case_with_observers(
         let next_position = position + advance;
         assert!(next_position >= 64.0);
         assert!(next_position <= fixture.vertical_m.len() as f64 - 65.0);
-        let selection = fixture
-            .pyramid
-            .select(0, &fixture.zero_lateral_m, &fixture.vertical_m, advance)
-            .unwrap();
-        let candidate_walls = [
-            candidate_trace(selection, 0, next_position, geometry).map_err(|source| {
-                RapidScratchCaseError::CandidateTrace {
-                    macro_index,
-                    wall_index: 0,
-                    source,
-                }
-            })?,
-            candidate_trace(selection, 1, next_position, geometry).map_err(|source| {
-                RapidScratchCaseError::CandidateTrace {
-                    macro_index,
-                    wall_index: 1,
-                    source,
-                }
-            })?,
-        ];
-        metrics.candidate_trace_calls += 2;
         let tangential_velocity_m_s = advance * METERS_PER_SOURCE_FRAME / OUTPUT_DT_SECONDS;
-        let candidate_output = candidate
-            .process(PickupMechanicalInput {
-                wall_contacts: test_single_wall_contacts(
-                    [
-                        candidate_walls[0].center_displacement_m,
-                        candidate_walls[1].center_displacement_m,
-                    ],
-                    [
-                        candidate_walls[0].groove_slope,
-                        candidate_walls[1].groove_slope,
-                    ],
-                ),
-                contact_surface: PickupContactSurface::GrooveWalls,
-                groove_radius_m: GROOVE_RADIUS_M,
-                groove_tangential_velocity_m_s: tangential_velocity_m_s,
-                stylus_lowered: true,
-                ..PickupMechanicalInput::default()
-            })
+        let candidate_substeps = ((advance.abs() / candidate_step_frames).ceil().max(1.0) as usize)
+            .min(usize::from(MAX_SWEPT_CONTACT_SUBSTEPS));
+        let candidate_substep_dt = OUTPUT_DT_SECONDS / candidate_substeps as f64;
+        let candidate_substep_advance = advance / candidate_substeps as f64;
+        let candidate_selection = fixture
+            .pyramid
+            .select(
+                0,
+                &fixture.zero_lateral_m,
+                &fixture.vertical_m,
+                candidate_substep_advance,
+            )
             .unwrap();
-        metrics.candidate_contact_steps += 1;
-        metrics.candidate_peak_wall_height_m = metrics
-            .candidate_peak_wall_height_m
-            .max((std::f64::consts::SQRT_2 * candidate_walls[0].center_displacement_m).abs());
-        metrics.candidate_peak_wall_normal_force_n = metrics
-            .candidate_peak_wall_normal_force_n
-            .max(candidate_output.wall_normal_force_n.iter().sum());
-        metrics.candidate_peak_reaction_torque_nm = metrics
-            .candidate_peak_reaction_torque_nm
-            .max(candidate_output.record_reaction_torque_nm().abs());
+        let mut candidate_force_sum = 0.0;
+        let mut candidate_torque_sum = 0.0;
+        let mut candidate_height_sum = 0.0;
+        let mut candidate_contact_count = 0_usize;
+        let mut candidate_cartridge_voltage_sum = [0.0; 2];
+        for substep in 0..candidate_substeps {
+            let fraction = (substep + 1) as f64 / candidate_substeps as f64;
+            let substep_position = position + advance * fraction;
+            let candidate_walls = [
+                candidate_trace(candidate_selection, 0, substep_position, geometry).map_err(
+                    |source| RapidScratchCaseError::CandidateTrace {
+                        macro_index,
+                        wall_index: 0,
+                        source,
+                    },
+                )?,
+                candidate_trace(candidate_selection, 1, substep_position, geometry).map_err(
+                    |source| RapidScratchCaseError::CandidateTrace {
+                        macro_index,
+                        wall_index: 1,
+                        source,
+                    },
+                )?,
+            ];
+            metrics.candidate_trace_calls += 2;
+            let candidate_output = candidate
+                .process_bounded_substep(
+                    PickupMechanicalInput {
+                        wall_contacts: test_single_wall_contacts(
+                            [
+                                candidate_walls[0].center_displacement_m,
+                                candidate_walls[1].center_displacement_m,
+                            ],
+                            [
+                                candidate_walls[0].groove_slope,
+                                candidate_walls[1].groove_slope,
+                            ],
+                        ),
+                        contact_surface: PickupContactSurface::GrooveWalls,
+                        groove_radius_m: GROOVE_RADIUS_M,
+                        groove_tangential_velocity_m_s: tangential_velocity_m_s,
+                        stylus_lowered: true,
+                        ..PickupMechanicalInput::default()
+                    },
+                    candidate_substep_dt,
+                )
+                .unwrap();
+            metrics.candidate_contact_steps += 1;
+            let candidate_height =
+                std::f64::consts::SQRT_2 * candidate_walls[0].center_displacement_m;
+            let candidate_force = candidate_output.wall_normal_force_n.iter().sum::<f64>();
+            let candidate_torque = candidate_output.record_reaction_torque_nm();
+            let candidate_contact = candidate_output.wall_contact.into_iter().any(|value| value);
+            candidate_height_sum += candidate_height;
+            candidate_force_sum += candidate_force;
+            candidate_torque_sum += candidate_torque;
+            candidate_contact_count += usize::from(candidate_contact);
+            metrics.candidate_peak_wall_height_m = metrics
+                .candidate_peak_wall_height_m
+                .max(candidate_height.abs());
+            metrics.candidate_peak_wall_normal_force_n = metrics
+                .candidate_peak_wall_normal_force_n
+                .max(candidate_force);
+            metrics.candidate_peak_reaction_torque_nm = metrics
+                .candidate_peak_reaction_torque_nm
+                .max(candidate_torque.abs());
+            if candidate_contact != previous_candidate_contact {
+                metrics.candidate_contact_transitions += 1;
+                previous_candidate_contact = candidate_contact;
+            }
+            let candidate_magnet_velocity =
+                coil_velocity_from_lateral_vertical(candidate_output.relative_velocity_m_s);
+            let candidate_cartridge_output = electrical_observers
+                .candidate_cartridge
+                .advance(candidate_substep_dt, candidate_magnet_velocity)
+                .unwrap();
+            for channel in 0..2 {
+                candidate_cartridge_voltage_sum[channel] +=
+                    candidate_cartridge_output.interval_average_load_output_voltage_v[channel];
+            }
+        }
+        let inverse_candidate_substeps = 1.0 / candidate_substeps as f64;
+        let candidate_height = candidate_height_sum * inverse_candidate_substeps;
+        let candidate_force = candidate_force_sum * inverse_candidate_substeps;
+        let candidate_torque = candidate_torque_sum * inverse_candidate_substeps;
+        let candidate_occupancy = candidate_contact_count as f64 * inverse_candidate_substeps;
+        let candidate_cartridge_voltage =
+            candidate_cartridge_voltage_sum.map(|sum| sum * inverse_candidate_substeps);
 
         let substeps = MIN_REFERENCE_SUBSTEPS
             .max((advance.abs() / reference_step_frames).ceil().max(1.0) as usize);
@@ -1322,43 +1392,23 @@ fn run_rapid_scratch_case_with_observers(
         let reference_torque = reference_torque_sum * inverse_substeps;
         let reference_height = reference_height_sum * inverse_substeps;
         let reference_occupancy = reference_contact_count as f64 * inverse_substeps;
-        let candidate_contact = candidate_output.wall_contact.into_iter().any(|value| value);
-        if candidate_contact != previous_candidate_contact {
-            metrics.candidate_contact_transitions += 1;
-            previous_candidate_contact = candidate_contact;
-        }
-        let candidate_occupancy = f64::from(candidate_contact);
         let occupancy_error = (candidate_occupancy - reference_occupancy).abs();
         metrics.contact_occupancy_absolute_error += occupancy_error;
         metrics.maximum_contact_occupancy_error =
             metrics.maximum_contact_occupancy_error.max(occupancy_error);
-        metrics.wall_height.observe(
-            std::f64::consts::SQRT_2 * candidate_walls[0].center_displacement_m,
-            reference_height,
-            OUTPUT_DT_SECONDS,
-        );
-        metrics.wall_normal_force.observe(
-            candidate_output.wall_normal_force_n.iter().sum(),
-            reference_force,
-            OUTPUT_DT_SECONDS,
-        );
-        metrics.reaction_torque.observe(
-            candidate_output.record_reaction_torque_nm(),
-            reference_torque,
-            OUTPUT_DT_SECONDS,
-        );
+        metrics
+            .wall_height
+            .observe(candidate_height, reference_height, OUTPUT_DT_SECONDS);
+        metrics
+            .wall_normal_force
+            .observe(candidate_force, reference_force, OUTPUT_DT_SECONDS);
+        metrics
+            .reaction_torque
+            .observe(candidate_torque, reference_torque, OUTPUT_DT_SECONDS);
 
         // These identical electrical observers isolate the voltage effect of
         // the two mechanical trajectories. They do not feed cartridge force
         // back into either mechanical solve.
-        let candidate_magnet_velocity =
-            coil_velocity_from_lateral_vertical(candidate_output.relative_velocity_m_s);
-        let candidate_cartridge_output = electrical_observers
-            .candidate_cartridge
-            .advance(OUTPUT_DT_SECONDS, candidate_magnet_velocity)
-            .unwrap();
-        let candidate_cartridge_voltage =
-            candidate_cartridge_output.interval_average_load_output_voltage_v;
         let reference_cartridge_voltage =
             reference_cartridge_voltage_sum.map(|sum| sum * inverse_substeps);
         let candidate_phono_output = electrical_observers
@@ -2263,6 +2313,7 @@ fn rapid_scratch_reference_covers_signed_rates_impulse_loss_and_retracking() {
             &advances,
             8_192.0 - advances.iter().sum::<f64>() * 0.5,
             MAX_REFERENCE_SWEEP_STEP_FRAMES,
+            f64::INFINITY,
             &mut electrical_observers,
         )
     })
@@ -2316,6 +2367,39 @@ fn rapid_stop_and_reversal_fixture_reaches_cartridge_and_phono_outputs() {
         assert!(phono.reference_absolute_integral > 0.0);
         assert!(cartridge.normalized_rms_error().is_finite());
         assert!(phono.normalized_rms_error().is_finite());
+    }
+}
+
+#[test]
+fn bounded_swept_candidate_reduces_stop_and_reversal_phono_error() {
+    let fixture = programme_fixture(8_192);
+    let advances = rapid_stop_reversal_advances();
+    let baseline = run_rapid_scratch_case(
+        &fixture,
+        &advances,
+        4_096.0,
+        MAX_REFERENCE_SWEEP_STEP_FRAMES,
+    )
+    .unwrap();
+    let swept = run_rapid_scratch_case_with_candidate_step(
+        &fixture,
+        &advances,
+        4_096.0,
+        MAX_REFERENCE_SWEEP_STEP_FRAMES,
+        MAX_SWEPT_CONTACT_STEP_SOURCE_FRAMES,
+    )
+    .unwrap();
+
+    assert!(swept.candidate_contact_steps > advances.len() as u64);
+    assert!(
+        swept.candidate_contact_steps
+            <= u64::from(MAX_SWEPT_CONTACT_SUBSTEPS) * advances.len() as u64
+    );
+    for channel in 0..2 {
+        assert!(
+            swept.open_loop_phono_voltage[channel].normalized_rms_error()
+                < baseline.open_loop_phono_voltage[channel].normalized_rms_error()
+        );
     }
 }
 
@@ -2375,6 +2459,16 @@ fn report_rapid_scratch_reference_metrics() {
     )
     .unwrap();
     let elapsed = start.elapsed();
+    let swept_start = std::time::Instant::now();
+    let swept = run_rapid_scratch_case_with_candidate_step(
+        &fixture,
+        &advances,
+        8_192.0 - advances.iter().sum::<f64>() * 0.5,
+        MAX_REFERENCE_SWEEP_STEP_FRAMES,
+        MAX_SWEPT_CONTACT_STEP_SOURCE_FRAMES,
+    )
+    .unwrap();
+    let swept_elapsed = swept_start.elapsed();
     let fine_start = std::time::Instant::now();
     let fine = run_rapid_scratch_case(
         &fixture,
@@ -2410,6 +2504,22 @@ fn report_rapid_scratch_reference_metrics() {
         fine.reference_trace_calls,
         fine.reference_contact_steps,
     );
+    eprintln!(
+        "bounded_swept_candidate height_nrmse={} force_nrmse={} torque_nrmse={} cartridge_nrmse={:?} phono_nrmse={:?} occupancy_mae={} contact_transitions={} trace_calls={} contact_steps={} elapsed={swept_elapsed:?}",
+        swept.wall_height.normalized_rms_error(),
+        swept.wall_normal_force.normalized_rms_error(),
+        swept.reaction_torque.normalized_rms_error(),
+        swept
+            .open_loop_cartridge_voltage
+            .map(ErrorAccumulator::normalized_rms_error),
+        swept
+            .open_loop_phono_voltage
+            .map(ErrorAccumulator::normalized_rms_error),
+        swept.contact_occupancy_absolute_error,
+        swept.candidate_contact_transitions,
+        swept.candidate_trace_calls,
+        swept.candidate_contact_steps,
+    );
 
     let stop_reversal_fixture = programme_fixture(8_192);
     let stop_reversal_advances = rapid_stop_reversal_advances();
@@ -2418,6 +2528,14 @@ fn report_rapid_scratch_reference_metrics() {
         &stop_reversal_advances,
         4_096.0,
         MAX_REFERENCE_SWEEP_STEP_FRAMES,
+    )
+    .unwrap();
+    let swept_stop_reversal = run_rapid_scratch_case_with_candidate_step(
+        &stop_reversal_fixture,
+        &stop_reversal_advances,
+        4_096.0,
+        MAX_REFERENCE_SWEEP_STEP_FRAMES,
+        MAX_SWEPT_CONTACT_STEP_SOURCE_FRAMES,
     )
     .unwrap();
     eprintln!(
@@ -2432,6 +2550,21 @@ fn report_rapid_scratch_reference_metrics() {
             .open_loop_cartridge_voltage
             .map(ErrorAccumulator::relative_absolute_integral_error),
         stop_reversal
+            .open_loop_phono_voltage
+            .map(ErrorAccumulator::relative_absolute_integral_error),
+    );
+    eprintln!(
+        "rapid_stop_reversal_bounded_swept cartridge_nrmse={:?} phono_nrmse={:?} cartridge_absolute_integral_error={:?} phono_absolute_integral_error={:?}",
+        swept_stop_reversal
+            .open_loop_cartridge_voltage
+            .map(ErrorAccumulator::normalized_rms_error),
+        swept_stop_reversal
+            .open_loop_phono_voltage
+            .map(ErrorAccumulator::normalized_rms_error),
+        swept_stop_reversal
+            .open_loop_cartridge_voltage
+            .map(ErrorAccumulator::relative_absolute_integral_error),
+        swept_stop_reversal
             .open_loop_phono_voltage
             .map(ErrorAccumulator::relative_absolute_integral_error),
     );

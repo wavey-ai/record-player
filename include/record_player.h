@@ -310,7 +310,8 @@ typedef struct RecordPlayerTelemetry {
     uint8_t at_programme_boundary;
     uint8_t phono_input_overload[2];
     uint8_t phono_output_overload[2];
-    uint8_t reserved[2];
+    uint8_t swept_contact_substeps;
+    uint8_t reserved[1];
     RecordPlayerRadialTrackingTelemetry radial_tracking;
     RecordPlayerDeckTelemetry deck;
     RecordPlayerPickupTelemetry pickup;

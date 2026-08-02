@@ -45,8 +45,10 @@ use crate::{
     DeckMechanicalError, DeckMechanicalSnapshot, DeckMechanicalState, DeckMechanicalTelemetry,
 };
 
-const PHYSICAL_RECORD_PLAYER_SNAPSHOT_VERSION: u32 = 11;
+const PHYSICAL_RECORD_PLAYER_SNAPSHOT_VERSION: u32 = 12;
 const MAX_EXACT_GROOVE_FRAME_COUNT: u64 = 1_u64 << 53;
+pub(crate) const MAX_SWEPT_CONTACT_SUBSTEPS: u8 = 4;
+pub(crate) const MAX_SWEPT_CONTACT_STEP_SOURCE_FRAMES: f64 = 5.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -435,6 +437,13 @@ struct GrooveSourceTrace {
     wall_contacts: [StylusTraceContactSet; 2],
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SweptGrooveTracePlan {
+    descriptor: GrooveSourceDescriptor,
+    source_turn_offset: i64,
+    groove_center_lateral_m: f64,
+}
+
 fn transform_wall_contact_set(
     mut contacts: StylusTraceContactSet,
     center_normal_offset_m: f64,
@@ -462,6 +471,7 @@ pub struct PhysicalRenderTelemetry {
     pub spatial_filter_lower_step_frames: u32,
     pub spatial_filter_upper_step_frames: u32,
     pub spatial_filter_upper_blend: f64,
+    pub swept_contact_substeps: u8,
     pub midpoint_candidate_branches: u32,
     pub midpoint_linear_solves: u32,
     pub phono_output_v: [f64; 2],
@@ -610,6 +620,7 @@ impl PhysicalRecordPlayer {
             spatial_filter_lower_step_frames: 1,
             spatial_filter_upper_step_frames: 1,
             spatial_filter_upper_blend: 0.0,
+            swept_contact_substeps: 1,
             midpoint_candidate_branches: 0,
             midpoint_linear_solves: 0,
             phono_output_v: [0.0; 2],
@@ -753,6 +764,7 @@ impl PhysicalRecordPlayer {
         self.last_telemetry.spatial_filter_lower_step_frames = 1;
         self.last_telemetry.spatial_filter_upper_step_frames = 1;
         self.last_telemetry.spatial_filter_upper_blend = 0.0;
+        self.last_telemetry.swept_contact_substeps = 1;
         self.last_telemetry.radial_tracking = self.radial_tracking.telemetry();
         Ok(previous)
     }
@@ -829,6 +841,7 @@ impl PhysicalRecordPlayer {
         self.last_telemetry.spatial_filter_lower_step_frames = 1;
         self.last_telemetry.spatial_filter_upper_step_frames = 1;
         self.last_telemetry.spatial_filter_upper_blend = 0.0;
+        self.last_telemetry.swept_contact_substeps = 1;
         previous
     }
 
@@ -882,6 +895,7 @@ impl PhysicalRecordPlayer {
         self.last_telemetry.spatial_filter_lower_step_frames = 1;
         self.last_telemetry.spatial_filter_upper_step_frames = 1;
         self.last_telemetry.spatial_filter_upper_blend = 0.0;
+        self.last_telemetry.swept_contact_substeps = 1;
         self.last_telemetry.radial_tracking = self.radial_tracking.telemetry();
         Ok(())
     }
@@ -1415,12 +1429,13 @@ impl PhysicalRecordPlayer {
         let mut at_programme_boundary = false;
         let mut groove_radius_m = config.groove.outer_program_radius_m;
         let mut radial_tracking = self.radial_tracking.telemetry();
-        let mut wall_contacts = [StylusTraceContactSet::default(); 2];
+        let wall_contacts = [StylusTraceContactSet::default(); 2];
         let mut spatial_filter_lower_step_frames = 1;
         let mut spatial_filter_upper_step_frames = 1;
         let mut spatial_filter_upper_blend = 0.0;
         let mut contact_surface = PickupContactSurface::None;
         let mut radial_preparation = None;
+        let mut swept_groove_trace_plan = None;
         let mut lateral_origin_shift_bias_m = 0.0;
         let mut lateral_origin_shift_per_record_velocity_m_s = 0.0;
         if let Some(source) = &self.source {
@@ -1469,28 +1484,11 @@ impl PhysicalRecordPlayer {
                     let source_turn_offset = selection
                         .source_turn_offset()
                         .ok_or(PhysicalRecordPlayerError::InvalidRadialSelection)?;
-                    let selected_position =
-                        midpoint_spiral_position + source_turn_offset as f64 * frames_per_turn;
-                    if !(0.0..=maximum).contains(&selected_position) {
-                        return Err(PhysicalRecordPlayerError::InvalidRadialSelection);
-                    }
-                    let source_frame_advance =
-                        2.0 * (midpoint_spiral_position - previous_spiral_frame_position);
-                    let trace =
-                        source.trace(selected_position, source_frame_advance, config.stylus)?;
-                    groove_radius_m = trace.groove_radius_m;
-                    spatial_filter_lower_step_frames = trace.spatial_filter_lower_step_frames;
-                    spatial_filter_upper_step_frames = trace.spatial_filter_upper_step_frames;
-                    spatial_filter_upper_blend = trace.spatial_filter_upper_blend;
-                    for wall in 0..2 {
-                        let center_normal_offset_m =
-                            groove_wall_center_offsets(selection.groove_center_lateral_m)[wall];
-                        wall_contacts[wall] = transform_wall_contact_set(
-                            trace.wall_contacts[wall],
-                            center_normal_offset_m,
-                            midpoint_at_boundary,
-                        );
-                    }
+                    swept_groove_trace_plan = Some(SweptGrooveTracePlan {
+                        descriptor,
+                        source_turn_offset,
+                        groove_center_lateral_m: selection.groove_center_lateral_m,
+                    });
                     contact_surface = PickupContactSurface::GrooveWalls;
                 }
                 RadialContactRegion::Land => {
@@ -1505,30 +1503,118 @@ impl PhysicalRecordPlayer {
             groove_loaded = true;
         }
 
-        let previous_tangential_mode = self.pickup.telemetry().tangential_mode;
-        let coupled = process_coupled_record_player_midpoint(
-            &mut self.deck,
-            &mut self.pickup,
-            &mut self.cartridge,
-            dt,
-            control.deck,
-            MidpointPickupGeometry {
-                input: PickupMechanicalInput {
-                    wall_contacts,
-                    wall_contact_qualification: Default::default(),
-                    land_displacement_m: config.record_cut.groove_top_width_m * 0.5,
-                    contact_surface,
-                    groove_radius_m,
-                    groove_tangential_velocity_m_s: previous_record_velocity_rad_s
-                        * groove_radius_m,
-                    stylus_lowered: groove_loaded && control.stylus_lowered,
-                    electromagnetic_force_n: [0.0; 2],
+        let predicted_source_frame_advance =
+            previous_record_velocity_rad_s * dt / std::f64::consts::TAU * frames_per_turn;
+        let swept_contact_substeps = if swept_groove_trace_plan.is_some() {
+            ((predicted_source_frame_advance.abs() / MAX_SWEPT_CONTACT_STEP_SOURCE_FRAMES)
+                .ceil()
+                .max(1.0) as u8)
+                .min(MAX_SWEPT_CONTACT_SUBSTEPS)
+        } else {
+            1
+        };
+        let substep_dt = dt / f64::from(swept_contact_substeps);
+        let mut previous_tangential_mode = self.pickup.telemetry().tangential_mode;
+        let mut last_coupled = None;
+        let mut midpoint_candidate_branches = 0_u32;
+        let mut midpoint_linear_solves = 0_u32;
+        for _ in 0..swept_contact_substeps {
+            let substep_mechanics = self.deck.telemetry();
+            let substep_record_velocity_rad_s =
+                substep_mechanics.record_rate * config.groove.nominal_angular_velocity_rad_s();
+            let substep_spiral_start = previous_spiral_frame_position
+                + (substep_mechanics.record_angle_turns - previous_record_turns) * frames_per_turn;
+            let mut substep_wall_contacts = wall_contacts;
+            let mut substep_groove_radius_m = groove_radius_m;
+            let mut substep_lateral_origin_shift_bias_m = lateral_origin_shift_bias_m;
+            let mut substep_lateral_origin_shift_per_record_velocity_m_s =
+                lateral_origin_shift_per_record_velocity_m_s;
+
+            if let (Some(source), Some(plan)) = (&self.source, swept_groove_trace_plan) {
+                let maximum = plan.descriptor.maximum_frame_position();
+                let bounded_substep_start = substep_spiral_start.clamp(0.0, maximum);
+                let predicted_substep_midpoint_delta_turns =
+                    0.5 * substep_record_velocity_rad_s * substep_dt / std::f64::consts::TAU;
+                let unclamped_substep_midpoint = bounded_substep_start
+                    + predicted_substep_midpoint_delta_turns * frames_per_turn;
+                let substep_midpoint = unclamped_substep_midpoint.clamp(0.0, maximum);
+                let substep_at_boundary = substep_midpoint != unclamped_substep_midpoint;
+                let selected_position =
+                    substep_midpoint + plan.source_turn_offset as f64 * frames_per_turn;
+                if !(0.0..=maximum).contains(&selected_position) {
+                    return Err(PhysicalRecordPlayerError::InvalidRadialSelection);
+                }
+                let source_frame_advance = 2.0 * (substep_midpoint - bounded_substep_start);
+                let trace = source.trace(selected_position, source_frame_advance, config.stylus)?;
+                substep_groove_radius_m = trace.groove_radius_m;
+                groove_radius_m = trace.groove_radius_m;
+                spatial_filter_lower_step_frames = trace.spatial_filter_lower_step_frames;
+                spatial_filter_upper_step_frames = trace.spatial_filter_upper_step_frames;
+                spatial_filter_upper_blend = trace.spatial_filter_upper_blend;
+                let center_offsets = groove_wall_center_offsets(plan.groove_center_lateral_m);
+                for wall in 0..2 {
+                    substep_wall_contacts[wall] = transform_wall_contact_set(
+                        trace.wall_contacts[wall],
+                        center_offsets[wall],
+                        substep_at_boundary,
+                    );
+                }
+                if substep_at_boundary {
+                    let fixed_boundary_delta_turns =
+                        (substep_midpoint - bounded_substep_start) / frames_per_turn;
+                    substep_lateral_origin_shift_bias_m =
+                        -plan.descriptor.cut.groove_pitch_m_per_revolution
+                            * fixed_boundary_delta_turns;
+                    substep_lateral_origin_shift_per_record_velocity_m_s = 0.0;
+                } else {
+                    substep_lateral_origin_shift_bias_m =
+                        -plan.descriptor.cut.groove_pitch_m_per_revolution
+                            * 0.5
+                            * substep_record_velocity_rad_s
+                            * substep_dt
+                            / std::f64::consts::TAU;
+                    substep_lateral_origin_shift_per_record_velocity_m_s =
+                        interior_spiral_origin_shift_per_record_velocity_m_s(
+                            plan.descriptor.cut.groove_pitch_m_per_revolution,
+                            substep_dt,
+                        );
+                }
+            }
+
+            let coupled = process_coupled_record_player_midpoint(
+                &mut self.deck,
+                &mut self.pickup,
+                &mut self.cartridge,
+                substep_dt,
+                control.deck,
+                MidpointPickupGeometry {
+                    input: PickupMechanicalInput {
+                        wall_contacts: substep_wall_contacts,
+                        wall_contact_qualification: Default::default(),
+                        land_displacement_m: config.record_cut.groove_top_width_m * 0.5,
+                        contact_surface,
+                        groove_radius_m: substep_groove_radius_m,
+                        groove_tangential_velocity_m_s: substep_record_velocity_rad_s
+                            * substep_groove_radius_m,
+                        stylus_lowered: groove_loaded && control.stylus_lowered,
+                        electromagnetic_force_n: [0.0; 2],
+                    },
+                    lateral_origin_shift_bias_m: substep_lateral_origin_shift_bias_m,
+                    lateral_origin_shift_per_record_velocity_m_s:
+                        substep_lateral_origin_shift_per_record_velocity_m_s,
                 },
-                lateral_origin_shift_bias_m,
-                lateral_origin_shift_per_record_velocity_m_s,
-            },
-            previous_tangential_mode,
-        )?;
+                previous_tangential_mode,
+            )?;
+            midpoint_candidate_branches =
+                midpoint_candidate_branches.saturating_add(coupled.evaluated_branches);
+            midpoint_linear_solves =
+                midpoint_linear_solves.saturating_add(coupled.attempted_linear_solves);
+            previous_tangential_mode = coupled.tangential_mode;
+            last_coupled = Some(coupled);
+        }
+        let mut coupled = last_coupled.expect("one or more swept-contact substeps");
+        coupled.evaluated_branches = midpoint_candidate_branches;
+        coupled.attempted_linear_solves = midpoint_linear_solves;
         let mechanics = coupled.mechanics;
         let pickup = coupled.pickup;
         let cartridge = coupled.cartridge;
@@ -1624,6 +1710,7 @@ impl PhysicalRecordPlayer {
             spatial_filter_lower_step_frames,
             spatial_filter_upper_step_frames,
             spatial_filter_upper_blend,
+            swept_contact_substeps,
             midpoint_candidate_branches: coupled.evaluated_branches,
             midpoint_linear_solves: coupled.attempted_linear_solves,
             phono_output_v,
@@ -1708,8 +1795,11 @@ fn render_telemetry_matches_snapshot(
         && telemetry.spatial_filter_lower_step_frames > 0
         && telemetry.spatial_filter_upper_step_frames > 0
         && (0.0..=1.0).contains(&telemetry.spatial_filter_upper_blend)
-        && telemetry.midpoint_candidate_branches <= MAX_MIDPOINT_CANDIDATE_BRANCHES
-        && telemetry.midpoint_linear_solves <= MAX_MIDPOINT_LINEAR_SOLVES
+        && (1..=MAX_SWEPT_CONTACT_SUBSTEPS).contains(&telemetry.swept_contact_substeps)
+        && telemetry.midpoint_candidate_branches
+            <= MAX_MIDPOINT_CANDIDATE_BRANCHES * u32::from(telemetry.swept_contact_substeps)
+        && telemetry.midpoint_linear_solves
+            <= MAX_MIDPOINT_LINEAR_SOLVES * u32::from(telemetry.swept_contact_substeps)
         && telemetry
             .phono_output_v
             .iter()
@@ -2211,14 +2301,17 @@ mod tests {
             const BLOCK_COUNT: usize = 512;
             const BLOCK_DEADLINE_NS: u128 =
                 1_000_000_000_u128 * BLOCK_FRAMES as u128 / 192_000_u128;
+            let initial_rate = if reversal { 20.0 } else { 1.0 };
             let mut player = PhysicalRecordPlayer::new(profile.clone()).unwrap();
             player.load_groove(groove).unwrap();
-            player.reset_transport(1.0, 1.0, 0.0, 0.0).unwrap();
+            player
+                .reset_transport(initial_rate, initial_rate, 0.0, 0.0)
+                .unwrap();
             player
                 .enqueue_control(TimedPlayerControl::new(
                     0,
                     1,
-                    player_control(profile.config.deck, 1.0),
+                    player_control(profile.config.deck, initial_rate),
                 ))
                 .unwrap();
             player
@@ -2227,6 +2320,8 @@ mod tests {
 
             let mut sequence = 2_u64;
             let mut elapsed_ns = Vec::with_capacity(BLOCK_COUNT);
+            let mut observed_substeps = Vec::with_capacity(BLOCK_COUNT);
+            let mut observed_rates = Vec::with_capacity(BLOCK_COUNT);
             let mut output = [0.0_f32; 2 * BLOCK_FRAMES];
             for block in 0..BLOCK_COUNT {
                 if reversal {
@@ -2256,6 +2351,8 @@ mod tests {
                 let started = Instant::now();
                 player.render_internal_interleaved(&mut output).unwrap();
                 elapsed_ns.push(started.elapsed().as_nanos());
+                observed_substeps.push(player.telemetry().swept_contact_substeps);
+                observed_rates.push(player.telemetry().mechanics.record_rate);
             }
             let total: u128 = elapsed_ns.iter().sum();
             let missed = elapsed_ns
@@ -2263,13 +2360,17 @@ mod tests {
                 .filter(|elapsed| **elapsed > BLOCK_DEADLINE_NS)
                 .count();
             eprintln!(
-                "midpoint-player-benchmark {label}: blocks={BLOCK_COUNT} frames_per_block={BLOCK_FRAMES} deadline_ns={BLOCK_DEADLINE_NS} elapsed_ns[min/p50/p95/p99/max/mean]={}/{}/{}/{}/{}/{} misses={missed}",
+                "midpoint-player-benchmark {label}: blocks={BLOCK_COUNT} frames_per_block={BLOCK_FRAMES} deadline_ns={BLOCK_DEADLINE_NS} elapsed_ns[min/p50/p95/p99/max/mean]={}/{}/{}/{}/{}/{} misses={missed} swept_substeps[min/max]={}/{} endpoint_rate[min/max]={}/{}",
                 *elapsed_ns.iter().min().unwrap(),
                 percentile(&elapsed_ns, 50),
                 percentile(&elapsed_ns, 95),
                 percentile(&elapsed_ns, 99),
                 *elapsed_ns.iter().max().unwrap(),
                 total / elapsed_ns.len() as u128,
+                observed_substeps.iter().min().unwrap(),
+                observed_substeps.iter().max().unwrap(),
+                observed_rates.iter().copied().reduce(f64::min).unwrap(),
+                observed_rates.iter().copied().reduce(f64::max).unwrap(),
             );
         }
 
@@ -2638,6 +2739,13 @@ mod tests {
                 assert_eq!(closed.scratch.preset, preset);
                 assert_eq!(closed.scratch.automatic_gate_target, 0.0);
                 assert!(closed.scratch.audible_gain < 1.0e-8);
+                let expected_substeps = match rate as u8 {
+                    1 => 1,
+                    8 => 2,
+                    20 => 4,
+                    _ => unreachable!(),
+                };
+                assert_eq!(closed.swept_contact_substeps, expected_substeps);
 
                 let frames_to_open =
                     (0.10 * preset.initial_stroke_span() / rate * sample_rate).ceil() as usize;
@@ -2898,7 +3006,7 @@ mod tests {
         let mut preroll = vec![0.0_f32; 2 * 256];
         player.render_internal_interleaved(&mut preroll).unwrap();
         let snapshot = player.snapshot();
-        assert_eq!(snapshot.version, 11);
+        assert_eq!(snapshot.version, 12);
         assert_eq!(
             snapshot.last_telemetry.scratch.preset,
             crate::ScratchPreset::Transform
@@ -3158,8 +3266,10 @@ mod tests {
         let mut output = [0.0_f32; 2];
         player.render_internal_interleaved(&mut output).unwrap();
         let telemetry = player.telemetry();
-        assert!(telemetry.spatial_filter_lower_step_frames >= 8);
-        assert!(telemetry.spatial_filter_upper_step_frames >= 8);
+        assert_eq!(telemetry.swept_contact_substeps, 2);
+        assert!(telemetry.spatial_filter_lower_step_frames >= 4);
+        assert!(telemetry.spatial_filter_upper_step_frames >= 4);
+        assert!(telemetry.spatial_filter_lower_step_frames < 8);
         assert!(output.iter().all(|sample| sample.is_finite()));
     }
 

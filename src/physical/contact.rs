@@ -859,6 +859,29 @@ impl PickupMechanicalState {
         self.process_with_validated_electromagnetic_relation(input, relation)
     }
 
+    /// Advances one bounded internal step without changing the public rate.
+    #[cfg(test)]
+    pub(crate) fn process_bounded_substep(
+        &mut self,
+        input: PickupMechanicalInput,
+        duration_seconds: f64,
+    ) -> Result<PickupMechanicalTelemetry, PickupMechanicalError> {
+        let nominal_dt = 1.0 / self.sample_rate_hz;
+        if !duration_seconds.is_finite()
+            || duration_seconds <= 0.0
+            || duration_seconds > nominal_dt * (1.0 + 16.0 * f64::EPSILON)
+        {
+            return Err(PickupMechanicalError::NumericalFailure);
+        }
+        let nominal_sample_rate_hz = self.sample_rate_hz;
+        let mut next = *self;
+        next.sample_rate_hz = 1.0 / duration_seconds;
+        let telemetry = next.process(input)?;
+        next.sample_rate_hz = nominal_sample_rate_hz;
+        *self = next;
+        Ok(telemetry)
+    }
+
     /// Advances one sample with an implicit affine electromagnetic force.
     ///
     /// The relation replaces `input.electromagnetic_force_n` for this call.
@@ -2540,15 +2563,21 @@ pub(crate) fn solve_coupled_deck_pickup_midpoint(
 ) -> Result<CoupledDeckPickupStep, CoupledDeckPickupError> {
     validate_input(geometry.input)?;
     validate_friction_geometry(pickup.contact, geometry.input)?;
+    let nominal_pickup_sample_rate_hz = pickup.sample_rate_hz;
+    let nominal_pickup_dt = 1.0 / nominal_pickup_sample_rate_hz;
     if !geometry.lateral_origin_shift_bias_m.is_finite()
         || !geometry
             .lateral_origin_shift_per_record_velocity_m_s
             .is_finite()
-        || (deck.dt - 1.0 / pickup.sample_rate_hz).abs()
-            > 16.0 * f64::EPSILON * deck.dt.max(1.0 / pickup.sample_rate_hz)
+        || deck.dt > nominal_pickup_dt * (1.0 + 16.0 * f64::EPSILON)
     {
         return Err(CoupledDeckPickupError::InvalidMidpointGeometry);
     }
+    // The public pickup state keeps the output processing rate. A bounded
+    // swept-contact solve may use shorter internal steps. All pickup equations
+    // and the atomic commit must use the prepared deck duration.
+    let mut pickup = pickup;
+    pickup.sample_rate_hz = 1.0 / deck.dt;
     let relation = PickupElectromagneticForceRelation::new(
         electromagnetic_relation.force_bias_n,
         electromagnetic_relation.reciprocal_damping_n_s_per_m,
@@ -2660,6 +2689,7 @@ pub(crate) fn solve_coupled_deck_pickup_midpoint(
                             {
                                 return Err(CoupledDeckPickupError::ReciprocityMismatch);
                             }
+                            next_pickup.sample_rate_hz = nominal_pickup_sample_rate_hz;
                             return Ok(CoupledDeckPickupStep {
                                 deck: next_deck,
                                 pickup: next_pickup,
@@ -2691,6 +2721,7 @@ pub(crate) fn solve_coupled_deck_pickup_midpoint(
             StylusTangentialMode::Separated,
         )?;
         step.pickup.contact = original_contact;
+        step.pickup.sample_rate_hz = nominal_pickup_sample_rate_hz;
         return Ok(step);
     }
     if rejected_unsupported_groove_wall_sticking {

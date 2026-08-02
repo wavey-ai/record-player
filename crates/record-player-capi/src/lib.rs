@@ -354,7 +354,8 @@ pub struct RecordPlayerTelemetry {
     pub at_programme_boundary: u8,
     pub phono_input_overload: [u8; 2],
     pub phono_output_overload: [u8; 2],
-    pub reserved: [u8; 2],
+    pub swept_contact_substeps: u8,
+    pub reserved: [u8; 1],
     pub radial_tracking: RecordPlayerRadialTrackingTelemetry,
     pub deck: RecordPlayerDeckTelemetry,
     pub pickup: RecordPlayerPickupTelemetry,
@@ -889,7 +890,8 @@ fn telemetry(
         at_programme_boundary: u8::from(value.at_programme_boundary),
         phono_input_overload: value.phono_input_overload.map(u8::from),
         phono_output_overload: value.phono_output_overload.map(u8::from),
-        reserved: [0; 2],
+        swept_contact_substeps: value.swept_contact_substeps,
+        reserved: [0; 1],
         radial_tracking: RecordPlayerRadialTrackingTelemetry {
             spiral_reference_radius_m: radial_tracking.spiral_reference_radius_m,
             stylus_radius_m: radial_tracking.stylus_radius_m,
@@ -1835,6 +1837,10 @@ mod tests {
         assert_eq!(size_of::<RecordPlayerTelemetry>(), 768);
         assert_eq!(offset_of!(RecordPlayerTelemetry, spiral_frame_position), 32);
         assert_eq!(offset_of!(RecordPlayerTelemetry, groove_frame_position), 40);
+        assert_eq!(
+            offset_of!(RecordPlayerTelemetry, swept_contact_substeps),
+            94
+        );
         assert_eq!(offset_of!(RecordPlayerTelemetry, radial_tracking), 96);
         assert_eq!(offset_of!(RecordPlayerTelemetry, deck), 224);
         assert_eq!(offset_of!(RecordPlayerTelemetry, pickup), 320);
@@ -1861,6 +1867,7 @@ mod tests {
         assert!(header.contains("sizeof(RecordPlayerScratchControlResult) == 112"));
         assert!(header.contains("sizeof(RecordPlayerScratchTelemetry) == 64"));
         assert!(header.contains("sizeof(RecordPlayerTelemetry) == 768"));
+        assert!(header.contains("uint8_t swept_contact_substeps;"));
     }
 
     #[test]
@@ -2270,6 +2277,7 @@ mod tests {
         assert!(telemetry.pickup.groove_lateral_force_on_tip_n.is_finite());
         assert!(telemetry.spiral_frame_position.is_finite());
         assert!(telemetry.groove_frame_position.is_finite());
+        assert!((1..=4).contains(&telemetry.swept_contact_substeps));
         assert!(telemetry
             .radial_tracking
             .spiral_reference_radius_m

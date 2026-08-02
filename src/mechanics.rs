@@ -485,15 +485,22 @@ impl DeckMechanicalState {
         let mut next = *self;
         next.last_control = control;
         next.integration_remainder_seconds += duration_seconds;
-        let dt = 1.0 / next.config.integration_hz;
-        let steps = ((next.integration_remainder_seconds / dt) + 1.0e-10).floor() as u64;
-        if steps != 1 {
+        let integration_dt = 1.0 / next.config.integration_hz;
+        if duration_seconds == 0.0
+            || duration_seconds > integration_dt * (1.0 + 16.0 * f64::EPSILON)
+            || next.integration_remainder_seconds > integration_dt * (1.0 + 16.0 * f64::EPSILON)
+        {
             return Err(DeckMechanicalError::MidpointStepRequiresOneIntegrationStep);
         }
-        next.integration_remainder_seconds -= dt;
-        if next.integration_remainder_seconds < 0.0 {
+        let completes_integration_step =
+            next.integration_remainder_seconds >= integration_dt * (1.0 - 16.0 * f64::EPSILON);
+        if completes_integration_step {
+            next.integration_remainder_seconds -= integration_dt;
+        }
+        if next.integration_remainder_seconds.abs() <= 16.0 * f64::EPSILON * integration_dt {
             next.integration_remainder_seconds = 0.0;
         }
+        let dt = duration_seconds;
 
         let config = next.config;
         let motor_torque_nm = next.motor_torque(control, dt);
@@ -592,6 +599,7 @@ impl DeckMechanicalState {
             next,
             config,
             dt,
+            completes_integration_step,
             previous_platter_velocity_rad_s: self.platter_angular_velocity_rad_s,
             previous_record_velocity_rad_s: self.record_angular_velocity_rad_s,
             predicted_record_velocity_rad_s,
@@ -933,11 +941,13 @@ impl DeckMidpointPreparation {
             0.5 * (self.previous_record_velocity_rad_s + solution.record_velocity_rad_s) * self.dt;
         self.next.platter_angular_velocity_rad_s = solution.platter_velocity_rad_s;
         self.next.record_angular_velocity_rad_s = solution.record_velocity_rad_s;
-        self.next.completed_steps = self
-            .next
-            .completed_steps
-            .checked_add(1)
-            .ok_or(DeckMechanicalError::StepCounterOverflow)?;
+        if self.completes_integration_step {
+            self.next.completed_steps = self
+                .next
+                .completed_steps
+                .checked_add(1)
+                .ok_or(DeckMechanicalError::StepCounterOverflow)?;
+        }
         self.next.slipmat_mode = coupled_contact_mode(solution.slipmat_mode);
         self.next.hand_mode = coupled_contact_mode(solution.hand_mode);
         self.next.last_control.stylus_torque_nm = solution.stylus_torque_nm;
@@ -1004,6 +1014,7 @@ pub(crate) struct DeckMidpointPreparation {
     next: DeckMechanicalState,
     pub(crate) config: PhysicalDeckConfig,
     pub(crate) dt: f64,
+    completes_integration_step: bool,
     pub(crate) previous_platter_velocity_rad_s: f64,
     pub(crate) previous_record_velocity_rad_s: f64,
     /// Gives a torque-predictor ordering hint. It does not remove any branch.

@@ -10,7 +10,7 @@ pub const SCRATCH_GATE_ALGORITHM_VERSION: u32 = 9;
 pub const SCRATCH_GATE_SNAPSHOT_VERSION: u32 = 4;
 pub const SCRATCH_PERFORMANCE_SNAPSHOT_VERSION: u32 = 4;
 pub const MAXIMUM_SCRATCH_RECORD_RATE: f64 = 20.0;
-const MAXIMUM_SCRATCH_RECORD_RATE_ROUNDOFF: f64 = 1.0e-12;
+const MAXIMUM_SCRATCH_RECORD_RATE_ROUNDOFF: f64 = 1.0e-10;
 const MAXIMUM_FRAME_DELTA_SECONDS: f64 = 1.0 / 8_000.0;
 
 const MOTION_ONSET_RATE: f64 = 0.035;
@@ -2816,10 +2816,11 @@ mod tests {
         exact_input.rendered_source_travel_seconds = exact_travel;
         let mut rounded_input = exact_input;
         rounded_input.intent_record_rate =
-            f64::from_bits(MAXIMUM_SCRATCH_RECORD_RATE.to_bits() + 1);
+            MAXIMUM_SCRATCH_RECORD_RATE + 0.5 * MAXIMUM_SCRATCH_RECORD_RATE_ROUNDOFF;
         rounded_input.rendered_record_rate =
-            f64::from_bits(MAXIMUM_SCRATCH_RECORD_RATE.to_bits() + 1);
-        rounded_input.rendered_source_travel_seconds = f64::from_bits(exact_travel.to_bits() + 1);
+            MAXIMUM_SCRATCH_RECORD_RATE + 0.5 * MAXIMUM_SCRATCH_RECORD_RATE_ROUNDOFF;
+        rounded_input.rendered_source_travel_seconds =
+            exact_travel + 0.5 * MAXIMUM_SCRATCH_RECORD_RATE_ROUNDOFF * rounded_input.delta_seconds;
 
         assert_eq!(
             rounded.process_frame(rounded_input),
@@ -2886,7 +2887,7 @@ mod tests {
 
         let mut excessive_travel = performance_input(true, 1.0, 1.0, 0.5);
         excessive_travel.rendered_source_travel_seconds =
-            MAXIMUM_SCRATCH_RECORD_RATE * excessive_travel.delta_seconds + f64::EPSILON;
+            (MAXIMUM_SCRATCH_RECORD_RATE + 0.001) * excessive_travel.delta_seconds;
         assert_eq!(
             performance.process_frame(excessive_travel),
             Err(ScratchPerformanceError::InvalidInput {

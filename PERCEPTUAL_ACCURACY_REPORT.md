@@ -43,6 +43,7 @@ Therefore, this work does not yet improve production failure handling or rendere
 |---|---|
 | Has production audio behavior changed? | Yes |
 | Has one tracing error decreased against a numerical reference? | Yes |
+| Does bounded swept contact reduce reduced-reference phono error? | Yes |
 | Has the reduced rapid-scratch candidate converged to its high-rate reference? | No |
 | Has an A/B render shown a clear full-output improvement? | No |
 | Has a controlled listening test shown a perceptual improvement? | No |
@@ -260,7 +261,7 @@ Opposite intent can close the fader, but it cannot commit the new physical strok
 
 A physical-player test verifies Stab and Chirp phono output at `1x`, `8x`, and `20x`.
 
-The exact `20x` path now accepts floating-point drift of at most `1e-12` and clamps to the physical limit.
+The exact `20x` path now accepts floating-point drift of at most `1e-10` and clamps to the physical limit.
 
 The technique fractions and crossfader envelope remain unmeasured.
 
@@ -278,6 +279,36 @@ A short push no longer compresses the fader pattern for a longer pull.
 Each direction also keeps an independent observation count and confidence value.
 
 The first unseen stroke in either direction still uses a provisional seed.
+
+### Bounded Swept Contact
+
+- **Output-changing**: Yes above five predicted source frames for each physical sample.
+- **Reference-improving**: Yes in the reduced rapid-scratch reference.
+- **Default active**: Yes for all physical groove source types.
+- **Expected relevance**: High during rapid playback and scratching.
+- **Listening evidence**: None.
+
+Production now divides rapid contact travel into as many as four bounded steps.
+
+Each step runs the certified tracer and the reciprocal player solve.
+
+Travel through `20x` uses four steps instead of one.
+
+The reduced signed rate sweep shows phono normalized RMS error reductions from approximately `43%` through `47%`.
+
+The stop and reversal fixture shows approximately `44%` lower phono normalized RMS error.
+
+This is the strongest measured electrical-output improvement in this audit.
+
+The evidence is open-loop and does not include hardware listening tests.
+
+The contact-transition count becomes worse in the rate-sweep fixture.
+
+The stop and reversal cartridge absolute-integral error also becomes worse.
+
+The current certified runtime tracer misses every measured callback deadline.
+
+Therefore, the correction is physically useful but not ready for real-time product activation.
 
 ### Deterministic Branch Continuation
 
@@ -319,7 +350,7 @@ Certificate-only items do not change current production failure handling.
 
 They do not provide a normal-listening sound improvement by themselves.
 
-## Contrary Evidence: The Reduced Rapid-Scratch Candidate Still Differs Materially
+## Rapid-Scratch Reference Result and Contrary Evidence
 
 The offline reference uses a reduced symmetric vertical contact model.
 
@@ -331,7 +362,7 @@ The tested run covers signed integer rates from `1x` through `20x`.
 
 It includes forward motion, reverse motion, contact loss, an impulse, and retracking.
 
-The reduced one-step trace and contact candidate has these reported differences:
+The former one-step trace and contact candidate has these reported differences:
 
 | Quantity | Reduced candidate error |
 |---|---:|
@@ -348,7 +379,7 @@ The reduced one-step trace and contact candidate has these reported differences:
 | Left phono-voltage normalized RMS error | `0.7743228579914596` |
 | Right phono-voltage normalized RMS error | `0.7494342423073957` |
 
-The candidate produced 265 macro contact transitions.
+The former candidate produced 265 macro contact transitions.
 
 The reference produced 269 macro contact transitions.
 
@@ -370,9 +401,30 @@ A ramped stop and reversal fixture gives phono-voltage normalized RMS errors nea
 
 That fixture loses approximately `48%` of reference absolute phono output.
 
-This evidence prevents a physically faithful rapid-scratch claim.
+The bounded correction improves the primary reference measures:
 
-The certified global tracer does not resolve the missing swept contact dynamics.
+| Quantity | Former one-step error | Bounded-sweep error |
+|---|---:|---:|
+| Wall-height normalized RMS | `1.3655193973757973` | `0.5122237543419718` |
+| Wall-force normalized RMS | `1.0158164015715798` | `0.4924456991670574` |
+| Reaction-torque normalized RMS | `1.0024104080839553` | `0.6568966477312397` |
+| Contact-occupancy mean absolute | `0.21010711785380817` | `0.0911330880694634` |
+| Left phono normalized RMS | `0.7743228579914596` | `0.43714264111544443` |
+| Right phono normalized RMS | `0.7494342423073957` | `0.3959241852448356` |
+
+The stop and reversal phono normalized RMS error decreases from approximately `0.98` to `0.55`.
+
+Its phono absolute-integral error decreases from approximately `48%` to approximately `39%`.
+
+However, the bounded candidate produces only 225 macro contact transitions.
+
+The reference produces 269 transitions.
+
+The stop and reversal cartridge absolute-integral error increases from approximately `36%` to `52.5%`.
+
+This evidence still prevents a physically faithful rapid-scratch claim.
+
+The bounded correction does not resolve all swept contact dynamics.
 
 ## Missing High-Impact Perceptual Work
 
@@ -380,11 +432,13 @@ The certified global tracer does not resolve the missing swept contact dynamics.
 
 One 192-kilohertz sample can cross 20 base source frames at `20x`.
 
-The production path traces and solves contact once for that complete travel.
+Production now traces and solves as many as four bounded contact steps.
 
-It can skip contact loss, recapture, force impulses, and envelope-branch changes.
+This correction materially lowers reduced-reference error.
 
-This is the largest measured rapid-scratch accuracy gap.
+It still misses reference contact transitions and some electrical integrals.
+
+The current runtime tracer also prevents real-time product activation.
 
 ### Tangential Reversal Memory
 
@@ -420,11 +474,17 @@ Keep an estimated compliance model disabled by default.
 
 ### Real-Time Callback Deadline
 
-The stable rapid-reversal checkpoint missed two of 512 complete callback deadlines on one test computer.
+The certified one-step normal path misses 512 of 512 measured callback deadlines.
 
-A later provisional changing-tracer run missed all 512 deadlines.
+Its measured median is approximately `2.35` milliseconds for a `0.667`-millisecond deadline.
 
-A bounded swept-contact change must pass complete callbacks on each minimum supported device.
+The bounded rapid path also misses 512 of 512 measured callback deadlines.
+
+Its measured median is approximately `7.37` milliseconds.
+
+Precompute certified contact-envelope data before the callback.
+
+Then pass complete callbacks on each minimum supported device.
 
 ### Output Level and Headroom Calibration
 
@@ -504,9 +564,9 @@ Browser activation must remove duplicate technique equations after Rust integrat
 
 The next pass must prioritize measured output changes.
 
-1. Extend the reference through the coupled deck, pickup, cartridge, phono stage, and host output.
-2. Add bounded, event-aware swept contact for high signed travel.
-3. Compare force, torque, contact, and voltage against converged microsteps.
+1. Precompute certified contact-envelope data outside the audio callback.
+2. Extend the reference through the coupled deck, pickup, cartridge, phono stage, and host output.
+3. Compare complete production voltage against converged microsteps.
 4. Make span confidence decrease when observed stroke lengths are inconsistent.
 5. Add tangential reversal state and identified sloped sticking.
 6. Render matched stop, `+20x`, `-20x`, and reversal audio fixtures.
@@ -548,7 +608,7 @@ The engine contains a causal, reduced, spherical-tip seed model for the groove, 
 
 It includes a certified global spherical stylus tracer and reciprocal contact forces.
 
-It also contains tested linear spatial filters and sample-timed Rust control plumbing.
+It also contains bounded swept contact, tested spatial filters, and sample-timed Rust control plumbing.
 
 ## Claims Not Permitted Today
 

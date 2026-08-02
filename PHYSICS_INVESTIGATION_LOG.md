@@ -2369,7 +2369,7 @@ It is not a measured product calibration value.
 - **Permanent result**: Transform, Flare, Crab, and Orbit retain all early events at `20x`.
 - **Boundary defect**: Derived physical rate reached `20.0000000000003268` because of floating-point division.
 - **Former effect**: The scratch helper rejected an otherwise valid exact-`20x` render.
-- **Correction**: Accept at most `1e-12` representational rate drift, then clamp to the exact limit.
+- **Correction**: Accept at most `1e-10` representational rate drift, then clamp to the exact limit.
 - **Limit**: The correction does not permit physical motion beyond `20x`.
 
 ### Current Technique Limits
@@ -2573,3 +2573,112 @@ Require finite work and a fixed upper bound for each output sample.
 Compare the correction against the converged reduced reference.
 
 Then measure complete production phono output and callback time.
+
+## 2026-08-02: Bounded Swept Contact Enters Production
+
+### Production Rule
+
+- **Normal travel**: Trace and solve one contact step for travel through five source frames.
+- **Rapid travel**: Divide larger travel into as many as four contact steps.
+- **Maximum step**: Each step covers at most five predicted source frames through `20x`.
+- **Trace rule**: Run the certified global tracer at each contact-step midpoint.
+- **Coupling rule**: Solve deck, pickup, and cartridge reciprocity during each contact step.
+- **Output rule**: Run the phono stage once for each 192-kilohertz output frame.
+- **Motion rule**: Use the user's physical record motion without replacement or reshaping.
+- **Work rule**: Keep a fixed maximum of four contact steps for each output frame.
+
+The C ABI and WASM telemetry report `swept_contact_substeps`.
+
+The player snapshot version changes from `11` to `12`.
+
+### Reduced Reference Result
+
+The signed rate sweep covers `1x` through `20x` in both directions.
+
+| Quantity | Former one-step error | Bounded-sweep error |
+|---|---:|---:|
+| Wall-height normalized RMS | `1.3655193973757973` | `0.5122237543419718` |
+| Wall-force normalized RMS | `1.0158164015715798` | `0.4924456991670574` |
+| Reaction-torque normalized RMS | `1.0024104080839553` | `0.6568966477312397` |
+| Contact-occupancy mean absolute | `0.21010711785380817` | `0.0911330880694634` |
+| Left cartridge normalized RMS | `0.5863220800818523` | `0.2679469798690643` |
+| Right cartridge normalized RMS | `0.584662684658089` | `0.2696818588616706` |
+| Left phono normalized RMS | `0.7743228579914596` | `0.43714264111544443` |
+| Right phono normalized RMS | `0.7494342423073957` | `0.3959241852448356` |
+
+The phono normalized RMS error decreases by approximately `43%` through `47%`.
+
+The bounded candidate uses 1800 contact steps for 720 output frames.
+
+The former candidate uses 720 contact steps.
+
+The converged reference uses 60480 contact steps.
+
+### Stop and Reversal Result
+
+| Quantity | Former one-step error | Bounded-sweep error |
+|---|---:|---:|
+| Left cartridge normalized RMS | `0.8760014176990278` | `0.6686421476087754` |
+| Right cartridge normalized RMS | `0.8761559698355349` | `0.6685213308655027` |
+| Left phono normalized RMS | `0.9778097746445279` | `0.5506401861559231` |
+| Right phono normalized RMS | `0.979299352824134` | `0.5517240377225456` |
+| Left phono absolute-integral error | `47.997181164469366%` | `38.666026699474154%` |
+| Right phono absolute-integral error | `48.155275767809436%` | `39.12489663897032%` |
+
+The stop and reversal phono normalized RMS error decreases by approximately `44%`.
+
+### Contrary Evidence
+
+The rate-sweep candidate produces 225 contact transitions.
+
+The reference produces 269 contact transitions.
+
+The former one-step candidate produces 265 transitions.
+
+The new candidate improves occupancy error but does not improve this transition count.
+
+The stop and reversal cartridge absolute-integral error increases from approximately `36%` to `52.5%`.
+
+This metric prevents a claim that every electrical measure improves.
+
+The observer remains open-loop.
+
+It does not return cartridge reaction force to the reduced mechanical reference.
+
+### Callback Result
+
+The release benchmark uses 128-frame blocks at 192 kilohertz.
+
+The declared block deadline is `0.667` milliseconds.
+
+The normal path uses one contact step and misses 512 of 512 deadlines.
+
+Its measured median is approximately `2.35` milliseconds.
+
+The rapid reversal path uses four contact steps and misses 512 of 512 deadlines.
+
+Its measured median is approximately `7.37` milliseconds.
+
+The normal certified runtime tracer already fails this deadline.
+
+The swept correction increases that existing failure during rapid motion.
+
+Do not call this path real-time safe.
+
+Precompute certified contact-envelope data before the callback.
+
+Keep the exact source lineage and the certified error bounds.
+
+### Exact `20x` Boundary Finding
+
+One exact `20x` render produced a derived rate of `20.00000000000632383`.
+
+The mechanics endpoint remained exactly `20x`.
+
+The excess came from angle conversion and floating-point division.
+
+The gate now accepts at most `1e-10` representational rate drift.
+
+It then clamps the accepted value to exact `20x`.
+
+The gate still rejects a rate excess of `0.001x`.
