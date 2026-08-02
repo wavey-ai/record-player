@@ -90,6 +90,27 @@ Use this ledger to track requirements across the chronological findings.
   **Status**: Implemented in gate algorithm version 10. iOS control feedback remains open.
 - **RP-047 — Momentary fader authority**: A held host fader control overrides each manual or automatic technique.
   **Status**: Implemented in `ScratchAcousticDsp`. Native and iOS integration remain open.
+- **RP-048 — Released-flick intent**: Continue the selected technique after a deliberate record throw until physical motion or intent ends.
+  **Status**: Open. The current gate releases immediately when hand contact ends.
+
+## 2026-08-02: Released-Flick Technique Intent
+
+### Claim: A selected technique follows deliberate free record motion
+
+- **Status**: Rejected for the current implementation.
+- **Confidence**: High.
+- **Evidence**: `ScratchAcousticDsp` releases `ScratchGate` when `hand_contact` becomes false.
+- **Evidence**: The gate receives no motion intent after hand contact ends.
+- **Effect**: A deliberate throw can keep physical momentum while its selected technique stops.
+- **Requirement**: Detect intent from the final bounded contact motion, acceleration, pressure, and release state.
+- **Requirement**: Continue cuts from exact rendered record travel during an intentional free throw.
+- **Requirement**: Permit natural motor recovery while the intentional motion phrase remains active.
+- **Requirement**: End the phrase after stable motor capture, depleted throw energy, cancellation, or a bounded limit.
+- **Requirement**: Open the gate immediately after a weak release, lift, cancellation, or unrelated motor recovery.
+- **Requirement**: Keep the held XFADER control authoritative during the complete free-motion phrase.
+- **Test**: Cover forward throws, reverse throws, sign changes, motor-off coasting, and motor-on recovery.
+- **Test**: Cover weak releases, multi-touch cancellation, rate limits, and block-size invariance.
+- **Limit**: Hardware measurements must set the final intent thresholds and phrase limits.
 
 ## 2026-08-02: Momentary Crossfader Authority
 
