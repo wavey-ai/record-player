@@ -2064,15 +2064,34 @@ phi = (h * u - s) / D
 u   = u - y * phi
 ```
 
-For active normal force columns `G`, gap rows `H`, and gap targets `q`:
+Here, `G` contains physical normal-force right-hand-side columns.
+
+The assembled KKT matrix contains `-G`.
+
+For each active normal column `G_j`, calculate:
 
 ```text
-Y      = inverse(A_stick) * G
-W      = H * Y
-v      = H * u - q
-lambda = inverse(W) * v
-u      = u - Y * lambda
+Z_j    = inverse(A0) * G_j
+z_j    = h * Z_j / D
+Y_j    = Z_j - y * z_j
 ```
+
+When sticking does not add rank, use `Y_j = inverse(A0) * G_j`.
+
+For active gap rows `H` and gap targets `q`, calculate:
+
+```text
+W      = H * Y
+v      = q - H * u
+lambda = inverse(W) * v
+u      = u + Y * lambda
+phi    = phi + z * lambda
+```
+
+- **Multiplier update**: Normal contact changes the independent stylus multiplier as well as the base coordinates.
+- **Dependent multiplier**: Keep the stylus multiplier at exact zero when its equality is dependent.
+- **Former ambiguity**: Earlier notes did not distinguish physical `G` from the negative KKT matrix column.
+- **Correction**: This document now uses physical right-hand-side `G` consistently.
 
 Use these direct normal solves:
 

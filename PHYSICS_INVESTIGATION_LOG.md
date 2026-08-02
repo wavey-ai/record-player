@@ -841,6 +841,17 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Required correction**: Move every rejecting solution predicate before branch selection.
 - **Detailed record**: `PHYSICS_VALIDATION_CASES.md` contains the exact constants, layouts, and predicates.
 
+### Block-solver sign and multiplier correction
+
+- **Finding**: The contact operator `G` maps projected normal force to the dynamic right-hand side.
+- **Assembly sign**: The full KKT matrix writes the corresponding contact column as `-G`.
+- **Correct normal residual**: Use `q - H * u`, not `H * u - q`.
+- **Correct velocity update**: Add `Y * lambda` when `Y` is calculated from physical `G`.
+- **Sticking coupling**: Each normal multiplier also changes the independent stylus multiplier.
+- **Required term**: Add `(h * inverse(A0) * G_j / D) * lambda_j` to the stylus multiplier.
+- **Possible failure**: Omitting this term can pass velocity parity while producing an incorrect friction-cone force.
+- **Test requirement**: Compare every multiplier and the complete KKT residual, not only the six dynamic velocities.
+
 - **Initial robustness floor**: Use `6.4e-9`, derived from 64 times the current backward-error limit.
 - **Config checkpoint**: The versioned config identity binds all 84 validated manifest leaves.
 - **Config encoding**: It hashes stable paths, explicit value tags, exact float bits, and length-delimited values.

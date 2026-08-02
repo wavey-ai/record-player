@@ -51,6 +51,8 @@ Read [PHYSICS_INVESTIGATION_LOG.md](./PHYSICS_INVESTIGATION_LOG.md) for evidence
 
 Read [PHYSICS_VALIDATION_CASES.md](./PHYSICS_VALIDATION_CASES.md) for exact counterexamples, reference methods, artifacts, and reproduction commands.
 
+Read [PERCEPTUAL_ACCURACY_REPORT.md](./PERCEPTUAL_ACCURACY_REPORT.md) for confirmed sound changes, missing evidence, and the focused audible-work plan.
+
 Read [STREAMING_GROOVE_CUTTER.md](./STREAMING_GROOVE_CUTTER.md) for bounded groove cutting and page contracts.
 
 ## Crates
