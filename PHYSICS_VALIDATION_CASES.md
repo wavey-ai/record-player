@@ -1709,7 +1709,9 @@ The accepted profile domain needs a P-matrix proof or an equivalent bounded proo
 - **Groove catalog**: Four stylus labels, two origin laws, and 24 mechanical classes give 192 families.
 - **Land catalog**: Four stylus labels and 24 mechanical classes give 96 families.
 - **Contacting total**: The structurally different labeled catalog contains 288 families.
-- **Mask total**: Principal-minor coverage gives 768 structurally distinct mode-mask families.
+- **Contact-mask total**: Nonempty principal masks give 672 contacting mode-mask combinations.
+- **Zero-mask total**: Actual separated zero-mask branches increase this count to 744.
+- **Unrelated sample count**: The bounded-box test uses 768 samples from 96 families and eight corners.
 - **Runtime maximum**: One hand-active groove sample evaluates 1,053 current branches.
 - **Registered bound**: The 1,296 bound is safe, but it is not the exact current fallback count.
 - **Implementation status**: The crate generates the versioned 24-class and 288-label catalog.
@@ -1736,6 +1738,10 @@ The accepted profile domain needs a P-matrix proof or an equivalent bounded proo
 - **Sliding result**: `SlidingPositive` uses the zero-friction normal operator.
 - **Separated result**: `Separated` uses the same augmented system and passes its current force check.
 - **Consequence**: Both mode labels can describe the same accepted mechanical state.
+- **Tolerance-band correction**: Positive-friction separation admits summed normal force through `TANGENTIAL_FORCE_TOLERANCE_N`.
+- **Current tolerance**: `TANGENTIAL_FORCE_TOLERANCE_N` equals `1e-10 N`.
+- **Clamp correction**: Small negative active normal forces can clamp to zero.
+- **Proof action**: Certify the separated operator. Do not skip it because its force range is small.
 - **Additional overlap**: Static limits above kinetic force can make stick and slide branches both feasible.
 - **Deck witness start**: Set platter and record velocity to zero.
 - **Deck witness control**: Separate the hand and stylus, and make the slipmat stick.
@@ -1854,7 +1860,7 @@ The accepted profile domain needs a P-matrix proof or an equivalent bounded proo
 ### Verified Mobility Proof Plan
 
 - **Observation date**: 2026-08-02.
-- **Status**: The point builder is implemented. Production admission does not use it yet.
+- **Status**: Bounded algebraic contact evaluation is implemented. Production admission does not use it yet.
 - **Base systems**: Build one exact KKT system for each of 24 mechanical mobility classes.
 - **Builder result**: All 24 mechanical classes build with the shared production KKT writers.
 - **Family result**: All 288 contacting labels build with shared production contact operators.
@@ -1880,7 +1886,18 @@ The accepted profile domain needs a P-matrix proof or an equivalent bounded proo
 - **Seed residual bound**: The largest raw residual absolute bound is `2.7222668563808843e-13`.
 - **Units warning**: These raw mobility and residual diagnostics contain mixed physical units.
 - **Exact oracle**: Independent dyadic rational solves check representative scaled systems.
-- **Current proof limit**: Radius, slope, `H`, `G`, and normal minors remain outside this checkpoint.
+- **Bounded evaluator**: Outward intervals enclose the exact reduced algebraic operators over radius and slope boxes.
+- **Config binding**: Point-mobility certificate version 2 requires the exact playback configuration identity.
+- **Point coverage**: All 288 point labels verify complete production KKT mobility and contact response containment.
+- **Bounded coverage**: Tests sample 768 groove corners and 288 land points against production response.
+- **Rank coverage**: Tests confirm 18 independent and six dependent sticking classes.
+- **Mask coverage**: An asymmetric-slope test prevents family-wide sticking rejection.
+- **Zero-`K` coverage**: Tests accept zero skating-factor intervals for all 216 non-sticking families.
+- **Negative witness**: The known negative `W_00` interval fails the strict positive predicate.
+- **Positive seed result**: All 192 groove and 96 land labels pass raw strict predicates at the zero-slope seed point.
+- **Bounded fixture result**: Interior, held, and land fixture groups each pass all 96 raw strict predicates.
+- **Focused result**: Eighteen fixed-certificate tests pass.
+- **Current proof limit**: The raw intervals do not yet prove the complete production scaled-solver margin.
 - **Mobility definition**: Store response as velocity rows by equation columns.
 - **Equation order**: `[platter, record, tip-x, body-x, tip-z, body-z]`.
 - **Velocity order**: `[platter, record, tip-x, tip-z, body-x, body-z]`.
@@ -1894,6 +1911,24 @@ The accepted profile domain needs a P-matrix proof or an equivalent bounded proo
 - **Permanent test**: `algebraic_skating_factor_matches_independent_references` checks 257 radii and three high-precision results.
 - **Sticking update**: Use the production tangential force column and equality row.
 - **Sticking proof**: Require the nonsymmetric Schur denominator interval to exclude zero.
+- **Force column**: The dynamic equation coefficients are `record = -r` and `body-x = K`.
+- **Equality row**: The velocity coefficients are `record = 1` and `body-x = -2K/r`.
+- **Schur denominator**: Calculate `D = h M c` with typed equation and velocity coordinates.
+- **Mobility update**: Calculate `M_stick = M - (M c)(h M)/D`.
+- **Symmetry warning**: The force column is not the transpose of the equality row.
+- **Rank rule**: Apply the Schur update only when the stylus equality adds rank.
+- **Adds-rank result**: Eighteen classes add rank when the skating factor `K` is nonzero.
+- **Dependent result**: Six pickup-bearing-stick classes have a dependent stylus equality.
+- **Dependency condition**: Hand sticking makes the stylus row dependent in these classes.
+- **Dependency condition**: Deck-bearing and slipmat sticking together also make it dependent.
+- **Dependent action**: Use base mobility and mark runtime right-hand-side compatibility as required.
+- **Zero-denominator meaning**: The dependent case is not a singular Schur failure.
+- **Zero-`K` edge**: A box that cannot exclude `K = 0` has an unresolved rank relation.
+- **Exact-zero classification**: At `K = 0`, the production selector gives a 12-and-12 split.
+- **Held-boundary domain**: Both wall slopes must use exact-zero intervals.
+- **Separated operator**: A sloped separated mode retains its modulation reaction.
+- **Mask-specific rule**: Positive-friction sticking requires zero slope only on each active wall.
+- **Catalog warning**: Family-level reachability can hide a feasible one-wall sticking mask.
 - **Catalog**: Generate 288 contacting labels from production mode mappings.
 - **Solve-only addition**: Prove 24 lowered and 24 cue-supported systems.
 - **Initial record count**: Prove 336 records before safe equivalence aggregation.
@@ -1901,6 +1936,27 @@ The accepted profile domain needs a P-matrix proof or an equivalent bounded proo
 - **Land proof**: Require a positive lower bound for its scalar response.
 - **Subdivision**: Split the largest normalized radius or slope width when a result is inconclusive.
 - **Work cap**: Fail closed when the fixed box or depth limit is exhausted.
+- **Radius domain**: Use the closed program-radius interval from the playback configuration.
+- **Interior slope domain**: Use independent `[-S, S]` intervals for both groove walls.
+- **Held and land slopes**: Use exact-zero intervals for both walls.
+- **Candidate ladder**: Test exact powers of two from `2^4` through `2^-40`, then zero.
+- **Candidate claim**: Report the largest certified ladder value, not a maximum physical slope.
+- **Failed-attempt record**: Keep every larger candidate and its stable failure class.
+- **Exhaustion meaning**: Report exhausted work as inconclusive, not as physical invalidity.
+- **Stable subject order**: Evaluate 288 contact families, 24 lowered systems, then 24 cue-supported systems.
+- **No aggregation**: Keep all 336 subject records in certificate version 1.
+- **Split selection**: Select the active axis with the smallest accumulated split depth.
+- **Split tie order**: Prefer radius, then left slope, then right slope.
+- **Child order**: Push the upper child first so the lower child is evaluated next.
+- **Unsplittable rule**: Fail closed when the midpoint equals either endpoint.
+- **Depth limit**: Version 1 permits 36 subdivisions on one subject path.
+- **Subject work limit**: Version 1 permits 8,191 evaluated boxes for one subject.
+- **Candidate work limit**: Version 1 permits 1,048,576 evaluated boxes for one candidate.
+- **Physical margin rule**: Keep dimensional minor bounds separate from numerical conditioning margins.
+- **Identity input**: Bind every subject, domain, result, margin, attempt, limit, and exact float bit.
+- **Identity encoding**: Use explicit little-endian integers and explicit enum and option tags.
+- **Multiple-contact gate**: Reject a runtime wall with more than one represented contact.
+- **Scope note**: Certificate version 1 proves only fixed-mode, single-contact normal response.
 - **Arithmetic**: Expand round-to-nearest results with adjacent finite `f64` values.
 - **Arithmetic status**: The finite outward interval core is implemented.
 - **Supported operations**: It includes add, subtract, multiply, divide, square, square root, negation, and interval queries.
@@ -1913,8 +1969,19 @@ The accepted profile domain needs a P-matrix proof or an equivalent bounded proo
 - **Focused result**: Thirteen interval tests pass with no failure.
 - **Build result**: Workspace, all-target, and WASM checks pass.
 - **Conditioning gate**: Require dimensionless solve margins above `6.4e-9` initially.
+- **Schur warning**: A raw denominator that excludes zero can still be too weak for the production scaled solver.
+- **Minor warning**: A raw positive contact minor does not establish production full-mask KKT conditioning.
+- **Bounded mobility audit**: Sampled direct checks found 177 misses among 38,016 production mobility coefficients.
+- **Miss shape**: All 177 interval coefficients were structural zero singletons.
+- **Maximum residue**: The largest production residue was `5.421010862427522e-20`.
+- **Residue ceiling**: No sampled raw discrepancy exceeded `1e-15`.
+- **Miss labels**: Twelve added-rank sticking labels from six pickup-bearing-stick mechanical classes contain the misses.
+- **Interpretation**: The observed raw residues are small, but mixed units prevent a materiality conclusion.
+- **Containment result**: The residues still disprove bounded production-solver containment.
+- **Required proof**: Bind normalized margins rigorously to production elimination or verify each scaled active-mask solve.
+- **Admission status**: Do not use the interval contact evaluator as a player gate before this link exists.
 - **Failure classes**: Distinguish bad minors, singular mobility, singular Schur updates, weak margins, and exhausted work.
-- **Scope**: The result proves fixed-mode normal-contact uniqueness only.
+- **Scope**: A successful strict P-matrix certificate would prove normal-contact uniqueness for its fixed mode and certified box.
 - **Exclusion**: It does not prove unique selection across overlapping hybrid modes.
 
 ### Playback Configuration Identity Checkpoint

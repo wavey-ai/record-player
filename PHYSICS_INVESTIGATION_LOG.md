@@ -72,7 +72,8 @@ Use this ledger to track requirements across the chronological findings.
 - **RP-036 — Surface friction geometry**: Resolve friction in the complete local surface basis. Couple all components in the same contact solve. **Status**: Sliding surface and skating-port coupling are implemented. Sloped sticking, coupled uniqueness proof, and measurements remain open.
 - **RP-037 — Trace asset admission**: Bind fixed trace work, representation bytes, page identity, geometry, and actual wall-slope bounds. **Status**: Implemented. An authoritative full-record catalog remains open.
 - **RP-038 — Tangential contact memory**: Add identified along-groove pickup motion and local tangential material state. Preserve that state through reversals. **Status**: Certified coordinate plumbing is implemented. Continuous state mapping and sloped sticking remain open.
-- **RP-039 — Fixed-mode admission**: Certify each fixed normal-contact operator over its complete profile and source domain. **Status**: Config identity and point mobility are implemented. Interval proofs remain open.
+- **RP-039 — Fixed-mode admission**: Certify each fixed normal-contact operator over its complete profile and source domain.
+  **Status**: Bounded algebraic evaluation is implemented. Production-scaled adaptive admission remains open.
 
 ## 2026-08-01: Repository and History Investigation
 
@@ -634,7 +635,9 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Separated mode**: Zero-friction separation can duplicate a sliding operator with a different mode label.
 - **Labeled catalog**: Groove contact has 192 families across four stylus labels and two origin laws.
 - **Labeled catalog**: Record-land contact adds 96 families across four stylus labels.
-- **Mask catalog**: Principal-minor coverage reduces the structurally distinct mode-mask catalog to 768 entries.
+- **Contact-mask catalog**: The 288 operators produce 672 nonempty contacting mode-mask combinations.
+- **Zero-mask addition**: The actual separated zero-mask branches add 72 combinations, for 744 total contact-state combinations.
+- **Sample-count note**: The number 768 elsewhere means 96 bounded families times eight sampled box corners.
 - **Runtime count**: One hand-active groove sample evaluates at most 1,053 current branches.
 - **Bound correction**: The registered 1,296 limit is safe, but it is not the exact fallback count.
 - **Implementation requirement**: Generate the versioned family catalog from production logic.
@@ -668,9 +671,36 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Seed residual result**: The largest raw residual absolute bound is `2.7222668563808843e-13`.
 - **Units limit**: Mobility coefficients and KKT rows use mixed physical units.
 - **Exact test**: A dyadic rational oracle checks representative scaled systems independently.
-- **Current limit**: This result encloses point KKT solves only.
-- **Current limit**: It does not yet enclose `H`, `G`, radius, slopes, or contact minors.
+- **Base-result limit**: The verified base catalog encloses point KKT solves only.
+- **Base-result limit**: By itself, that catalog does not enclose `H`, `G`, radius, slopes, or contact minors.
 - **Proof decision**: Apply stylus sticking with a verified nonsymmetric rank-one Schur update.
+- **Rank correction**: Apply the Schur update only when the stylus equality adds rank.
+- **Rank result**: Eighteen seed mechanical classes add rank when `K` is nonzero.
+- **Dependency result**: Six pickup-bearing-stick classes already imply the stylus velocity row.
+- **Dependency condition**: The row is dependent when the hand sticks.
+- **Dependency condition**: The row is also dependent when both deck bearing and slipmat stick.
+- **Dependent rule**: Reuse base mobility and require runtime right-hand-side compatibility.
+- **Interpretation**: A structurally zero Schur denominator is not a singular proof failure in those classes.
+- **Geometry edge**: A radius box with `K` containing zero has an unresolved rank classification.
+- **Exact-zero result**: At `K = 0`, 12 mechanical classes add rank and 12 are dependent.
+- **Required response**: Subdivide that radius box or fail closed.
+- **Held-boundary rule**: Both held-boundary wall slope intervals must equal exact zero.
+- **Separated correction**: Separated sloped contact retains the modulation reaction in `G`.
+- **Mask correction**: Sloped-sticking infeasibility depends on each active wall, not the complete family.
+- **Consequence**: Do not skip a complete sticking family because one inactive wall has nonzero slope.
+- **Interval result**: The evaluator encloses the exact reduced algebraic `H`, `G`, `W`, and raw minors over radius and slope boxes.
+- **Catalog binding**: Point-mobility certificate version 2 binds the exact playback configuration identity.
+- **Point replay**: All 288 point labels replay the complete production KKT and all 36 mobility coefficients.
+- **Bounded sampling**: Tests compare 768 interior-groove corner samples and 288 land samples with production.
+- **Rank test**: Sticking evaluation preserves the 18 independent and six dependent class split.
+- **Mask test**: An asymmetric slope box keeps the feasible inactive-wall distinction.
+- **Zero-`K` test**: All 216 non-sticking families accept a zero skating-factor interval.
+- **Predicate test**: The known negative `W_00` witness still fails the strict sign predicate.
+- **Positive seed result**: All 192 groove and 96 land labels have strict positive raw predicates at the zero-slope seed point.
+- **Bounded fixture result**: Interior, held, and land fixture groups each pass all 96 raw strict predicates.
+- **Test result**: Eighteen fixed-certificate tests pass.
+- **Admission limit**: The evaluator is diagnostic and cannot gate playback yet.
+- **Numerical reason**: It does not yet bind raw algebraic margins to the full production scaled solver.
 - **Rejected design**: Do not interval-solve one parameterized 13-by-13 system for every domain box.
 - **Reason**: That design repeats work and introduces unnecessary interval dependency.
 - **Coordinate rule**: Store mobility with typed velocity rows and equation columns.
@@ -708,6 +738,19 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Oracle rule**: Use exact dyadic rational arithmetic in tests for interval operations and representative solves.
 - **Physical gate**: Require strict positive diagonal and determinant lower bounds.
 - **Numerical gate**: Also require scale-aware conditioning margins for the production floating-point solver.
+- **Solver gap**: Raw nonzero Schur denominators do not prove production scaled-pivot acceptance.
+- **Solver gap**: Raw positive contact minors do not prove stable production full-mask KKT solves.
+- **Bounded audit result**: Direct mobility checks found 177 misses among 38,016 sampled production coefficients.
+- **Miss structure**: Every missed algebraic interval was the exact singleton `[0, 0]`.
+- **Production residue**: The largest missed production coefficient magnitude was `5.421010862427522e-20`.
+- **Residue ceiling**: No sampled raw discrepancy exceeded `1e-15`.
+- **Miss distribution**: The misses cover 12 added-rank sticking labels from six pickup-bearing-stick mechanical classes.
+- **Witness class**: The largest residue occurred in `TipX <- Record` for one sticking pickup-bearing class.
+- **Interpretation**: These are small raw floating-elimination residues on structural zeros.
+- **Materiality limit**: Mixed units and an unbounded right-hand side prevent a rigorous output-impact claim.
+- **Consequence**: Point KKT hulling cannot establish bounded production-solver containment.
+- **Required link**: Derive a rigorous scaled-solver bound or replay verified production elimination for each active mask.
+- **Current interpretation**: Interval `H M G` predicates remain non-gating until that numerical link is complete.
 - **Initial robustness floor**: Use `6.4e-9`, derived from 64 times the current backward-error limit.
 - **Config checkpoint**: The versioned config identity binds all 84 validated manifest leaves.
 - **Config encoding**: It hashes stable paths, explicit value tags, exact float bits, and length-delimited values.
@@ -731,6 +774,27 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Render rule**: Compare live source, token, and proof identities once before each render block.
 - **Sample rule**: Check traced radius and slopes against the certified envelope in each physics sample.
 - **Work rule**: Do not run interval subdivision, family enumeration, or proof hashing in the audio loop.
+- **Radius domain**: Certify the closed interval from the inner program radius through the outer program radius.
+- **Interior slope domain**: Certify each groove wall independently over `[-S, S]`.
+- **Boundary slope domain**: Use exact-zero slope intervals for held boundaries and record land.
+- **Candidate rule**: Test exact dyadic slope candidates from `2^4` through `2^-40`, then test zero.
+- **Candidate meaning**: The selected value is the largest candidate that proof algorithm version 1 certifies.
+- **Uncertainty rule**: Do not call the selected candidate the largest physically valid slope.
+- **Work interpretation**: An exhausted proof means "not proved." It does not mean "physically invalid."
+- **Catalog order**: Prove 288 contacting labels before 24 lowered and 24 cue-supported systems.
+- **Aggregation rule**: Keep all 336 records until a later proof establishes safe equivalence.
+- **Subdivision order**: Resolve equal normalized widths by radius, left slope, then right slope.
+- **Traversal rule**: Use deterministic depth-first subdivision and process the lower child first.
+- **Initial depth limit**: Permit at most 36 subdivisions on one subject path.
+- **Initial subject limit**: Permit at most 8,191 evaluated boxes for one proof subject.
+- **Initial candidate limit**: Permit at most 1,048,576 evaluated boxes for one slope candidate.
+- **Margin rule**: Apply `6.4e-9` only to dimensionless numerical margins.
+- **Physical rule**: Require strict positive lower bounds for the dimensional contact minors.
+- **Identity rule**: Hash canonical binary fields, exact float bits, explicit tags, all records, margins, and work results.
+- **Rejected identity**: Do not hash JSON, debug output, implicit discriminants, or platform-sized integers.
+- **Multiple-contact decision**: Version 1 covers one represented contact on each wall.
+- **Sample response**: Fail closed when one wall returns more than one contact.
+- **Future work**: A later trace certificate can prove unique-contact coverage before source admission.
 - **Snapshot rule**: Bind the proof identity and loaded admission identity before snapshot restore changes state.
 - **Version requirement**: Increase player snapshot version 10 to 11 during integration.
 - **Version requirement**: Increase renderer snapshot version 4 to 5 during integration.
@@ -740,6 +804,11 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Theorem scope**: A P-matrix proves uniqueness only for one fixed linear complementarity problem.
 - **Hybrid limit**: It does not prove that two different discrete modes cannot both pass.
 - **Exact overlap**: At zero stylus friction, loaded positive sliding and separation can use the same system.
+- **Tolerance correction**: Positive-friction separation is not an exact zero-force mode in production.
+- **Runtime behavior**: Production admits separated normal force through `TANGENTIAL_FORCE_TOLERANCE_N`, currently `1e-10 N`.
+- **Clamp behavior**: Production also clamps small negative active normal forces.
+- **Naming requirement**: Describe this branch as a normal-force tolerance band, not "zero normal force only."
+- **Proof requirement**: Certify its operator even when reachability annotation limits its normal-force range.
 - **Deck overlap**: Static-to-kinetic force gaps can also make stick and slide branches both feasible.
 - **Exact deck witness**: A `0.00020 N m` motor torque permits both default bearing modes from rest.
 - **Sliding witness result**: The alternate platter speed is `3.88313554466e-9 rad/s`.

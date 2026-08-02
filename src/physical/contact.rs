@@ -1220,6 +1220,14 @@ pub(crate) struct MidpointPickupGeometry {
     pub(crate) lateral_origin_shift_per_record_velocity_m_s: f64,
 }
 
+/// Calculates the interior spiral-origin response to record velocity.
+pub(crate) fn interior_spiral_origin_shift_per_record_velocity_m_s(
+    groove_pitch_m_per_revolution: f64,
+    dt: f64,
+) -> f64 {
+    -groove_pitch_m_per_revolution * 0.5 * dt / std::f64::consts::TAU
+}
+
 /// Contains one atomically prepared deck and pickup result.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CoupledDeckPickupStep {
@@ -1268,6 +1276,13 @@ pub(crate) struct CoupledFixedMechanicalMode {
     pub(crate) pickup_bearing: FixedModeFrictionMobility,
 }
 
+/// Describes whether the stylus sticking row adds a mechanical constraint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum FixedStylusConstraintRelation {
+    AddsRank,
+    DependentRuntimeRhs,
+}
+
 impl CoupledFixedMechanicalMode {
     fn deck_bearing_mode(self) -> CoupledDeckFrictionMode {
         fixed_deck_mode(self.deck_bearing)
@@ -1291,6 +1306,28 @@ impl CoupledFixedMechanicalMode {
             FixedModeFrictionMobility::Sliding => BearingMode::Positive,
         }
     }
+}
+
+/// Classifies the production stylus sticking row for one fixed mechanical mode.
+pub(crate) fn fixed_stylus_constraint_relation(
+    mechanical: CoupledFixedMechanicalMode,
+    stylus_body_velocity_coefficient: f64,
+) -> Option<FixedStylusConstraintRelation> {
+    let selected = select_independent_deck_constraints(
+        mechanical.deck_bearing_mode(),
+        mechanical.slipmat_mode(),
+        mechanical.hand_mode(),
+        StylusTangentialMode::Sticking,
+        mechanical.pickup_bearing_mode(),
+        0.0,
+        0.0,
+        stylus_body_velocity_coefficient,
+    )?;
+    Some(if selected[3] {
+        FixedStylusConstraintRelation::AddsRank
+    } else {
+        FixedStylusConstraintRelation::DependentRuntimeRhs
+    })
 }
 
 const fn fixed_deck_mode(mobility: FixedModeFrictionMobility) -> CoupledDeckFrictionMode {
@@ -1422,8 +1459,13 @@ pub(crate) struct CoupledFixedContactPoint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CoupledFixedModeReachability {
     RuntimeConditional,
-    ZeroNormalForceOnly,
-    Infeasible(CoupledFixedModeInfeasibility),
+    /// Production admits this mode only inside its normal-force tolerance band.
+    NormalForceToleranceBandOnly,
+    /// A nonzero slope rejects sticking only when that wall is active.
+    ActiveWallDependent {
+        nonzero_active_wall: CoupledFixedModeInfeasibility,
+        wall_is_nonzero: [bool; 2],
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1879,7 +1921,10 @@ pub(crate) fn coupled_fixed_mode_normal_response(
 
     let lateral_origin_shift_per_record_velocity_m_s = match family.origin_law {
         CoupledFixedOriginLaw::InteriorSpiral => {
-            -config.record_cut.groove_pitch_m_per_revolution * 0.5 * dt / std::f64::consts::TAU
+            interior_spiral_origin_shift_per_record_velocity_m_s(
+                config.record_cut.groove_pitch_m_per_revolution,
+                dt,
+            )
         }
         CoupledFixedOriginLaw::HeldProgramBoundary | CoupledFixedOriginLaw::SurfaceIndependent => {
             0.0
@@ -2112,28 +2157,33 @@ pub(crate) fn coupled_fixed_mode_normal_response(
             CoupledFixedNormalResponse::RecordLand { w: w[0][0] }
         }
     };
-    let nonzero_slope = point.wall_slopes.into_iter().any(|slope| slope != 0.0);
+    let wall_is_nonzero = point.wall_slopes.map(|slope| slope != 0.0);
+    let nonzero_slope = wall_is_nonzero.into_iter().any(|value| value);
     let reachability = match family.stylus {
         StylusTangentialMode::Separated if friction_coefficient > 0.0 => {
-            CoupledFixedModeReachability::ZeroNormalForceOnly
+            CoupledFixedModeReachability::NormalForceToleranceBandOnly
         }
         StylusTangentialMode::Sticking
             if family.surface == CoupledFixedContactSurface::GrooveWalls
                 && family.origin_law == CoupledFixedOriginLaw::HeldProgramBoundary
                 && nonzero_slope =>
         {
-            CoupledFixedModeReachability::Infeasible(
-                CoupledFixedModeInfeasibility::SlopedGrooveStickingAtHeldBoundary,
-            )
+            CoupledFixedModeReachability::ActiveWallDependent {
+                nonzero_active_wall:
+                    CoupledFixedModeInfeasibility::SlopedGrooveStickingAtHeldBoundary,
+                wall_is_nonzero,
+            }
         }
         StylusTangentialMode::Sticking
             if family.surface == CoupledFixedContactSurface::GrooveWalls
                 && friction_coefficient > 0.0
                 && nonzero_slope =>
         {
-            CoupledFixedModeReachability::Infeasible(
-                CoupledFixedModeInfeasibility::SlopedGrooveStickingWithFriction,
-            )
+            CoupledFixedModeReachability::ActiveWallDependent {
+                nonzero_active_wall:
+                    CoupledFixedModeInfeasibility::SlopedGrooveStickingWithFriction,
+                wall_is_nonzero,
+            }
         }
         _ => CoupledFixedModeReachability::RuntimeConditional,
     };
@@ -2367,6 +2417,29 @@ struct JointStaticConstraintRows {
     stylus: Option<usize>,
 }
 
+/// Builds the production sticking-force column in dynamic equation order.
+pub(crate) fn stylus_sticking_force_column(
+    groove_radius_m: f64,
+    skating_factor: f64,
+) -> JointDynamicEquationRhs {
+    JointDynamicEquationRhs {
+        record: -groove_radius_m,
+        body_x: skating_factor,
+        ..JointDynamicEquationRhs::default()
+    }
+}
+
+/// Builds the production sticking equality in dynamic velocity order.
+pub(crate) fn stylus_sticking_equality_row(
+    stylus_body_velocity_coefficient: f64,
+) -> JointDynamicVelocityRow {
+    JointDynamicVelocityRow {
+        record: 1.0,
+        body_x: stylus_body_velocity_coefficient,
+        ..JointDynamicVelocityRow::default()
+    }
+}
+
 fn write_joint_static_force_columns(
     augmented: &mut [[f64; JOINT_MAX_VARIABLES + 1]; JOINT_MAX_VARIABLES],
     input: PickupMechanicalInput,
@@ -2374,8 +2447,9 @@ fn write_joint_static_force_columns(
     columns: JointStaticConstraintColumns,
 ) {
     if let Some(column) = columns.stylus {
-        augmented[1][column] = -input.groove_radius_m;
-        augmented[3][column] = skating_factor;
+        let force = stylus_sticking_force_column(input.groove_radius_m, skating_factor);
+        augmented[1][column] = force.coefficient(JointDynamicEquation::Record);
+        augmented[3][column] = force.coefficient(JointDynamicEquation::BodyX);
     }
 }
 
@@ -2406,8 +2480,9 @@ fn append_joint_static_constraint_rows(
     });
     let stylus = columns.stylus.map(|_| {
         let row = next_row;
-        augmented[row][1] = 1.0;
-        augmented[row][4] = stylus_body_velocity_coefficient;
+        let equality = stylus_sticking_equality_row(stylus_body_velocity_coefficient);
+        augmented[row][1] = equality.coefficient(JointDynamicVelocity::Record);
+        augmented[row][4] = equality.coefficient(JointDynamicVelocity::BodyX);
         next_row += 1;
         row
     });
@@ -4771,6 +4846,73 @@ mod tests {
     }
 
     #[test]
+    fn fixed_stylus_constraint_relation_matches_the_production_rank_selector() {
+        let mut adds_rank = 0;
+        let mut dependent = 0;
+        let mut zero_coefficient_adds_rank = 0;
+        let mut zero_coefficient_dependent = 0;
+        for mechanical in coupled_fixed_mechanical_modes() {
+            let expected_dependent = mechanical.pickup_bearing
+                == FixedModeFrictionMobility::Sticking
+                && (mechanical.hand == FixedModeHandMobility::Sticking
+                    || (mechanical.deck_bearing == FixedModeFrictionMobility::Sticking
+                        && mechanical.slipmat == FixedModeFrictionMobility::Sticking));
+            let relation = fixed_stylus_constraint_relation(mechanical, -1.0).unwrap();
+            if expected_dependent {
+                assert_eq!(relation, FixedStylusConstraintRelation::DependentRuntimeRhs);
+                dependent += 1;
+            } else {
+                assert_eq!(relation, FixedStylusConstraintRelation::AddsRank);
+                adds_rank += 1;
+            }
+
+            let zero_coefficient_relation =
+                fixed_stylus_constraint_relation(mechanical, 0.0).unwrap();
+            let zero_coefficient_expected_dependent = mechanical.hand
+                == FixedModeHandMobility::Sticking
+                || (mechanical.deck_bearing == FixedModeFrictionMobility::Sticking
+                    && mechanical.slipmat == FixedModeFrictionMobility::Sticking);
+            if zero_coefficient_expected_dependent {
+                assert_eq!(
+                    zero_coefficient_relation,
+                    FixedStylusConstraintRelation::DependentRuntimeRhs
+                );
+                zero_coefficient_dependent += 1;
+            } else {
+                assert_eq!(
+                    zero_coefficient_relation,
+                    FixedStylusConstraintRelation::AddsRank
+                );
+                zero_coefficient_adds_rank += 1;
+            }
+        }
+        assert_eq!(adds_rank, 18);
+        assert_eq!(dependent, 6);
+        assert_eq!(zero_coefficient_adds_rank, 12);
+        assert_eq!(zero_coefficient_dependent, 12);
+    }
+
+    #[test]
+    fn sticking_operator_helpers_keep_typed_coordinates_and_signed_zero() {
+        let force = stylus_sticking_force_column(2.0, 3.0);
+        assert_eq!(
+            JOINT_DYNAMIC_EQUATIONS.map(|equation| force.coefficient(equation)),
+            [0.0, -2.0, 0.0, 3.0, 0.0, 0.0]
+        );
+        let equality = stylus_sticking_equality_row(4.0);
+        assert_eq!(
+            JOINT_DYNAMIC_VELOCITIES.map(|velocity| equality.coefficient(velocity)),
+            [0.0, 1.0, 0.0, 0.0, 4.0, 0.0]
+        );
+        assert_eq!(
+            stylus_sticking_equality_row(-0.0)
+                .coefficient(JointDynamicVelocity::BodyX)
+                .to_bits(),
+            (-0.0_f64).to_bits()
+        );
+    }
+
+    #[test]
     fn typed_joint_coordinates_keep_equation_and_velocity_orders_distinct() {
         let rhs = JointDynamicEquationRhs {
             platter: 1.0,
@@ -4893,7 +5035,7 @@ mod tests {
             match family.stylus {
                 StylusTangentialMode::Separated => assert_eq!(
                     response.reachability,
-                    CoupledFixedModeReachability::ZeroNormalForceOnly
+                    CoupledFixedModeReachability::NormalForceToleranceBandOnly
                 ),
                 _ => assert_eq!(
                     response.reachability,
@@ -5141,9 +5283,25 @@ mod tests {
             coupled_fixed_mode_normal_response(config, interior_sticking, sloped)
                 .unwrap()
                 .reachability,
-            CoupledFixedModeReachability::Infeasible(
-                CoupledFixedModeInfeasibility::SlopedGrooveStickingWithFriction
-            )
+            CoupledFixedModeReachability::ActiveWallDependent {
+                nonzero_active_wall:
+                    CoupledFixedModeInfeasibility::SlopedGrooveStickingWithFriction,
+                wall_is_nonzero: [true, true],
+            }
+        );
+        let asymmetric = CoupledFixedContactPoint {
+            groove_radius_m: sloped.groove_radius_m,
+            wall_slopes: [0.1, 0.0],
+        };
+        assert_eq!(
+            coupled_fixed_mode_normal_response(config, interior_sticking, asymmetric)
+                .unwrap()
+                .reachability,
+            CoupledFixedModeReachability::ActiveWallDependent {
+                nonzero_active_wall:
+                    CoupledFixedModeInfeasibility::SlopedGrooveStickingWithFriction,
+                wall_is_nonzero: [true, false],
+            }
         );
 
         let mut frictionless = config;
@@ -5164,9 +5322,11 @@ mod tests {
             coupled_fixed_mode_normal_response(frictionless, held_sticking, sloped)
                 .unwrap()
                 .reachability,
-            CoupledFixedModeReachability::Infeasible(
-                CoupledFixedModeInfeasibility::SlopedGrooveStickingAtHeldBoundary
-            )
+            CoupledFixedModeReachability::ActiveWallDependent {
+                nonzero_active_wall:
+                    CoupledFixedModeInfeasibility::SlopedGrooveStickingAtHeldBoundary,
+                wall_is_nonzero: [true, true],
+            }
         );
         let separated = fixed_contact_family(
             mechanical,
@@ -5178,7 +5338,7 @@ mod tests {
             coupled_fixed_mode_normal_response(config, separated, sloped)
                 .unwrap()
                 .reachability,
-            CoupledFixedModeReachability::ZeroNormalForceOnly
+            CoupledFixedModeReachability::NormalForceToleranceBandOnly
         );
         assert_eq!(
             coupled_fixed_mode_normal_response(frictionless, separated, sloped)

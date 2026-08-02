@@ -10,7 +10,8 @@ use super::stylus::{
 };
 use super::{
     contact::{
-        groove_friction_geometry_is_well_conditioned, MidpointPickupGeometry,
+        groove_friction_geometry_is_well_conditioned,
+        interior_spiral_origin_shift_per_record_velocity_m_s, MidpointPickupGeometry,
         MAX_MIDPOINT_CANDIDATE_BRANCHES, MAX_MIDPOINT_LINEAR_SOLVES,
     },
     electromechanical::{process_coupled_record_player_midpoint, CoupledRecordPlayerStepError},
@@ -1440,8 +1441,10 @@ impl PhysicalRecordPlayer {
                     * dt
                     / std::f64::consts::TAU;
                 lateral_origin_shift_per_record_velocity_m_s =
-                    -descriptor.cut.groove_pitch_m_per_revolution * 0.5 * dt
-                        / std::f64::consts::TAU;
+                    interior_spiral_origin_shift_per_record_velocity_m_s(
+                        descriptor.cut.groove_pitch_m_per_revolution,
+                        dt,
+                    );
             }
             match selection.contact_region {
                 RadialContactRegion::Groove => {
