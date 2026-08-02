@@ -224,3 +224,7 @@ Both deck velocities must be inside the mechanical rest tolerance. Other contact
 The exact diagnostic state now renders 12,000 samples with zero recoveries. A direct mechanical test gives the same result.
 
 The complete test suite has one separate failure in a Transform click-count test. Both stopped-contact regression tests pass.
+
+TestFlight build 25 contains the canonical correction. App Store Connect reports the build as `VALID`.
+
+All eight focused iOS player surface tests pass with the new native crate.

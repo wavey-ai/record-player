@@ -3098,3 +3098,6 @@ Do not claim hardware calibration before these tests pass.
 - **Mechanical result**: A direct 12,000-step deck test remains at exact rest.
 - **Suite result**: The two new tests pass.
 - **Separate issue**: One Transform click-count test expects four transitions and observes five.
+- **Native result**: All 48 native and C interface tests pass with the canonical correction.
+- **iOS result**: All eight focused player surface tests pass.
+- **Release**: TestFlight build 25 contains the correction and has the `VALID` state.
