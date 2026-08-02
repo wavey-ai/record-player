@@ -573,6 +573,8 @@ pub struct PhysicalRecordPlayer {
     render_scratch: Vec<f32>,
     last_telemetry: PhysicalRenderTelemetry,
     #[cfg(test)]
+    injected_trace_override: Option<GrooveSourceTrace>,
+    #[cfg(test)]
     injected_failure_at_completed_step: Option<u64>,
 }
 
@@ -649,6 +651,8 @@ impl PhysicalRecordPlayer {
             control_items: Vec::with_capacity(control_item_capacity),
             render_scratch: vec![0.0; config.solver.maximum_render_frames * 2],
             last_telemetry,
+            #[cfg(test)]
+            injected_trace_override: None,
             #[cfg(test)]
             injected_failure_at_completed_step: None,
         })
@@ -1545,6 +1549,15 @@ impl PhysicalRecordPlayer {
                     return Err(PhysicalRecordPlayerError::InvalidRadialSelection);
                 }
                 let source_frame_advance = 2.0 * (substep_midpoint - bounded_substep_start);
+                #[cfg(test)]
+                let trace = self.injected_trace_override.map_or_else(
+                    || source.trace(selected_position, source_frame_advance, config.stylus),
+                    |mut trace| {
+                        trace.groove_radius_m = plan.descriptor.radius_at_frame(selected_position);
+                        Ok(trace)
+                    },
+                )?;
+                #[cfg(not(test))]
                 let trace = source.trace(selected_position, source_frame_advance, config.stylus)?;
                 substep_groove_radius_m = trace.groove_radius_m;
                 groove_radius_m = trace.groove_radius_m;
@@ -2296,7 +2309,13 @@ mod tests {
             sorted[(sorted.len() - 1) * numerator / 100]
         }
 
-        fn run(label: &str, profile: &PhysicalProfile, groove: Arc<GrooveAsset>, reversal: bool) {
+        fn run(
+            label: &str,
+            profile: &PhysicalProfile,
+            groove: Arc<GrooveAsset>,
+            reversal: bool,
+            pretraced: bool,
+        ) {
             const BLOCK_FRAMES: usize = 128;
             const BLOCK_COUNT: usize = 512;
             const BLOCK_DEADLINE_NS: u128 =
@@ -2317,6 +2336,19 @@ mod tests {
             player
                 .render_internal_interleaved(&mut [0.0_f32; 2 * 1_024])
                 .unwrap();
+            if pretraced {
+                let trace = player
+                    .source
+                    .as_ref()
+                    .unwrap()
+                    .trace(
+                        player.groove_frame_position(),
+                        initial_rate,
+                        profile.config.stylus,
+                    )
+                    .unwrap();
+                player.injected_trace_override = Some(trace);
+            }
 
             let mut sequence = 2_u64;
             let mut elapsed_ns = Vec::with_capacity(BLOCK_COUNT);
@@ -2377,8 +2409,16 @@ mod tests {
         assert!(!cfg!(debug_assertions), "run this benchmark with --release");
         let profile = PhysicalProfile::sl_1200mk7_concorde_mkii_scratch_seed();
         let groove = sine_groove(&profile, 3_000.0);
-        run("normal", &profile, Arc::clone(&groove), false);
-        run("reversal", &profile, groove, true);
+        run("normal", &profile, Arc::clone(&groove), false, false);
+        run(
+            "normal-pretraced",
+            &profile,
+            Arc::clone(&groove),
+            false,
+            true,
+        );
+        run("reversal", &profile, Arc::clone(&groove), true, false);
+        run("reversal-pretraced", &profile, groove, true, true);
     }
 
     #[test]
