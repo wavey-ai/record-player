@@ -698,7 +698,7 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Predicate test**: The known negative `W_00` witness still fails the strict sign predicate.
 - **Positive seed result**: All 192 groove and 96 land labels have strict positive raw predicates at the zero-slope seed point.
 - **Bounded fixture result**: Interior, held, and land fixture groups each pass all 96 raw strict predicates.
-- **Test result**: Eighteen fixed-certificate tests pass.
+- **Test result**: Twenty-one fixed-certificate tests pass.
 - **Admission limit**: The evaluator is diagnostic and cannot gate playback yet.
 - **Numerical reason**: It does not yet bind raw algebraic margins to the full production scaled solver.
 - **Rejected design**: Do not interval-solve one parameterized 13-by-13 system for every domain box.
@@ -723,8 +723,20 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Reference result**: The new program-radius endpoint values are within one ULP of 100-digit calculations.
 - **Change size**: The outer endpoint changed by one ULP. The inner endpoint changed by four ULP.
 - **Interpretation**: The bit changes replace less accurate trigonometric reconstruction results.
-- **Proof catalog**: Add 48 solve-only systems to the 288 contacting labels.
-- **Proof total**: The initial catalog therefore contains 336 records before safe equivalence aggregation.
+- **Solve-only status**: The crate now defines 24 lowered systems and 24 cue-supported systems.
+- **Shared assembly**: Production and certificate paths now call one no-contact KKT assembler.
+- **Time-step rule**: Production supplies separate deck and pickup time steps to that assembler.
+- **Lowered parity**: All 24 lowered systems match the former separated-land base by exact bits.
+- **Cue result**: Cue support changes only the typed `BodyZ` equation and `BodyZ` velocity coefficient.
+- **Cue formula**: The change equals cue stiffness times pickup duration plus cue damping.
+- **Verification result**: All 48 systems replay and enclose every production unit-RHS mobility coefficient.
+- **Dependency rule**: A dependent hand equality still requires runtime right-hand-side compatibility.
+- **Algebraic catalog**: The 288 contact labels and 48 solve-only systems give 336 algebraic records.
+- **Numerical correction**: A literal full-KKT proof needs 672 nonempty contact masks and 48 solve-only systems.
+- **Numerical total**: That alternative full-KKT catalog contains 720 numerical subjects.
+- **Reason**: Each active contact mask changes the full KKT matrix.
+- **Zero-mask rule**: The 24 lowered systems cover the distinct separated zero-mask left-hand sides.
+- **Right-hand-side limit**: Unit-RHS mobility solves do not bound live constraint-row right-hand sides.
 - **Interval method**: Use outward arithmetic and adaptive radius-and-slope subdivision.
 - **Implementation status**: Finite outward interval arithmetic is implemented as a non-gating core.
 - **Arithmetic result**: Addition, subtraction, multiplication, division, square, and square root have outward bounds.
@@ -751,6 +763,37 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Consequence**: Point KKT hulling cannot establish bounded production-solver containment.
 - **Required link**: Derive a rigorous scaled-solver bound or replay verified production elimination for each active mask.
 - **Current interpretation**: Interval `H M G` predicates remain non-gating until that numerical link is complete.
+
+### Production-scaled replay audit
+
+- **Status**: A read-only prototype tested full scaled elimination. Production does not use this prototype.
+- **Method**: The prototype certified scale choices, pivot choices, pivots, elimination, and six unit right-hand sides.
+- **Test radius**: The narrow audit used the closed radius interval from `0.099 m` through `0.101 m`.
+- **Family result**: All 288 contact families certified on that interval.
+- **Comparison count**: The audit checked 31,104 endpoint and midpoint mobility coefficients.
+- **Containment result**: No sampled production coefficient escaped its interval.
+- **Residue result**: The replay recovered all 177 previously missed structural-zero residues.
+- **Maximum raw width**: The largest mobility interval width was `3.749987697e-4` in its mixed units.
+- **Maximum normalized width**: The largest family-scale width ratio was approximately `0.032` percent.
+- **Full-radius result**: Four uniform radius quarters covered all 288 families from `0.060325 m` through `0.14605 m`.
+- **Quarter ratios**: Their largest family-scale width ratios were `0.441`, `0.404`, `0.474`, and `1.498` percent.
+- **Point residual bound**: A point interval gave a maximum backward-error bound of `1.275e-13`.
+- **Sampled production residual**: The matching production value was `5.55e-17`.
+- **Box residual failure**: The naive interval residual bound increased to `1.416` on the narrow radius box.
+- **Production threshold**: The production backward-error limit is `1e-10`.
+- **Cause hypothesis**: Direct residual intervals lose correlation between the radius-dependent matrix and solution.
+- **Conclusion**: Fixed-path replay can enclose mobility, but its naive residual bound cannot gate playback.
+- **Replacement hypothesis**: Use verified base mobility with canonical rank-one and normal-contact Schur updates in production.
+- **Base requirement**: Extend each fixed certificate from dynamic mobility to the complete KKT inverse.
+- **Runtime proof**: Bound the actual point residual with outward arithmetic after each candidate solve.
+- **Forward bound**: Combine the residual with a certified scaled inverse norm for that proof leaf.
+- **Guard rule**: Require every point guard and complete solution-enclosure guard to pass.
+- **Ambiguity rule**: Reject one branch when its enclosure crosses a force, gap, velocity, friction, power, or tolerance boundary.
+- **Transaction rule**: Commit state only after the point and enclosure checks pass.
+- **Runtime requirement**: Certify the actual finite right-hand side after each candidate solve.
+- **Possible error**: The prototype covers the seed profile. It does not prove every valid configuration or target.
+- **Permanent-test requirement**: Repeat residual and FMA checks on native and WASM targets.
+
 - **Initial robustness floor**: Use `6.4e-9`, derived from 64 times the current backward-error limit.
 - **Config checkpoint**: The versioned config identity binds all 84 validated manifest leaves.
 - **Config encoding**: It hashes stable paths, explicit value tags, exact float bits, and length-delimited values.

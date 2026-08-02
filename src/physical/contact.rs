@@ -1244,8 +1244,10 @@ const JOINT_MAX_VARIABLES: usize = 13;
 const JOINT_RHS_COLUMN: usize = JOINT_MAX_VARIABLES;
 pub(crate) const COUPLED_FIXED_MODE_OPERATOR_VERSION: u32 = 1;
 pub(crate) const COUPLED_FIXED_MODE_FAMILY_SET_VERSION: u32 = 1;
+pub(crate) const COUPLED_FIXED_SOLVE_ONLY_SUBJECT_SET_VERSION: u32 = 1;
 pub(crate) const COUPLED_FIXED_MECHANICAL_CLASS_COUNT: usize = 24;
 pub(crate) const COUPLED_FIXED_CONTACT_FAMILY_COUNT: usize = 288;
+pub(crate) const COUPLED_FIXED_SOLVE_ONLY_SUBJECT_COUNT: usize = 48;
 // 3 bearing * 3 slipmat * 3 hand * 3 pickup * 4 masks * 4 tangent modes.
 pub(crate) const MAX_MIDPOINT_CANDIDATE_BRANCHES: u32 = 1_296;
 pub(crate) const MAX_MIDPOINT_LINEAR_SOLVES: u32 = 1_296;
@@ -1374,6 +1376,46 @@ pub(crate) fn coupled_fixed_mechanical_modes(
                     })
                 })
         })
+}
+
+/// Identifies the pickup support state for a solve-only mechanical system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum CoupledFixedPickupSupport {
+    /// The stylus is lowered, but no normal-contact constraint is active.
+    LoweredNoContact,
+    /// The cue support acts on the lifted vertical tonearm body.
+    CueSupported,
+}
+
+const FIXED_PICKUP_SUPPORTS: [CoupledFixedPickupSupport; 2] = [
+    CoupledFixedPickupSupport::LoweredNoContact,
+    CoupledFixedPickupSupport::CueSupported,
+];
+
+/// Identifies one of the 48 source-independent solve-only subjects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct CoupledFixedSolveOnlySubject {
+    subject_set_version: u32,
+    pub(crate) mechanical: CoupledFixedMechanicalMode,
+    pub(crate) support: CoupledFixedPickupSupport,
+}
+
+impl CoupledFixedSolveOnlySubject {
+    pub(crate) const fn subject_set_version(self) -> u32 {
+        self.subject_set_version
+    }
+}
+
+/// Returns 24 lowered subjects followed by 24 cue-supported subjects.
+pub(crate) fn coupled_fixed_solve_only_subjects(
+) -> impl Iterator<Item = CoupledFixedSolveOnlySubject> + Clone {
+    FIXED_PICKUP_SUPPORTS.into_iter().flat_map(|support| {
+        coupled_fixed_mechanical_modes().map(move |mechanical| CoupledFixedSolveOnlySubject {
+            subject_set_version: COUPLED_FIXED_SOLVE_ONLY_SUBJECT_SET_VERSION,
+            mechanical,
+            support,
+        })
+    })
 }
 
 /// Identifies a contacting surface in the fixed-mode catalog.
@@ -1592,6 +1634,17 @@ pub(crate) struct CoupledFixedModeNormalResponse {
     pub(crate) normal_response: CoupledFixedNormalResponse,
 }
 
+/// Contains one source-independent lowered or cue-supported solve response.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CoupledFixedSolveOnlyResponse {
+    pub(crate) operator_version: u32,
+    pub(crate) subject: CoupledFixedSolveOnlySubject,
+    pub(crate) equality: CoupledFixedEqualityDiagnostics,
+    pub(crate) solve: CoupledFixedSolveDiagnostics,
+    pub(crate) kkt_lhs: CoupledFixedModeKktLhs,
+    pub(crate) dynamic_mobility: CoupledFixedDynamicMobility,
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum CoupledFixedModeResponseError {
     #[error(transparent)]
@@ -1600,6 +1653,8 @@ pub(crate) enum CoupledFixedModeResponseError {
     InvalidContactPoint,
     #[error("the fixed-mode family label is invalid")]
     InvalidFamily,
+    #[error("the fixed-mode solve-only subject label is invalid")]
+    InvalidSolveOnlySubject,
     #[error(transparent)]
     Cartridge(#[from] super::MovingMagnetCartridgeError),
     #[error("the fixed-mode left-hand side is singular or fails its residual check")]
@@ -2043,59 +2098,9 @@ pub(crate) fn coupled_fixed_mode_normal_response(
             + usize::from(mechanical.hand == FixedModeHandMobility::Sticking)
             + usize::from(mechanical.pickup_bearing == FixedModeFrictionMobility::Sticking)
             + usize::from(family.stylus == StylusTangentialMode::Sticking);
-    let equality_count = next_column - JOINT_DYNAMIC_VARIABLES;
-    let dependent_count = requested_count.saturating_sub(equality_count);
-    let equality = CoupledFixedEqualityDiagnostics {
-        requested_count,
-        rank: equality_count,
-        dependent_count,
-        runtime_rhs_compatibility_required: dependent_count != 0,
-    };
-
-    let mut equality_basis = [JointDynamicVelocityRow::default(); 5];
-    for (basis, row) in equality_basis
-        .iter_mut()
-        .zip(JOINT_DYNAMIC_VARIABLES..next_column)
-    {
-        *basis = dynamic_velocity_row_from_kkt_row(augmented[row]);
-    }
-    let mut coefficients = [[0.0; JOINT_MAX_VARIABLES]; JOINT_MAX_VARIABLES];
-    for row in 0..next_column {
-        coefficients[row][..next_column].copy_from_slice(&augmented[row][..next_column]);
-    }
-    let kkt_lhs = CoupledFixedModeKktLhs {
-        system_size: next_column,
-        equality_count,
-        coefficients,
-        equality_basis,
-    };
-
-    let mut dynamic_mobility = CoupledFixedDynamicMobility {
-        velocity_by_equation_rhs: [[0.0; JOINT_DYNAMIC_VARIABLES]; JOINT_DYNAMIC_VARIABLES],
-    };
-    let mut minimum_scaled_pivot = f64::INFINITY;
-    let mut maximum_scaled_pivot = 0.0_f64;
-    let mut maximum_backward_error = 0.0_f64;
-    for equation_rhs in 0..JOINT_DYNAMIC_VARIABLES {
-        let mut system = augmented;
-        system[equation_rhs][JOINT_RHS_COLUMN] = 1.0;
-        let solved = solve_joint_linear_system_with_diagnostics(&mut system, next_column)
-            .ok_or(CoupledFixedModeResponseError::SingularOrIllConditioned)?;
-        for velocity in 0..JOINT_DYNAMIC_VARIABLES {
-            dynamic_mobility.velocity_by_equation_rhs[velocity][equation_rhs] =
-                solved.solution[velocity];
-        }
-        minimum_scaled_pivot = minimum_scaled_pivot.min(solved.diagnostics.minimum_scaled_pivot);
-        maximum_scaled_pivot = maximum_scaled_pivot.max(solved.diagnostics.maximum_scaled_pivot);
-        maximum_backward_error = maximum_backward_error.max(solved.diagnostics.backward_error);
-    }
-    let solve = CoupledFixedSolveDiagnostics {
-        system_size: next_column,
-        minimum_scaled_pivot,
-        maximum_scaled_pivot,
-        scaled_pivot_ratio: minimum_scaled_pivot / maximum_scaled_pivot,
-        maximum_backward_error,
-    };
+    let (kkt_lhs, equality) = fixed_kkt_lhs_and_equality(augmented, next_column, requested_count);
+    let (dynamic_mobility, solve) = fixed_dynamic_mobility_and_solve(augmented, next_column)
+        .ok_or(CoupledFixedModeResponseError::SingularOrIllConditioned)?;
 
     let friction_coefficient = match surface {
         PickupContactSurface::GrooveWalls => config.contact.groove_friction_coefficient,
@@ -2201,6 +2206,63 @@ pub(crate) fn coupled_fixed_mode_normal_response(
     })
 }
 
+/// Builds one source-independent production KKT mobility.
+pub(crate) fn coupled_fixed_solve_only_response(
+    config: super::PhysicalPlaybackConfig,
+    subject: CoupledFixedSolveOnlySubject,
+) -> Result<CoupledFixedSolveOnlyResponse, CoupledFixedModeResponseError> {
+    let config = config.validate()?;
+    if subject.subject_set_version != COUPLED_FIXED_SOLVE_ONLY_SUBJECT_SET_VERSION
+        || !coupled_fixed_solve_only_subjects().any(|candidate| candidate == subject)
+    {
+        return Err(CoupledFixedModeResponseError::InvalidSolveOnlySubject);
+    }
+
+    let dt = 1.0 / config.solver.internal_sample_rate_hz;
+    let reciprocal_damping_n_s_per_m =
+        super::electromechanical::cartridge_mechanical_reciprocal_damping_n_s_per_m(
+            config.cartridge,
+            dt,
+        )?;
+    let mechanical = subject.mechanical;
+    let mut augmented = [[0.0_f64; JOINT_MAX_VARIABLES + 1]; JOINT_MAX_VARIABLES];
+    let layout = assemble_joint_no_contact_kkt_lhs(
+        &mut augmented,
+        config.deck,
+        config.contact,
+        config.tonearm,
+        dt,
+        dt,
+        reciprocal_damping_n_s_per_m,
+        mechanical.deck_bearing_mode(),
+        mechanical.slipmat_mode(),
+        mechanical.hand_mode(),
+        mechanical.pickup_bearing_mode(),
+        subject.support == CoupledFixedPickupSupport::LoweredNoContact,
+        0.0,
+    )
+    .ok_or(CoupledFixedModeResponseError::SingularOrIllConditioned)?;
+
+    let requested_count =
+        usize::from(mechanical.deck_bearing == FixedModeFrictionMobility::Sticking)
+            + usize::from(mechanical.slipmat == FixedModeFrictionMobility::Sticking)
+            + usize::from(mechanical.hand == FixedModeHandMobility::Sticking)
+            + usize::from(mechanical.pickup_bearing == FixedModeFrictionMobility::Sticking);
+    let (kkt_lhs, equality) =
+        fixed_kkt_lhs_and_equality(augmented, layout.system_size, requested_count);
+    let (dynamic_mobility, solve) = fixed_dynamic_mobility_and_solve(augmented, layout.system_size)
+        .ok_or(CoupledFixedModeResponseError::SingularOrIllConditioned)?;
+
+    Ok(CoupledFixedSolveOnlyResponse {
+        operator_version: COUPLED_FIXED_MODE_OPERATOR_VERSION,
+        subject,
+        equality,
+        solve,
+        kkt_lhs,
+        dynamic_mobility,
+    })
+}
+
 fn validate_fixed_family(
     family: CoupledFixedContactFamily,
 ) -> Result<(), CoupledFixedModeResponseError> {
@@ -2231,6 +2293,75 @@ fn dynamic_velocity_row_from_kkt_row(
         body_x: row[4],
         body_z: row[5],
     }
+}
+
+fn fixed_kkt_lhs_and_equality(
+    augmented: [[f64; JOINT_MAX_VARIABLES + 1]; JOINT_MAX_VARIABLES],
+    system_size: usize,
+    requested_count: usize,
+) -> (CoupledFixedModeKktLhs, CoupledFixedEqualityDiagnostics) {
+    let equality_count = system_size - JOINT_DYNAMIC_VARIABLES;
+    let dependent_count = requested_count.saturating_sub(equality_count);
+    let equality = CoupledFixedEqualityDiagnostics {
+        requested_count,
+        rank: equality_count,
+        dependent_count,
+        runtime_rhs_compatibility_required: dependent_count != 0,
+    };
+    let mut equality_basis = [JointDynamicVelocityRow::default(); 5];
+    for (basis, row) in equality_basis
+        .iter_mut()
+        .zip(JOINT_DYNAMIC_VARIABLES..system_size)
+    {
+        *basis = dynamic_velocity_row_from_kkt_row(augmented[row]);
+    }
+    let mut coefficients = [[0.0; JOINT_MAX_VARIABLES]; JOINT_MAX_VARIABLES];
+    for row in 0..system_size {
+        coefficients[row][..system_size].copy_from_slice(&augmented[row][..system_size]);
+    }
+    (
+        CoupledFixedModeKktLhs {
+            system_size,
+            equality_count,
+            coefficients,
+            equality_basis,
+        },
+        equality,
+    )
+}
+
+fn fixed_dynamic_mobility_and_solve(
+    augmented: [[f64; JOINT_MAX_VARIABLES + 1]; JOINT_MAX_VARIABLES],
+    system_size: usize,
+) -> Option<(CoupledFixedDynamicMobility, CoupledFixedSolveDiagnostics)> {
+    let mut dynamic_mobility = CoupledFixedDynamicMobility {
+        velocity_by_equation_rhs: [[0.0; JOINT_DYNAMIC_VARIABLES]; JOINT_DYNAMIC_VARIABLES],
+    };
+    let mut minimum_scaled_pivot = f64::INFINITY;
+    let mut maximum_scaled_pivot = 0.0_f64;
+    let mut maximum_backward_error = 0.0_f64;
+    for equation_rhs in 0..JOINT_DYNAMIC_VARIABLES {
+        let mut system = augmented;
+        system[equation_rhs][JOINT_RHS_COLUMN] = 1.0;
+        let solved = solve_joint_linear_system_with_diagnostics(&mut system, system_size)?;
+        for velocity in 0..JOINT_DYNAMIC_VARIABLES {
+            dynamic_mobility.velocity_by_equation_rhs[velocity][equation_rhs] =
+                solved.solution[velocity];
+        }
+        minimum_scaled_pivot = minimum_scaled_pivot.min(solved.diagnostics.minimum_scaled_pivot);
+        maximum_scaled_pivot = maximum_scaled_pivot.max(solved.diagnostics.maximum_scaled_pivot);
+        maximum_backward_error = maximum_backward_error.max(solved.diagnostics.backward_error);
+    }
+    Some((
+        dynamic_mobility,
+        CoupledFixedSolveDiagnostics {
+            system_size,
+            minimum_scaled_pivot,
+            maximum_scaled_pivot,
+            scaled_pivot_ratio: minimum_scaled_pivot / maximum_scaled_pivot,
+            maximum_backward_error,
+        },
+    ))
 }
 
 /// Solves the frozen tangent plane, deck, pickup, and cartridge force relation.
@@ -2417,6 +2548,13 @@ struct JointStaticConstraintRows {
     stylus: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct JointNoContactKktLayout {
+    system_size: usize,
+    columns: JointStaticConstraintColumns,
+    rows: JointStaticConstraintRows,
+}
+
 /// Builds the production sticking-force column in dynamic equation order.
 pub(crate) fn stylus_sticking_force_column(
     groove_radius_m: f64,
@@ -2493,6 +2631,98 @@ fn append_joint_static_constraint_rows(
     }
 }
 
+/// Assembles the canonical source-independent KKT for a separated stylus.
+#[allow(clippy::too_many_arguments)]
+fn assemble_joint_no_contact_kkt_lhs(
+    augmented: &mut [[f64; JOINT_MAX_VARIABLES + 1]; JOINT_MAX_VARIABLES],
+    deck_config: crate::PhysicalDeckConfig,
+    contact: StylusContactConfig,
+    tonearm: TonearmConfig,
+    deck_dt: f64,
+    pickup_dt: f64,
+    reciprocal_damping_n_s_per_m: [[f64; 2]; 2],
+    deck_bearing_mode: CoupledDeckFrictionMode,
+    slipmat_mode: CoupledDeckFrictionMode,
+    hand_mode: CoupledDeckFrictionMode,
+    pickup_bearing_mode: BearingMode,
+    stylus_lowered: bool,
+    hand_velocity_rad_s: f64,
+) -> Option<JointNoContactKktLayout> {
+    let static_constraints = select_independent_deck_constraints(
+        deck_bearing_mode,
+        slipmat_mode,
+        hand_mode,
+        StylusTangentialMode::Separated,
+        pickup_bearing_mode,
+        hand_velocity_rad_s,
+        0.0,
+        0.0,
+    )?;
+
+    let mut next_column = JOINT_DYNAMIC_VARIABLES;
+    let pickup_bearing = (pickup_bearing_mode == BearingMode::Stick).then(|| {
+        let column = next_column;
+        next_column += 1;
+        column
+    });
+    let deck_bearing = static_constraints[0].then(|| {
+        let column = next_column;
+        next_column += 1;
+        column
+    });
+    let slipmat = static_constraints[1].then(|| {
+        let column = next_column;
+        next_column += 1;
+        column
+    });
+    let hand = static_constraints[2].then(|| {
+        let column = next_column;
+        next_column += 1;
+        column
+    });
+    let columns = JointStaticConstraintColumns {
+        pickup_bearing,
+        deck_bearing,
+        slipmat,
+        hand,
+        stylus: None,
+    };
+    if next_column > JOINT_MAX_VARIABLES {
+        return None;
+    }
+
+    assemble_deck_lhs(
+        augmented,
+        deck_config,
+        deck_dt,
+        deck_bearing_mode,
+        slipmat_mode,
+        hand_mode,
+        columns.deck_bearing,
+        columns.slipmat,
+        columns.hand,
+    )?;
+    assemble_pickup_lhs(
+        augmented,
+        contact,
+        tonearm,
+        pickup_dt,
+        stylus_lowered,
+        reciprocal_damping_n_s_per_m,
+        columns.pickup_bearing,
+    );
+    let rows =
+        append_joint_static_constraint_rows(augmented, JOINT_DYNAMIC_VARIABLES, 0.0, columns);
+    if rows.next_row != next_column {
+        return None;
+    }
+    Some(JointNoContactKktLayout {
+        system_size: next_column,
+        columns,
+        rows,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn solve_joint_branch(
     deck: DeckMidpointPreparation,
@@ -2511,6 +2741,22 @@ fn solve_joint_branch(
     attempted_linear_solves: &mut u32,
 ) -> Option<JointCandidate> {
     let input = geometry.input;
+    if active_count == 0 && stylus_mode == StylusTangentialMode::Separated {
+        return solve_joint_no_contact_branch(
+            deck,
+            pickup,
+            geometry,
+            relation,
+            deck_bearing_mode,
+            slipmat_mode,
+            hand_mode,
+            pickup_bearing_mode,
+            active_mask,
+            active_constraints,
+            skating_factor,
+            attempted_linear_solves,
+        );
+    }
     let stylus_body_velocity_coefficient = -2.0 * skating_factor / input.groove_radius_m;
     let static_constraints = select_independent_deck_constraints(
         deck_bearing_mode,
@@ -2659,6 +2905,75 @@ fn solve_joint_branch(
         hand_column,
         stylus_force_column,
         stylus_mode,
+        skating_factor,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn solve_joint_no_contact_branch(
+    deck: DeckMidpointPreparation,
+    pickup: PickupMechanicalState,
+    geometry: MidpointPickupGeometry,
+    relation: PickupElectromagneticForceRelation,
+    deck_bearing_mode: CoupledDeckFrictionMode,
+    slipmat_mode: CoupledDeckFrictionMode,
+    hand_mode: CoupledDeckFrictionMode,
+    pickup_bearing_mode: BearingMode,
+    active_mask: u8,
+    active_constraints: [usize; 2],
+    skating_factor: f64,
+    attempted_linear_solves: &mut u32,
+) -> Option<JointCandidate> {
+    let input = geometry.input;
+    let mut augmented = [[0.0_f64; JOINT_MAX_VARIABLES + 1]; JOINT_MAX_VARIABLES];
+    let layout = assemble_joint_no_contact_kkt_lhs(
+        &mut augmented,
+        deck.config,
+        pickup.contact,
+        pickup.tonearm,
+        deck.dt,
+        1.0 / pickup.sample_rate_hz,
+        relation.reciprocal_damping_n_s_per_m,
+        deck_bearing_mode,
+        slipmat_mode,
+        hand_mode,
+        pickup_bearing_mode,
+        input.stylus_lowered,
+        deck.hand_velocity_rad_s,
+    )?;
+    assemble_deck_rhs(
+        &mut augmented,
+        deck,
+        deck_bearing_mode,
+        slipmat_mode,
+        hand_mode,
+    );
+    assemble_pickup_rhs(&mut augmented, pickup, input, relation, pickup_bearing_mode);
+    if let Some(row) = layout.rows.hand {
+        augmented[row][JOINT_RHS_COLUMN] = deck.hand_velocity_rad_s;
+    }
+
+    *attempted_linear_solves = attempted_linear_solves.saturating_add(1);
+    let solution = solve_joint_linear_system(&mut augmented, layout.system_size)?;
+    validate_joint_candidate(
+        deck,
+        pickup,
+        geometry,
+        solution,
+        deck_bearing_mode,
+        slipmat_mode,
+        hand_mode,
+        pickup_bearing_mode,
+        active_mask,
+        active_constraints,
+        0,
+        [None; 2],
+        layout.columns.pickup_bearing,
+        layout.columns.deck_bearing,
+        layout.columns.slipmat,
+        layout.columns.hand,
+        None,
+        StylusTangentialMode::Separated,
         skating_factor,
     )
 }
@@ -4990,6 +5305,161 @@ mod tests {
             kkt.dynamic_coefficient(JointDynamicEquation::BodyX, JointDynamicVelocity::TipZ),
             0.0
         );
+    }
+
+    #[test]
+    fn solve_only_subject_catalog_has_stable_versioned_order() {
+        let subjects: Vec<_> = coupled_fixed_solve_only_subjects().collect();
+        let mechanical: Vec<_> = coupled_fixed_mechanical_modes().collect();
+        assert_eq!(subjects.len(), COUPLED_FIXED_SOLVE_ONLY_SUBJECT_COUNT);
+        assert_eq!(mechanical.len(), COUPLED_FIXED_MECHANICAL_CLASS_COUNT);
+        for (index, subject) in subjects.into_iter().enumerate() {
+            assert_eq!(
+                subject.subject_set_version(),
+                COUPLED_FIXED_SOLVE_ONLY_SUBJECT_SET_VERSION
+            );
+            assert_eq!(subject.mechanical, mechanical[index % mechanical.len()]);
+            assert_eq!(
+                subject.support,
+                if index < mechanical.len() {
+                    CoupledFixedPickupSupport::LoweredNoContact
+                } else {
+                    CoupledFixedPickupSupport::CueSupported
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn all_lowered_solve_only_systems_match_the_separated_land_base_exactly() {
+        let config = seed_playback_config();
+        let point = CoupledFixedContactPoint {
+            groove_radius_m: config.groove.outer_program_radius_m,
+            wall_slopes: [0.0; 2],
+        };
+        for subject in coupled_fixed_solve_only_subjects()
+            .filter(|subject| subject.support == CoupledFixedPickupSupport::LoweredNoContact)
+        {
+            let family = fixed_contact_family(
+                subject.mechanical,
+                CoupledFixedContactSurface::RecordLand,
+                CoupledFixedOriginLaw::SurfaceIndependent,
+                StylusTangentialMode::Separated,
+            );
+            let base = coupled_fixed_mode_normal_response(config, family, point).unwrap();
+            let solve_only = coupled_fixed_solve_only_response(config, subject).unwrap();
+            assert_eq!(solve_only.kkt_lhs, base.kkt_lhs, "{subject:?}");
+            assert_eq!(solve_only.equality, base.equality, "{subject:?}");
+            assert_eq!(
+                solve_only.dynamic_mobility, base.dynamic_mobility,
+                "{subject:?}"
+            );
+            assert_eq!(solve_only.solve, base.solve, "{subject:?}");
+        }
+    }
+
+    #[test]
+    fn cue_support_changes_only_the_typed_vertical_body_coefficient() {
+        let config = seed_playback_config();
+        let dt = 1.0 / config.solver.internal_sample_rate_hz;
+        let cue_coupling = config.tonearm.cue_support_stiffness_n_per_m * dt
+            + config.tonearm.cue_support_damping_n_s_per_m;
+        let subjects: Vec<_> = coupled_fixed_solve_only_subjects().collect();
+        for index in 0..COUPLED_FIXED_MECHANICAL_CLASS_COUNT {
+            let lowered = coupled_fixed_solve_only_response(config, subjects[index]).unwrap();
+            let cue = coupled_fixed_solve_only_response(
+                config,
+                subjects[index + COUPLED_FIXED_MECHANICAL_CLASS_COUNT],
+            )
+            .unwrap();
+            assert_eq!(lowered.equality, cue.equality);
+            assert_eq!(lowered.kkt_lhs.system_size, cue.kkt_lhs.system_size);
+            assert_eq!(lowered.kkt_lhs.equality_basis, cue.kkt_lhs.equality_basis);
+            for row in 0..lowered.kkt_lhs.system_size {
+                for column in 0..lowered.kkt_lhs.system_size {
+                    let lowered_value = lowered.kkt_lhs.coefficients[row][column];
+                    let cue_value = cue.kkt_lhs.coefficients[row][column];
+                    if row == JointDynamicEquation::BodyZ as usize
+                        && column == JointDynamicVelocity::BodyZ as usize
+                    {
+                        assert_eq!(
+                            cue_value.to_bits(),
+                            (lowered_value + cue_coupling).to_bits()
+                        );
+                        assert_eq!(
+                            cue.kkt_lhs.dynamic_coefficient(
+                                JointDynamicEquation::BodyZ,
+                                JointDynamicVelocity::BodyZ,
+                            ),
+                            cue_value
+                        );
+                    } else {
+                        assert_eq!(cue_value.to_bits(), lowered_value.to_bits());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_contact_builder_preserves_dependent_runtime_rhs_rejection() {
+        let config = seed_playback_config();
+        let dt = 1.0 / config.solver.internal_sample_rate_hz;
+        let reciprocal_damping_n_s_per_m =
+            super::super::electromechanical::cartridge_mechanical_reciprocal_damping_n_s_per_m(
+                config.cartridge,
+                dt,
+            )
+            .unwrap();
+        let mechanical = fixed_mechanical_mode(
+            FixedModeFrictionMobility::Sticking,
+            FixedModeFrictionMobility::Sticking,
+            FixedModeHandMobility::Sticking,
+            FixedModeFrictionMobility::Sticking,
+        );
+        let subject = coupled_fixed_solve_only_subjects()
+            .find(|subject| {
+                subject.mechanical == mechanical
+                    && subject.support == CoupledFixedPickupSupport::LoweredNoContact
+            })
+            .unwrap();
+        let response = coupled_fixed_solve_only_response(config, subject).unwrap();
+        assert!(response.equality.runtime_rhs_compatibility_required);
+
+        let mut compatible = [[0.0; JOINT_MAX_VARIABLES + 1]; JOINT_MAX_VARIABLES];
+        assert!(assemble_joint_no_contact_kkt_lhs(
+            &mut compatible,
+            config.deck,
+            config.contact,
+            config.tonearm,
+            dt,
+            dt,
+            reciprocal_damping_n_s_per_m,
+            mechanical.deck_bearing_mode(),
+            mechanical.slipmat_mode(),
+            mechanical.hand_mode(),
+            mechanical.pickup_bearing_mode(),
+            true,
+            0.0,
+        )
+        .is_some());
+        let mut incompatible = [[0.0; JOINT_MAX_VARIABLES + 1]; JOINT_MAX_VARIABLES];
+        assert!(assemble_joint_no_contact_kkt_lhs(
+            &mut incompatible,
+            config.deck,
+            config.contact,
+            config.tonearm,
+            dt,
+            dt,
+            reciprocal_damping_n_s_per_m,
+            mechanical.deck_bearing_mode(),
+            mechanical.slipmat_mode(),
+            mechanical.hand_mode(),
+            mechanical.pickup_bearing_mode(),
+            true,
+            1.0,
+        )
+        .is_none());
     }
 
     #[test]

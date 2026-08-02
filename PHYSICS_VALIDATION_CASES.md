@@ -1896,7 +1896,7 @@ The accepted profile domain needs a P-matrix proof or an equivalent bounded proo
 - **Negative witness**: The known negative `W_00` interval fails the strict positive predicate.
 - **Positive seed result**: All 192 groove and 96 land labels pass raw strict predicates at the zero-slope seed point.
 - **Bounded fixture result**: Interior, held, and land fixture groups each pass all 96 raw strict predicates.
-- **Focused result**: Eighteen fixed-certificate tests pass.
+- **Focused result**: Twenty-one fixed-certificate tests pass.
 - **Current proof limit**: The raw intervals do not yet prove the complete production scaled-solver margin.
 - **Mobility definition**: Store response as velocity rows by equation columns.
 - **Equation order**: `[platter, record, tip-x, body-x, tip-z, body-z]`.
@@ -1930,8 +1930,15 @@ The accepted profile domain needs a P-matrix proof or an equivalent bounded proo
 - **Mask-specific rule**: Positive-friction sticking requires zero slope only on each active wall.
 - **Catalog warning**: Family-level reachability can hide a feasible one-wall sticking mask.
 - **Catalog**: Generate 288 contacting labels from production mode mappings.
-- **Solve-only addition**: Prove 24 lowered and 24 cue-supported systems.
-- **Initial record count**: Prove 336 records before safe equivalence aggregation.
+- **Solve-only result**: The versioned catalog contains 24 lowered and 24 cue-supported systems.
+- **Shared builder**: Production zero-contact branches and certificate responses use one canonical KKT assembler.
+- **Lowered result**: All 24 lowered systems match the separated-land bases by exact bits.
+- **Cue result**: Cue support changes only the typed vertical-body dynamic coefficient.
+- **Verification result**: All 48 systems enclose their production unit-RHS mobility coefficients.
+- **Algebraic record count**: The 288 contact labels and 48 solve-only systems give 336 records.
+- **Full-KKT correction**: A literal scaled-solver catalog needs 672 active masks and 48 solve-only systems.
+- **Full-KKT total**: That alternative numerical catalog contains 720 subjects.
+- **RHS limit**: Unit-RHS mobility does not certify live constraint-row right-hand sides.
 - **Groove proof**: Require positive lower bounds for both diagonals and the determinant.
 - **Land proof**: Require a positive lower bound for its scalar response.
 - **Subdivision**: Split the largest normalized radius or slope width when a result is inconclusive.
@@ -1943,8 +1950,8 @@ The accepted profile domain needs a P-matrix proof or an equivalent bounded proo
 - **Candidate claim**: Report the largest certified ladder value, not a maximum physical slope.
 - **Failed-attempt record**: Keep every larger candidate and its stable failure class.
 - **Exhaustion meaning**: Report exhausted work as inconclusive, not as physical invalidity.
-- **Stable subject order**: Evaluate 288 contact families, 24 lowered systems, then 24 cue-supported systems.
-- **No aggregation**: Keep all 336 subject records in certificate version 1.
+- **Stable algebraic order**: Evaluate 288 contact families, 24 lowered systems, then 24 cue-supported systems.
+- **No algebraic aggregation**: Keep all 336 algebraic records in certificate version 1.
 - **Split selection**: Select the active axis with the smallest accumulated split depth.
 - **Split tie order**: Prefer radius, then left slope, then right slope.
 - **Child order**: Push the upper child first so the lower child is evaluated next.
@@ -1983,6 +1990,129 @@ The accepted profile domain needs a P-matrix proof or an equivalent bounded proo
 - **Failure classes**: Distinguish bad minors, singular mobility, singular Schur updates, weak margins, and exhausted work.
 - **Scope**: A successful strict P-matrix certificate would prove normal-contact uniqueness for its fixed mode and certified box.
 - **Exclusion**: It does not prove unique selection across overlapping hybrid modes.
+
+### Scaled-Solver Replay Audit
+
+- **Audit status**: A read-only prototype tested full production-scaled elimination.
+- **Production status**: The crate does not contain or use this prototype.
+- **Replay method**: Certify each selected row scale, column scale, pivot row, pivot value, and elimination operation.
+- **Exact operations**: Keep pivot self-division equal to one and eliminated pivot coefficients equal to zero.
+- **Narrow domain**: Use radius interval `[0.099, 0.101] m` with the seed profile.
+- **Narrow result**: All 288 family systems passed the fixed-path replay.
+- **Sample count**: Check 31,104 endpoint and midpoint mobility coefficients.
+- **Sample result**: All sampled production coefficients stayed inside their intervals.
+- **Residue result**: The replay enclosed all 177 previously missed structural-zero residues.
+- **Maximum raw width**: The largest interval width was `3.749987697e-4` in its coefficient units.
+- **Maximum normalized width**: The largest width divided by its family mobility scale was `3.200882e-4`.
+- **Point normalized width**: At radius `0.100 m`, the corresponding ratio was `1.706e-15`.
+- **Full domain**: The seed profile spans radius interval `[0.060325, 0.14605] m`.
+- **Single-box result**: One fixed replay path failed for all 54 adds-rank labels at a stylus-row scale switch.
+- **Half-box result**: Two radius halves left nine labels unresolved in each half.
+- **Quarter-box result**: Four uniform radius quarters certified all 288 labels.
+- **Quarter one ratio**: Its maximum family-scale width ratio was `0.441` percent.
+- **Quarter two ratio**: Its maximum family-scale width ratio was `0.404` percent.
+- **Quarter three ratio**: Its maximum family-scale width ratio was `0.474` percent.
+- **Quarter four ratio**: Its maximum family-scale width ratio was `1.498` percent.
+- **Point residual bound**: Direct interval residual evaluation gave `1.275e-13` at radius `0.100 m`.
+- **Point production value**: The sampled production backward error was `5.55e-17`.
+- **Box residual bound**: Direct interval residual evaluation gave `1.416` on `[0.099, 0.101] m`.
+- **Required threshold**: Production rejects a backward error greater than `1e-10`.
+- **Failure cause**: Direct intervals lose matrix-and-solution correlation across a nonzero radius interval.
+- **Audit conclusion**: The mobility replay is practical with subdivision. The naive residual proof is not practical.
+- **Replacement candidate**: Use verified base solves with canonical sticking and normal-contact Schur updates.
+- **Runtime candidate check**: Verify the actual KKT residual and forward-error bound before branch acceptance.
+- **Uncertainty**: This audit uses one profile and one prototype. It can be wrong for other valid configurations.
+- **Required target test**: Verify residual FMA behavior on native and `wasm32-unknown-unknown` targets.
+- **Required switch test**: Cover scale ties, pivot ties, zero skating factor, and unit body-coefficient crossings.
+- **Required stress test**: Cover near-threshold pivots, extreme valid profiles, stop, reversal, and rapid signed motion.
+
+### Certified Block-Solver Replacement Hypothesis
+
+- **Status**: This design is not implemented. Tests can disprove or change it.
+- **Goal**: Replace parameterized full-KKT elimination with the same algebra used by the bounded contact evaluator.
+- **Base requirement**: Store the verified complete inverse of each fixed base KKT system.
+- **Current gap**: The current catalog stores only the six-by-six dynamic mobility block.
+- **Base solve**: Multiply the complete base inverse by the actual runtime right-hand side.
+- **Sticking update**: Apply the nonsymmetric stylus force column and equality row as one rank-one update.
+- **Contact update**: Solve each active one-wall or two-wall normal Schur system directly.
+- **Dependent-row rule**: Apply no sticking update when the row is dependent.
+- **Compatibility rule**: Keep the existing runtime right-hand-side compatibility test for a dependent row.
+
+For base matrix `A0`, base right-hand side `b`, and base result `u`:
+
+```text
+u = inverse(A0) * b
+```
+
+For independent sticking force column `c`, equality row `h`, and equality target `s`:
+
+```text
+y   = inverse(A0) * c
+D   = h * y
+phi = (h * u - s) / D
+u   = u - y * phi
+```
+
+For active normal force columns `G`, gap rows `H`, and gap targets `q`:
+
+```text
+Y      = inverse(A_stick) * G
+W      = H * Y
+v      = H * u - q
+lambda = inverse(W) * v
+u      = u - Y * lambda
+```
+
+Use these direct normal solves:
+
+```text
+one wall:
+lambda0 = v0 / W00
+
+two walls:
+det     = W00 * W11 - W01 * W10
+lambda0 = (v0 * W11 - W01 * v1) / det
+lambda1 = (W00 * v1 - v0 * W10) / det
+```
+
+- **Layout rule**: Insert normal multipliers before static multipliers in the production solution layout.
+- **Sign rule**: Do not transpose `h` to make `c`. The two operators are not symmetric.
+- **Candidate rule**: Keep the existing production candidate checks after the block solve.
+- **New guard**: Add one rigorous point residual and forward-error enclosure before branch acceptance.
+- **Scale rule**: Give each proof leaf fixed power-of-two row and column scales.
+- **Identity rule**: Bind every signed scale exponent to the proof identity.
+
+For `S = R * A * C`, let the proof supply `beta >= norm_inf(inverse(S))`.
+
+At runtime, use the actual finite `A`, `b`, and calculated `x_hat`:
+
+```text
+r        = b - A * x_hat
+rho      = norm_inf(R * r)
+e_scaled = beta * rho
+error_j  = abs(C_j) * e_scaled
+```
+
+- **Point-interval rule**: Calculate `r` with outward point intervals and explicit operation order.
+- **No-RHS-bound result**: This calculation covers the actual right-hand side without a global right-hand-side limit.
+- **Finite rule**: Reject overflow, underflow in an exact scale, or an unbounded interval.
+- **Backward-error rule**: Require a rigorous upper bound no greater than `1e-10`.
+- **Forward-error rule**: Require every component interval `[x_hat - error, x_hat + error]` to remain finite.
+- **Point-guard rule**: Every existing branch guard must pass at `x_hat`.
+- **Interval-guard rule**: Every branch guard must also pass over the complete solution enclosure.
+- **Guard scope**: Check gaps, forces, velocity signs, friction limits, power, and separation tolerances.
+- **Ambiguity rule**: Reject a branch when its enclosure crosses a guard boundary.
+- **Enumeration rule**: Continue the existing deterministic branch order after one branch rejects.
+- **Transaction rule**: Change deck and pickup state only after both point and interval guards pass.
+- **Failure rule**: If all branches reject, return the existing no-consistent-mode error.
+- **Output rule**: A failed sample must not change state or output.
+- **Floating contract**: Require IEEE-754 binary64 with round-to-nearest and ties-to-even.
+- **Underflow contract**: Require gradual underflow and reject unsupported target behavior.
+- **FMA contract**: Use fused `mul_add` only at specified operations.
+- **Proof scope**: This design proves numerical containment for one fixed mode and one-contact model.
+- **Exclusion**: It does not prove hybrid uniqueness, multiple contact, tracing uniqueness, or material fidelity.
+- **Possible error**: Point residual intervals can still become too wide for extreme valid right-hand sides.
+- **Disproof test**: Use huge finite right-hand sides and require certification or transactional rejection.
 
 ### Playback Configuration Identity Checkpoint
 

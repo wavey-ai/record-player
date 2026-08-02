@@ -4,17 +4,20 @@ use thiserror::Error;
 
 use super::contact::{
     coupled_fixed_contact_families, coupled_fixed_mechanical_modes,
-    coupled_fixed_mode_normal_response, fixed_stylus_constraint_relation,
+    coupled_fixed_mode_normal_response, coupled_fixed_solve_only_response,
+    coupled_fixed_solve_only_subjects, fixed_stylus_constraint_relation,
     groove_friction_geometry_is_well_conditioned,
     interior_spiral_origin_shift_per_record_velocity_m_s, stylus_sticking_equality_row,
     stylus_sticking_force_column, CoupledFixedContactFamily, CoupledFixedContactPoint,
     CoupledFixedContactSurface, CoupledFixedDynamicMobility, CoupledFixedEqualityDiagnostics,
     CoupledFixedMechanicalMode, CoupledFixedModeInfeasibility, CoupledFixedModeKktLhs,
-    CoupledFixedModeResponseError, CoupledFixedOriginLaw, FixedStylusConstraintRelation,
-    JointDynamicEquation, JointDynamicVelocity, StylusTangentialMode,
-    COUPLED_FIXED_CONTACT_FAMILY_COUNT, COUPLED_FIXED_MECHANICAL_CLASS_COUNT,
-    COUPLED_FIXED_MODE_FAMILY_SET_VERSION, COUPLED_FIXED_MODE_OPERATOR_VERSION,
-    JOINT_DYNAMIC_EQUATIONS, JOINT_DYNAMIC_VELOCITIES,
+    CoupledFixedModeResponseError, CoupledFixedOriginLaw, CoupledFixedPickupSupport,
+    CoupledFixedSolveOnlySubject, FixedStylusConstraintRelation, JointDynamicEquation,
+    JointDynamicVelocity, StylusTangentialMode, COUPLED_FIXED_CONTACT_FAMILY_COUNT,
+    COUPLED_FIXED_MECHANICAL_CLASS_COUNT, COUPLED_FIXED_MODE_FAMILY_SET_VERSION,
+    COUPLED_FIXED_MODE_OPERATOR_VERSION, COUPLED_FIXED_SOLVE_ONLY_SUBJECT_COUNT,
+    COUPLED_FIXED_SOLVE_ONLY_SUBJECT_SET_VERSION, JOINT_DYNAMIC_EQUATIONS,
+    JOINT_DYNAMIC_VELOCITIES,
 };
 use super::verified_interval::{OutwardInterval, OutwardIntervalError};
 use super::{PhysicalPlaybackConfig, PhysicalPlaybackConfigIdentity, PhysicalProfileError};
@@ -28,6 +31,7 @@ const REFERENCE_RELATIVE_PIVOT_FACTOR: f64 = 128.0;
 
 /// Identifies the point-solve certificate format.
 pub(crate) const FIXED_MODE_POINT_MOBILITY_CERTIFICATE_VERSION: u32 = 2;
+pub(crate) const FIXED_MODE_SOLVE_ONLY_MOBILITY_CERTIFICATE_VERSION: u32 = 1;
 pub(crate) const FIXED_MODE_CONTACT_BOX_CERTIFICATE_VERSION: u32 = 1;
 
 /// Contains outward enclosures of one dynamic mobility matrix.
@@ -91,6 +95,66 @@ pub(crate) struct VerifiedFixedBaseMobilityCatalog {
     pub(crate) config_sha256: [u8; 32],
     pub(crate) point: CoupledFixedContactPoint,
     pub(crate) systems: [VerifiedFixedBaseMobility; COUPLED_FIXED_MECHANICAL_CLASS_COUNT],
+}
+
+/// Contains one verified lowered or cue-supported mobility.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct VerifiedFixedSolveOnlyMobility {
+    pub(crate) subject: CoupledFixedSolveOnlySubject,
+    pub(crate) kkt_lhs: CoupledFixedModeKktLhs,
+    pub(crate) equality: CoupledFixedEqualityDiagnostics,
+    pub(crate) reference_mobility: CoupledFixedDynamicMobility,
+    pub(crate) verified_mobility: VerifiedFixedDynamicMobility,
+    pub(crate) diagnostics: VerifiedBaseKktDiagnostics,
+}
+
+/// Contains all 48 source-independent lowered and cue-supported systems.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct VerifiedFixedSolveOnlyMobilityCatalog {
+    pub(crate) certificate_version: u32,
+    pub(crate) operator_version: u32,
+    pub(crate) subject_set_version: u32,
+    pub(crate) config_identity: PhysicalPlaybackConfigIdentity,
+    pub(crate) config_identity_version: u32,
+    pub(crate) config_sha256: [u8; 32],
+    pub(crate) systems: [VerifiedFixedSolveOnlyMobility; COUPLED_FIXED_SOLVE_ONLY_SUBJECT_COUNT],
+}
+
+impl VerifiedFixedSolveOnlyMobilityCatalog {
+    fn metadata_is_valid(&self) -> bool {
+        self.certificate_version == FIXED_MODE_SOLVE_ONLY_MOBILITY_CERTIFICATE_VERSION
+            && self.operator_version == COUPLED_FIXED_MODE_OPERATOR_VERSION
+            && self.subject_set_version == COUPLED_FIXED_SOLVE_ONLY_SUBJECT_SET_VERSION
+            && self.config_identity_version == self.config_identity.identity_version()
+            && self.config_sha256 == self.config_identity.sha256()
+    }
+
+    /// Gets a verified subject when its catalog label is valid.
+    pub(crate) fn get(
+        &self,
+        subject: CoupledFixedSolveOnlySubject,
+    ) -> Option<&VerifiedFixedSolveOnlyMobility> {
+        if !self.metadata_is_valid()
+            || subject.subject_set_version() != COUPLED_FIXED_SOLVE_ONLY_SUBJECT_SET_VERSION
+        {
+            return None;
+        }
+        self.systems.iter().find(|system| system.subject == subject)
+    }
+
+    /// Gets the lowered no-contact system for one mechanical class.
+    pub(crate) fn lowered_base(
+        &self,
+        mechanical: CoupledFixedMechanicalMode,
+    ) -> Option<&VerifiedFixedSolveOnlyMobility> {
+        if !self.metadata_is_valid() {
+            return None;
+        }
+        self.systems.iter().find(|system| {
+            system.subject.mechanical == mechanical
+                && system.subject.support == CoupledFixedPickupSupport::LoweredNoContact
+        })
+    }
 }
 
 /// Contains one closed radius-and-slope domain.
@@ -323,6 +387,46 @@ pub(crate) enum FixedModePointMobilityCertificateError {
     },
 }
 
+/// Reports why the solve-only mobility catalog could not be verified.
+#[derive(Debug, Error)]
+pub(crate) enum FixedModeSolveOnlyMobilityCertificateError {
+    #[error(transparent)]
+    InvalidConfig(#[from] PhysicalProfileError),
+    #[error("the fixed-mode catalog does not contain the required 48 solve-only subjects")]
+    InvalidCatalog,
+    #[error("the solve-only builder failed for subject {subject_index}")]
+    SubjectBuilder {
+        subject_index: usize,
+        #[source]
+        source: CoupledFixedModeResponseError,
+    },
+    #[error(
+        "the verified KKT solve failed for subject {subject_index}, equation {equation_index}"
+    )]
+    KktSolve {
+        subject_index: usize,
+        equation_index: usize,
+        #[source]
+        source: VerifiedPointKktError,
+    },
+    #[error(
+        "the verified solve path changed between right-hand sides for subject {subject_index}"
+    )]
+    InconsistentSolvePath { subject_index: usize },
+    #[error("the point replay differs from production for subject {subject_index}, velocity {velocity_index}, equation {equation_index}")]
+    ProductionReplayMismatch {
+        subject_index: usize,
+        velocity_index: usize,
+        equation_index: usize,
+    },
+    #[error("the verified mobility does not contain production for subject {subject_index}, velocity {velocity_index}, equation {equation_index}")]
+    ProductionNotEnclosed {
+        subject_index: usize,
+        velocity_index: usize,
+        equation_index: usize,
+    },
+}
+
 /// Reports why one scaled point system could not be verified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub(crate) enum VerifiedPointKktError {
@@ -405,6 +509,53 @@ pub(crate) fn verify_fixed_base_mobilities_at_point(
         config_identity_version: config_identity.identity_version(),
         config_sha256: config_identity.sha256(),
         point,
+        systems,
+    })
+}
+
+/// Verifies all 48 source-independent lowered and cue-supported systems.
+pub(crate) fn verify_fixed_solve_only_mobilities(
+    config: PhysicalPlaybackConfig,
+) -> Result<VerifiedFixedSolveOnlyMobilityCatalog, FixedModeSolveOnlyMobilityCertificateError> {
+    let config_identity = config.identity()?;
+    if coupled_fixed_mechanical_modes().count() != COUPLED_FIXED_MECHANICAL_CLASS_COUNT
+        || coupled_fixed_solve_only_subjects().count() != COUPLED_FIXED_SOLVE_ONLY_SUBJECT_COUNT
+    {
+        return Err(FixedModeSolveOnlyMobilityCertificateError::InvalidCatalog);
+    }
+
+    let mut systems = Vec::with_capacity(COUPLED_FIXED_SOLVE_ONLY_SUBJECT_COUNT);
+    for (subject_index, subject) in coupled_fixed_solve_only_subjects().enumerate() {
+        let response = coupled_fixed_solve_only_response(config, subject).map_err(|source| {
+            FixedModeSolveOnlyMobilityCertificateError::SubjectBuilder {
+                subject_index,
+                source,
+            }
+        })?;
+        if subject.subject_set_version() != COUPLED_FIXED_SOLVE_ONLY_SUBJECT_SET_VERSION
+            || response.operator_version != COUPLED_FIXED_MODE_OPERATOR_VERSION
+            || response.subject != subject
+        {
+            return Err(FixedModeSolveOnlyMobilityCertificateError::InvalidCatalog);
+        }
+        systems.push(verify_solve_only_mobility(
+            subject_index,
+            subject,
+            response.kkt_lhs,
+            response.equality,
+            response.dynamic_mobility,
+        )?);
+    }
+    let systems = systems
+        .try_into()
+        .map_err(|_| FixedModeSolveOnlyMobilityCertificateError::InvalidCatalog)?;
+    Ok(VerifiedFixedSolveOnlyMobilityCatalog {
+        certificate_version: FIXED_MODE_SOLVE_ONLY_MOBILITY_CERTIFICATE_VERSION,
+        operator_version: COUPLED_FIXED_MODE_OPERATOR_VERSION,
+        subject_set_version: COUPLED_FIXED_SOLVE_ONLY_SUBJECT_SET_VERSION,
+        config_identity,
+        config_identity_version: config_identity.identity_version(),
+        config_sha256: config_identity.sha256(),
         systems,
     })
 }
@@ -1000,24 +1151,81 @@ fn verify_base_mobility(
     base_family: CoupledFixedContactFamily,
     production_mobility: CoupledFixedDynamicMobility,
 ) -> Result<VerifiedFixedBaseMobility, FixedModePointMobilityCertificateError> {
+    let verified = verify_mobility(kkt_lhs, production_mobility)
+        .map_err(|error| map_base_mobility_error(mechanical_class_index, error))?;
+    Ok(VerifiedFixedBaseMobility {
+        mechanical,
+        base_family,
+        kkt_lhs,
+        equality,
+        reference_mobility: production_mobility,
+        verified_mobility: verified.mobility,
+        diagnostics: verified.diagnostics,
+    })
+}
+
+fn verify_solve_only_mobility(
+    subject_index: usize,
+    subject: CoupledFixedSolveOnlySubject,
+    kkt_lhs: CoupledFixedModeKktLhs,
+    equality: CoupledFixedEqualityDiagnostics,
+    production_mobility: CoupledFixedDynamicMobility,
+) -> Result<VerifiedFixedSolveOnlyMobility, FixedModeSolveOnlyMobilityCertificateError> {
+    let verified = verify_mobility(kkt_lhs, production_mobility)
+        .map_err(|error| map_solve_only_mobility_error(subject_index, error))?;
+    Ok(VerifiedFixedSolveOnlyMobility {
+        subject,
+        kkt_lhs,
+        equality,
+        reference_mobility: production_mobility,
+        verified_mobility: verified.mobility,
+        diagnostics: verified.diagnostics,
+    })
+}
+
+#[derive(Debug)]
+enum MobilityVerificationError {
+    InvalidCatalog,
+    KktSolve {
+        equation_index: usize,
+        source: VerifiedPointKktError,
+    },
+    InconsistentSolvePath,
+    ProductionReplayMismatch {
+        velocity_index: usize,
+        equation_index: usize,
+    },
+    ProductionNotEnclosed {
+        velocity_index: usize,
+        equation_index: usize,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct VerifiedMobility {
+    mobility: VerifiedFixedDynamicMobility,
+    diagnostics: VerifiedBaseKktDiagnostics,
+}
+
+fn verify_mobility(
+    kkt_lhs: CoupledFixedModeKktLhs,
+    production_mobility: CoupledFixedDynamicMobility,
+) -> Result<VerifiedMobility, MobilityVerificationError> {
     if kkt_lhs.system_size < DYNAMIC_VARIABLE_COUNT
         || kkt_lhs.system_size > KKT_CAPACITY
         || kkt_lhs.equality_count != kkt_lhs.system_size - DYNAMIC_VARIABLE_COUNT
     {
-        return Err(FixedModePointMobilityCertificateError::KktSolve {
-            mechanical_class_index,
+        return Err(MobilityVerificationError::KktSolve {
             equation_index: 0,
             source: VerifiedPointKktError::InvalidSize,
         });
     }
 
-    let zero = OutwardInterval::point(0.0).map_err(|source| {
-        FixedModePointMobilityCertificateError::KktSolve {
-            mechanical_class_index,
+    let zero =
+        OutwardInterval::point(0.0).map_err(|source| MobilityVerificationError::KktSolve {
             equation_index: 0,
             source: source.into(),
-        }
-    })?;
+        })?;
     let mut verified_mobility = VerifiedFixedDynamicMobility {
         velocity_by_equation_rhs: [[zero; DYNAMIC_VARIABLE_COUNT]; DYNAMIC_VARIABLE_COUNT],
     };
@@ -1029,19 +1237,14 @@ fn verify_base_mobility(
         let mut rhs = [0.0; KKT_CAPACITY];
         rhs[equation_index] = 1.0;
         let solved = verify_point_kkt_system(kkt_lhs.coefficients, kkt_lhs.system_size, rhs)
-            .map_err(|source| FixedModePointMobilityCertificateError::KktSolve {
-                mechanical_class_index,
+            .map_err(|source| MobilityVerificationError::KktSolve {
                 equation_index,
                 source,
             })?;
         let path = VerifiedEliminationPath::from(solved.diagnostics);
         if let Some(expected) = common_path {
             if expected != path {
-                return Err(
-                    FixedModePointMobilityCertificateError::InconsistentSolvePath {
-                        mechanical_class_index,
-                    },
-                );
+                return Err(MobilityVerificationError::InconsistentSolvePath);
             }
         } else {
             common_path = Some(path);
@@ -1053,38 +1256,105 @@ fn verify_base_mobility(
             let production = production_mobility.coefficient(velocity, equation);
             let replay = solved.reference_solution[velocity_index];
             if replay.to_bits() != production.to_bits() {
-                return Err(
-                    FixedModePointMobilityCertificateError::ProductionReplayMismatch {
-                        mechanical_class_index,
-                        velocity_index,
-                        equation_index,
-                    },
-                );
+                return Err(MobilityVerificationError::ProductionReplayMismatch {
+                    velocity_index,
+                    equation_index,
+                });
             }
             let enclosure = solved.solution[velocity_index];
             if !enclosure.contains(production) {
-                return Err(
-                    FixedModePointMobilityCertificateError::ProductionNotEnclosed {
-                        mechanical_class_index,
-                        velocity_index,
-                        equation_index,
-                    },
-                );
+                return Err(MobilityVerificationError::ProductionNotEnclosed {
+                    velocity_index,
+                    equation_index,
+                });
             }
             verified_mobility.velocity_by_equation_rhs[velocity_index][equation_index] = enclosure;
         }
     }
 
-    let path = common_path.ok_or(FixedModePointMobilityCertificateError::InvalidCatalog)?;
-    Ok(VerifiedFixedBaseMobility {
-        mechanical,
-        base_family,
-        kkt_lhs,
-        equality,
-        reference_mobility: production_mobility,
-        verified_mobility,
+    let path = common_path.ok_or(MobilityVerificationError::InvalidCatalog)?;
+    Ok(VerifiedMobility {
+        mobility: verified_mobility,
         diagnostics: aggregate.finish(kkt_lhs.equality_count, path),
     })
+}
+
+fn map_base_mobility_error(
+    mechanical_class_index: usize,
+    error: MobilityVerificationError,
+) -> FixedModePointMobilityCertificateError {
+    match error {
+        MobilityVerificationError::InvalidCatalog => {
+            FixedModePointMobilityCertificateError::InvalidCatalog
+        }
+        MobilityVerificationError::KktSolve {
+            equation_index,
+            source,
+        } => FixedModePointMobilityCertificateError::KktSolve {
+            mechanical_class_index,
+            equation_index,
+            source,
+        },
+        MobilityVerificationError::InconsistentSolvePath => {
+            FixedModePointMobilityCertificateError::InconsistentSolvePath {
+                mechanical_class_index,
+            }
+        }
+        MobilityVerificationError::ProductionReplayMismatch {
+            velocity_index,
+            equation_index,
+        } => FixedModePointMobilityCertificateError::ProductionReplayMismatch {
+            mechanical_class_index,
+            velocity_index,
+            equation_index,
+        },
+        MobilityVerificationError::ProductionNotEnclosed {
+            velocity_index,
+            equation_index,
+        } => FixedModePointMobilityCertificateError::ProductionNotEnclosed {
+            mechanical_class_index,
+            velocity_index,
+            equation_index,
+        },
+    }
+}
+
+fn map_solve_only_mobility_error(
+    subject_index: usize,
+    error: MobilityVerificationError,
+) -> FixedModeSolveOnlyMobilityCertificateError {
+    match error {
+        MobilityVerificationError::InvalidCatalog => {
+            FixedModeSolveOnlyMobilityCertificateError::InvalidCatalog
+        }
+        MobilityVerificationError::KktSolve {
+            equation_index,
+            source,
+        } => FixedModeSolveOnlyMobilityCertificateError::KktSolve {
+            subject_index,
+            equation_index,
+            source,
+        },
+        MobilityVerificationError::InconsistentSolvePath => {
+            FixedModeSolveOnlyMobilityCertificateError::InconsistentSolvePath { subject_index }
+        }
+        MobilityVerificationError::ProductionReplayMismatch {
+            velocity_index,
+            equation_index,
+        } => FixedModeSolveOnlyMobilityCertificateError::ProductionReplayMismatch {
+            subject_index,
+            velocity_index,
+            equation_index,
+        },
+        MobilityVerificationError::ProductionNotEnclosed {
+            velocity_index,
+            equation_index,
+        } => FixedModeSolveOnlyMobilityCertificateError::ProductionNotEnclosed {
+            subject_index,
+            velocity_index,
+            equation_index,
+        },
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1663,6 +1933,82 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn all_48_solve_only_mobilities_are_verified_and_lookup_is_exact() {
+        let config = seed_config();
+        let catalog = verify_fixed_solve_only_mobilities(config).unwrap();
+        let subjects: Vec<_> = coupled_fixed_solve_only_subjects().collect();
+        assert_eq!(
+            catalog.certificate_version,
+            FIXED_MODE_SOLVE_ONLY_MOBILITY_CERTIFICATE_VERSION
+        );
+        assert_eq!(
+            catalog.subject_set_version,
+            COUPLED_FIXED_SOLVE_ONLY_SUBJECT_SET_VERSION
+        );
+        assert_eq!(
+            catalog.systems.len(),
+            COUPLED_FIXED_SOLVE_ONLY_SUBJECT_COUNT
+        );
+        assert_eq!(catalog.config_identity, config.identity().unwrap());
+        assert_eq!(catalog.config_identity_version, 1);
+        assert_eq!(catalog.config_sha256, catalog.config_identity.sha256());
+        for (index, system) in catalog.systems.iter().enumerate() {
+            assert_eq!(system.subject, subjects[index]);
+            assert_eq!(catalog.get(subjects[index]), Some(system));
+            let production_pivot_tolerance = REFERENCE_RELATIVE_PIVOT_FACTOR
+                * f64::EPSILON
+                * system.diagnostics.system_size as f64;
+            assert!(system.diagnostics.minimum_verified_scaled_pivot > production_pivot_tolerance);
+            for velocity in JOINT_DYNAMIC_VELOCITIES {
+                for equation in JOINT_DYNAMIC_EQUATIONS {
+                    let production = system.reference_mobility.coefficient(velocity, equation);
+                    assert!(system
+                        .verified_mobility
+                        .coefficient(velocity, equation)
+                        .contains(production));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn solve_only_lowered_lookup_matches_the_existing_base_bits() {
+        let config = seed_config();
+        let point = CoupledFixedContactPoint {
+            groove_radius_m: config.groove.inner_program_radius_m,
+            wall_slopes: [0.0; 2],
+        };
+        let base = verify_fixed_base_mobilities_at_point(config, point).unwrap();
+        let solve_only = verify_fixed_solve_only_mobilities(config).unwrap();
+        for base_system in base.systems {
+            let lowered = solve_only.lowered_base(base_system.mechanical).unwrap();
+            assert_eq!(
+                lowered.subject.support,
+                CoupledFixedPickupSupport::LoweredNoContact
+            );
+            assert_eq!(lowered.kkt_lhs, base_system.kkt_lhs);
+            assert_eq!(lowered.equality, base_system.equality);
+            assert_eq!(lowered.reference_mobility, base_system.reference_mobility);
+            assert_eq!(lowered.verified_mobility, base_system.verified_mobility);
+            assert_eq!(lowered.diagnostics, base_system.diagnostics);
+        }
+    }
+
+    #[test]
+    fn repeated_solve_only_catalog_verification_is_deterministic() {
+        let config = seed_config();
+        let first = verify_fixed_solve_only_mobilities(config).unwrap();
+        let second = verify_fixed_solve_only_mobilities(config).unwrap();
+        assert_eq!(first, second);
+
+        let subject = coupled_fixed_solve_only_subjects().next().unwrap();
+        let mut invalid = first;
+        invalid.certificate_version += 1;
+        assert!(invalid.get(subject).is_none());
+        assert!(invalid.lowered_base(subject.mechanical).is_none());
     }
 
     #[test]
