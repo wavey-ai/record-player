@@ -69,3 +69,51 @@ The application must report that diagnostic from a non-audio thread. It must the
 The report does not prove an out-of-memory failure. The report also does not prove a SwiftUI or application lifecycle failure.
 
 The report does not prove that deck mechanics caused the first panic. Keep the callback recovery even if later evidence identifies another invariant.
+
+## Incident IOS-2026-08-02-1652
+
+### Report identity
+
+- The TestFlight feedback comment is `1652`.
+- The feedback identifier is `AGMZ1FuxDGkhZ9X5ms66lkQ`.
+- The incident identifier is `71316197-F176-4A4C-ABE2-11C0821A273C`.
+- The application version is `1.0 (22)`.
+- The device is an iPhone 13 mini.
+- The operating system is iOS 26.5.2.
+- The crash occurred at 2026-08-02 16:52:32 Europe/London.
+
+### User action
+
+Playback was active. The user changed the record format from 45 to LP.
+
+The application must support this action. A user can change design controls while listening to the record.
+
+### Confirmed evidence
+
+The process received `SIGABRT` on audio render thread 12. The callback requested stereo planar program audio.
+
+The archived dSYM matches the application image. Symbolication identifies the same native render function as the 15:56 incident.
+
+The Rust stack contains `panic_in_cleanup`. It also contains allocation and symbol-map frames from panic reporting.
+
+The Rust default panic reporter ran on the real-time audio thread. That reporter tried to allocate and symbolize a backtrace.
+
+The reporting path failed during panic cleanup. The process aborted before the original panic message reached the application.
+
+### Correction
+
+The native boundary now marks each guarded render call with thread-local state. The panic hook writes the first diagnostic into fixed memory.
+
+The hook does not call the default reporter during a guarded render. Non-render Rust panics keep the normal reporter.
+
+The boundary catches the render panic and emits silence for that quantum. A non-audio timer reads the retained diagnostic.
+
+The application saves the diagnostic before it stops. The final failure message contains the Rust message and source location.
+
+The deck correction remains necessary. A format change can alter motor controls while the powered brake tail is active.
+
+### Remaining evidence gap
+
+The report still does not contain the original Rust panic message. It cannot confirm the first failed invariant.
+
+The next TestFlight build must identify that invariant if the format change still fails.
