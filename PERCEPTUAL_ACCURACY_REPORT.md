@@ -127,6 +127,23 @@ This constructed counterexample is not a measured default-playback error.
 
 The tests do not prove a preferred or more realistic sound.
 
+### Needle-Lift Foley
+
+- **Output-changing**: Yes during a lift event.
+- **Default active**: Yes when surface effects are active.
+- **Expected relevance**: Medium for interaction realism.
+- **Listening evidence**: None.
+
+The canonical engine now produces a lighter thump and short crackle burst during needle lift.
+
+This behavior previously existed only in the native vendored copy.
+
+The migration removes that engine divergence.
+
+The gains are estimates and do not identify current hardware.
+
+Therefore, this change improves event continuity but does not prove hardware accuracy.
+
 ### Reciprocal Cartridge Coil Coupling
 
 - **Commit**: `6791e90`.

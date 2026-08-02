@@ -62,6 +62,7 @@ const NEEDLE_DROP_BURST_SECONDS: f64 = 0.34;
 const NEEDLE_DROP_BURST_FILTER_HZ: f64 = 6200.0;
 const NEEDLE_DROP_BURST_FILTER_Q: f64 = 0.5;
 const NEEDLE_DROP_THUMP_GAIN: f64 = 0.045;
+const NEEDLE_LIFT_THUMP_GAIN: f64 = 0.022;
 pub const SURFACE_REGION_LEAD_IN: u8 = 0;
 pub const SURFACE_REGION_DEADWAX: u8 = 1;
 
@@ -1629,6 +1630,31 @@ impl ScratchAcousticDsp {
             position: offset * self.surface_asset_rate,
             elapsed_frames: 0.0,
             peak: LEAD_IN_STATIC_GAIN * 1.9 * self.surface_gain_multiplier,
+            filters: [filter, filter],
+        });
+    }
+
+    /// Starts a lighter stylus-release thump and a short crackle burst.
+    #[wasm_bindgen(js_name = triggerNeedleLift)]
+    pub fn trigger_needle_lift(&mut self) {
+        if !self.config.surface_enabled {
+            return;
+        }
+        self.needle_thump = Some(NeedleThump {
+            elapsed_seconds: 0.0,
+            phase: 0.0,
+            gain: NEEDLE_LIFT_THUMP_GAIN * self.surface_gain_multiplier,
+        });
+        let (offset, _) = self.select_surface_sample(NEEDLE_DROP_BURST_SECONDS);
+        let filter = BiquadLowpass::new(
+            NEEDLE_DROP_BURST_FILTER_HZ,
+            NEEDLE_DROP_BURST_FILTER_Q,
+            self.output_sample_rate,
+        );
+        self.needle_burst = Some(SurfaceBurst {
+            position: offset * self.surface_asset_rate,
+            elapsed_frames: 0.0,
+            peak: LEAD_IN_STATIC_GAIN * 0.8 * self.surface_gain_multiplier,
             filters: [filter, filter],
         });
     }
@@ -3606,6 +3632,19 @@ mod tests {
                 .any(|sample| sample.abs() > 1e-7),
             "synthetic crackle burst should outlive the 100 ms thump"
         );
+    }
+
+    #[test]
+    fn needle_lift_foley_remains_audible_while_programme_is_silent() {
+        let mut lift = simulation_dsp();
+        lift.set_needle_lifted(true);
+        lift.trigger_needle_lift();
+        lift.render_surface(4_096, 2);
+        assert!(lift.output.iter().any(|sample| sample.abs() > 1e-7));
+        assert!(lift
+            .output
+            .iter()
+            .all(|sample| sample.is_finite() && (-1.0..=1.0).contains(sample)));
     }
 
     #[test]

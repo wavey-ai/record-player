@@ -34,8 +34,8 @@ Store exact fixtures, artifacts, error bounds, and reproduction commands in `PHY
 
 Use this ledger to track requirements across the chronological findings.
 
-- **RP-001 — Canonical source**: Keep all player physics in the top-level `record-player` crate. **Status**: In progress.
-- **RP-002 — Consumer boundary**: Make Swift and other hosts depend on the canonical Rust crate or its generated binary interface. **Status**: In progress.
+- **RP-001 — Canonical source**: Keep all player physics in the top-level `record-player` crate. **Status**: Implemented for active Rust sources.
+- **RP-002 — Consumer boundary**: Make Swift and other hosts depend on the canonical Rust crate or its generated binary interface. **Status**: Implemented in native. Other hosts remain open.
 - **RP-003 — Full replacement**: Remove the previous acoustic heuristics and JavaScript gesture physics. Do not keep a legacy rendering mode. **Status**: Open.
 - **RP-004 — Timed controls**: Apply every control at an exact physical frame. Preserve all ordered gesture samples. **Status**: Implemented in Rust.
 - **RP-005 — Canonical gestures**: Convert raw pointer angle, time, radius, and pressure in Rust. Support bounded travel through repeated reversals. **Status**: Implemented in Rust.
@@ -46,7 +46,7 @@ Use this ledger to track requirements across the chronological findings.
 - **RP-010 — Tip geometry**: Add measured elliptical and line-contact profiles when product profiles require them. **Status**: Open.
 - **RP-011 — Bounded streaming cut**: Cut arbitrary PCM chunks into deterministic, bounded pages with exact restore. **Status**: Implemented in Rust.
 - **RP-012 — Fixed render cache**: Publish complete, identified pages without locks or render-time allocation. Reject stale or corrupt pages. **Status**: Implemented in Rust, WASM, and the browser worklet ingestion path.
-- **RP-013 — Rapid-scratch contact**: Preserve nonlinear contact effects during sustained travel and reversals through plus or minus 20x. **Status**: Open.
+- **RP-013 — Rapid-scratch contact**: Preserve nonlinear contact effects during sustained travel and reversals through plus or minus 20x. **Status**: Bounded correction implemented. Reference convergence remains open.
 - **RP-014 — Output conversion**: Use one stateful, anti-aliased converter from 192 kHz to each supported host rate. **Status**: Implemented in Rust.
 - **RP-015 — Snapshot identity**: Restore bit-identical state only with the exact profile, source, representation, generation, rate, and clock. **Status**: Implemented in Rust.
 - **RP-016 — Browser activation**: Cut pages in a worker, validate them in the worklet, and render with the canonical WASM engine. **Status**: Cache and demand path implemented; canonical programme output remains open.
@@ -62,7 +62,7 @@ Use this ledger to track requirements across the chronological findings.
 - **RP-026 — Material contact**: Add measured wall compliance, speed-dependent friction, temperature, wear, damage, and contamination when required. **Status**: Open.
 - **RP-027 — Reference convergence**: Compare rapid contact with a converged high-rate solver. Register numeric error limits before release. **Status**: In progress.
 - **RP-028 — Device deadlines**: Pass callback, memory, paging, reversal, and throttling tests on each minimum supported device. **Status**: Core tail improved; complete callbacks still fail. See `PVC-003`.
-- **RP-029 — Portable dependency**: Pin native consumers to one published crate or versioned binary artifact. Remove workspace-only path assumptions. **Status**: Open.
+- **RP-029 — Portable dependency**: Pin native consumers to one published crate or versioned binary artifact. Remove workspace-only path assumptions. **Status**: Native pins a private Git commit. Packaged Apple binaries remain open.
 - **RP-030 — Durable page backing**: Retain canonical pages after cache eviction. Serve seeks and prefetch without recutting the record. **Status**: Implemented and tested through the browser worklet; product retention limits remain open.
 - **RP-031 — Three-dimensional contact reduction**: State when independent 45/45 wall envelopes are exact. Add longitudinal and rotational dynamics when profiles require them. **Status**: Reduced rigid-sphere geometry verified; finite-patch and extra dynamics remain open.
 - **RP-032 — Host voltage calibration**: Keep phono output in volts inside physics. Convert volts through an explicit host full-scale boundary. **Status**: Boundary implemented in Rust, C, WASM, and native Swift. Product calibration evidence remains open.
@@ -2682,3 +2682,55 @@ The gate now accepts at most `1e-10` representational rate drift.
 It then clamps the accepted value to exact `20x`.
 
 The gate still rejects a rate excess of `0.001x`.
+
+## 2026-08-02: Native Vendor Removal Audit
+
+### Finding
+
+The native repository imported one complete player snapshot in commit `2149c3d`.
+
+Only commit `c26b67c` changed that vendor after the import.
+
+That commit added `trigger_needle_lift` and one test to the vendored acoustic engine.
+
+The canonical crate did not contain this method.
+
+This difference caused the native adapter to fail after vendor removal.
+
+### Complete History Check
+
+All non-acoustic source blobs from the initial vendor match objects in the canonical repository history.
+
+The initial acoustic snapshot also contains native ownership and replay APIs.
+
+The current canonical acoustic engine contains all those public APIs.
+
+One old acoustic reversal test is absent from the current crate.
+
+Its expected early direction change conflicts with the current rendered-motion rule.
+
+Several old scratch-gate tests and version constants are also absent.
+
+They cover replaced gate algorithms that the product does not retain.
+
+The audit found no other production capability that exists only in the vendor history.
+
+### Migration
+
+The canonical engine now owns the lighter needle-lift thump and crackle burst.
+
+A canonical test verifies finite audible foley when programme audio is silent.
+
+The native repository deletes the complete vendored player tree.
+
+Native Rust pins one exact private `record-player` Git commit.
+
+Swift uses the canonical C interface or the compatibility adapter backed by that crate.
+
+### Limit
+
+The needle-lift foley uses estimated gains and the existing surface asset.
+
+It has no identified hardware recording or listening result.
+
+Do not treat this migration as evidence of hardware accuracy.
