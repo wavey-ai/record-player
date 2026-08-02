@@ -156,3 +156,43 @@ Build 23 also saves the exact first Rust panic diagnostic. App Store Connect mar
 Repeat normal playback and format changes with build 23. Confirm that no equivalent crash occurs.
 
 If build 23 stops, use its saved diagnostic as the primary cause evidence.
+
+## Incident IOS-2026-08-02-1738
+
+### Report identity
+
+- The TestFlight feedback comment is `5:38`.
+- The feedback identifier is `AMLIRq97lJQFLf7qqIO-c68`.
+- The incident identifier is `377776D1-ECEE-4244-A44A-462D88283D6D`.
+- The application version is `1.0 (23)`.
+- The device is an iPhone 13 mini.
+- The operating system is iOS 26.5.2.
+- The crash occurred at 2026-08-02 17:38:32 Europe/London.
+
+### Confirmed evidence
+
+The process received `SIGTRAP` on thread 1. This signal differs from the uncontrolled build 22 `SIGABRT` failures.
+
+The archived dSYM matches the application image. Both UUIDs are `1C9EECD8-9533-31F2-BE7B-566D916EAB02`.
+
+Symbolication identifies `NativeRecordAudioPipeline.pollPlayerInvariantsLocked()`. Build 23 deliberately called Swift `fatalError` after an invariant report.
+
+This result confirms that the Rust panic did not cross the C interface. The native boundary contained the initial failure.
+
+The TestFlight report omits the `fatalError` message. It does not identify a render panic or a deck recovery.
+
+Build 23 saved the exact diagnostic before the trap. The device exposes that JSON file through iOS file sharing.
+
+### Correction
+
+The application now pauses the audio engine after an invariant report. It writes the diagnostic synchronously before it schedules termination.
+
+The application waits one second after the write. It then raises a named exception with the diagnostic identifier and reason.
+
+The named exception is intended to include the reason in the Apple report. A final Swift trap remains as a fallback.
+
+### Remaining evidence gap
+
+Retrieve the saved build 23 diagnostic from the device. It is the primary evidence for the initial invariant failure.
+
+Confirm that the next TestFlight report contains the named exception reason.

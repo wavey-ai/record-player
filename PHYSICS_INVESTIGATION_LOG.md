@@ -156,6 +156,9 @@ Use this ledger to track requirements across the chronological findings.
 - **Decision**: iOS saves the first native diagnostic before it terminates away from the audio callback.
 - **Evidence**: The 17:01 build 22 incident has the same audio-thread panic-reporting signature.
 - **Release**: TestFlight build 23 contains the corrections and has the `VALID` state.
+- **Evidence**: The 17:38 build 23 incident is the deliberate Swift trap after native containment.
+- **Gap**: Apple omitted the saved diagnostic from the build 23 crash report.
+- **Decision**: Pause audio, persist the diagnostic, wait one second, and raise a named exception.
 - **Detail**: See `PRODUCTION_CRASH_INVESTIGATION.md`.
 
 ## 2026-08-01: Repository and History Investigation
