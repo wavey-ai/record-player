@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const SNAPSHOT_VERSION: u32 = 2;
+const SNAPSHOT_VERSION: u32 = 3;
 const MAX_ADVANCE_SECONDS: f64 = 10.0;
 const MAX_GENERATOR_COEFFICIENT_V_S_PER_M: f64 = 1.0e6;
 const MIN_RESISTANCE_OHM: f64 = 1.0e-6;
@@ -12,6 +12,7 @@ const MIN_CAPACITANCE_F: f64 = 1.0e-15;
 const MAX_CAPACITANCE_F: f64 = 1.0;
 const MAX_CHANNEL_SEPARATION_DB: f64 = 200.0;
 const MAX_ABS_CHANNEL_BALANCE_DB: f64 = 24.0;
+const INVERSE_SQRT_2: f64 = std::f64::consts::FRAC_1_SQRT_2;
 
 /// Identifies the source of the generator coefficient.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,6 +21,34 @@ pub enum GeneratorCoefficientSource {
     DirectMeasurement,
     DerivedFromLoadedOutputSpecification,
     UserSupplied,
+}
+
+/// Contains one complex voltage transfer ratio.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CartridgeComplexVoltageRatio {
+    pub real: f64,
+    pub imaginary: f64,
+}
+
+impl CartridgeComplexVoltageRatio {
+    pub fn magnitude(self) -> f64 {
+        self.real.hypot(self.imaginary)
+    }
+
+    pub fn phase_radians(self) -> f64 {
+        self.imaginary.atan2(self.real)
+    }
+}
+
+/// Reports the loaded circuit response before generator-axis mixing.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MovingMagnetCartridgeCircuitFrequencyResponse {
+    /// Rows select load outputs. Columns select generator voltage sources.
+    pub loaded_voltage_per_generator_voltage: [[CartridgeComplexVoltageRatio; 2]; 2],
+    /// Rows select load outputs. Columns select magnet-velocity axes.
+    pub loaded_voltage_per_magnet_velocity_v_s_per_m: [[CartridgeComplexVoltageRatio; 2]; 2],
 }
 
 /// Defines a two-channel moving-magnet cartridge and its electrical load.
@@ -31,12 +60,20 @@ pub struct MovingMagnetCartridgeConfig {
     pub generator_coefficient_source: GeneratorCoefficientSource,
     pub coil_resistance_ohm: f64,
     pub coil_inductance_h: f64,
+    /// Couples the two coil flux linkages.
+    ///
+    /// The signed value selects the winding polarity. Its magnitude must keep
+    /// both common-mode and differential-mode inductances positive.
+    /// A total-separation measurement cannot identify this value separately from generator leakage.
+    #[serde(default)]
+    pub coil_mutual_inductance_h: f64,
     pub load_resistance_ohm: f64,
     pub load_capacitance_f: f64,
     /// Sets the magnitude difference between the two direct channel gains.
     /// A positive value makes the left direct gain larger.
     pub channel_balance_db: f64,
     /// Sets the direct-to-crosstalk voltage ratio for each driven axis.
+    /// Electrical mutual inductance also changes the loaded channel separation.
     pub channel_separation_db: f64,
 }
 
@@ -60,7 +97,9 @@ impl MovingMagnetCartridgeConfig {
             1_000.0,
         );
 
-        // Ortofon specifies 10 mV RMS at 1 kHz and 5 cm/s.
+        // Ortofon specifies 10 mV at 1 kHz and 5 cm/s.
+        // The source does not identify peak or RMS conventions for both values.
+        // This seed preserves the former numeric scale and assumes 5 cm/s RMS.
         // This value refers to the nominal channel before balance variation.
         let generator_coefficient_v_s_per_m = 10.0e-3 / (0.05 * loaded_ratio);
 
@@ -70,6 +109,8 @@ impl MovingMagnetCartridgeConfig {
                 GeneratorCoefficientSource::DerivedFromLoadedOutputSpecification,
             coil_resistance_ohm,
             coil_inductance_h,
+            // Ortofon does not publish this value. Keep the seed uncoupled.
+            coil_mutual_inductance_h: 0.0,
             load_resistance_ohm,
             load_capacitance_f,
             channel_balance_db: 1.0,
@@ -96,6 +137,14 @@ impl MovingMagnetCartridgeConfig {
             MIN_INDUCTANCE_H,
             MAX_INDUCTANCE_H,
         )?;
+        let maximum_mutual_inductance_h = self.coil_inductance_h - MIN_INDUCTANCE_H;
+        if !self.coil_mutual_inductance_h.is_finite()
+            || self.coil_mutual_inductance_h.abs() > maximum_mutual_inductance_h
+        {
+            return Err(MovingMagnetCartridgeConfigError::InvalidMutualInductance {
+                maximum_abs_h: maximum_mutual_inductance_h.max(0.0),
+            });
+        }
         validate_bounded_positive(
             "loadResistanceOhm",
             self.load_resistance_ohm,
@@ -149,21 +198,55 @@ impl MovingMagnetCartridgeConfig {
         self,
         frequency_hz: f64,
     ) -> Result<f64, MovingMagnetCartridgeConfigError> {
+        let response = self.loaded_circuit_frequency_response_at_hz(frequency_hz)?;
+        Ok(response.loaded_voltage_per_generator_voltage[0][0].magnitude())
+    }
+
+    /// Returns the complete complex loaded-circuit transfer matrix.
+    pub fn loaded_circuit_frequency_response_at_hz(
+        self,
+        frequency_hz: f64,
+    ) -> Result<MovingMagnetCartridgeCircuitFrequencyResponse, MovingMagnetCartridgeConfigError>
+    {
         self.validate()?;
         validate_bounded("frequencyHz", frequency_hz, 0.0, f64::MAX)?;
-        let ratio = loaded_voltage_ratio(
+        let loaded_voltage_per_generator_voltage = coupled_loaded_voltage_transfer(
             self.coil_resistance_ohm,
             self.coil_inductance_h,
+            self.coil_mutual_inductance_h,
             self.load_resistance_ohm,
             self.load_capacitance_f,
             frequency_hz,
         );
-        if !ratio.is_finite() {
+        let generator_voltage_per_velocity_v_s_per_m = self.channel_matrix().map(|row| {
+            [
+                self.generator_coefficient_v_s_per_m * row[0],
+                self.generator_coefficient_v_s_per_m * row[1],
+            ]
+        });
+        let loaded_voltage_per_magnet_velocity_v_s_per_m = complex_real_matrix_product(
+            loaded_voltage_per_generator_voltage,
+            generator_voltage_per_velocity_v_s_per_m,
+        );
+        if loaded_voltage_per_generator_voltage
+            .into_iter()
+            .flatten()
+            .chain(
+                loaded_voltage_per_magnet_velocity_v_s_per_m
+                    .into_iter()
+                    .flatten(),
+            )
+            .flat_map(|ratio| [ratio.real, ratio.imaginary])
+            .any(|value| !value.is_finite())
+        {
             return Err(MovingMagnetCartridgeConfigError::InvalidDerivedValue {
-                field: "loadedVoltageRatio",
+                field: "loadedCircuitFrequencyResponse",
             });
         }
-        Ok(ratio)
+        Ok(MovingMagnetCartridgeCircuitFrequencyResponse {
+            loaded_voltage_per_generator_voltage,
+            loaded_voltage_per_magnet_velocity_v_s_per_m,
+        })
     }
 }
 
@@ -239,9 +322,9 @@ pub struct MovingMagnetCartridgeAffineStep {
     duration_seconds: f64,
     generator_voltage_per_velocity_v_s_per_m: [[f64; 2]; 2],
     current_bias_a: [f64; 2],
-    current_per_generator_voltage_a_per_v: [f64; 2],
+    current_per_generator_voltage_a_per_v: [[f64; 2]; 2],
     load_voltage_bias_v: [f64; 2],
-    load_voltage_per_generator_voltage: [f64; 2],
+    load_voltage_per_generator_voltage: [[f64; 2]; 2],
     reaction_force_bias_n: [f64; 2],
     reciprocal_damping_n_s_per_m: [[f64; 2]; 2],
 }
@@ -283,18 +366,14 @@ impl MovingMagnetCartridgeAffineStep {
             self.generator_voltage_per_velocity_v_s_per_m,
             magnet_velocity_m_s,
         );
-        let coil_current_a = [
-            self.current_bias_a[0]
-                + self.current_per_generator_voltage_a_per_v[0] * generator_voltage_v[0],
-            self.current_bias_a[1]
-                + self.current_per_generator_voltage_a_per_v[1] * generator_voltage_v[1],
-        ];
-        let load_output_voltage_v = [
-            self.load_voltage_bias_v[0]
-                + self.load_voltage_per_generator_voltage[0] * generator_voltage_v[0],
-            self.load_voltage_bias_v[1]
-                + self.load_voltage_per_generator_voltage[1] * generator_voltage_v[1],
-        ];
+        let coil_current_response_a = matrix_vector(
+            self.current_per_generator_voltage_a_per_v,
+            generator_voltage_v,
+        );
+        let coil_current_a = add(self.current_bias_a, coil_current_response_a);
+        let load_voltage_response_v =
+            matrix_vector(self.load_voltage_per_generator_voltage, generator_voltage_v);
+        let load_output_voltage_v = add(self.load_voltage_bias_v, load_voltage_response_v);
         let interval_average_generator_voltage_v = [
             0.5 * (self.source.previous_generator_voltage_v[0] + generator_voltage_v[0]),
             0.5 * (self.source.previous_generator_voltage_v[1] + generator_voltage_v[1]),
@@ -382,26 +461,18 @@ impl MovingMagnetCartridge {
         duration_seconds: f64,
     ) -> Result<MovingMagnetCartridgeAffineStep, MovingMagnetCartridgeError> {
         validate_duration(duration_seconds)?;
-        let mut current_bias_a = [0.0; 2];
-        let mut current_per_generator_voltage_a_per_v = [0.0; 2];
-        let mut load_voltage_bias_v = [0.0; 2];
-        let mut load_voltage_per_generator_voltage = [0.0; 2];
-        for channel in 0..2 {
-            let coefficients = trapezoidal_circuit_affine_step(
-                self.config,
-                duration_seconds,
-                self.coil_current_a[channel],
-                self.load_output_voltage_v[channel],
-                self.previous_generator_voltage_v[channel],
-            )
-            .ok_or(MovingMagnetCartridgeError::NumericalFailure)?;
-            current_bias_a[channel] = coefficients.current_bias_a;
-            current_per_generator_voltage_a_per_v[channel] =
-                coefficients.current_per_generator_voltage_a_per_v;
-            load_voltage_bias_v[channel] = coefficients.load_voltage_bias_v;
-            load_voltage_per_generator_voltage[channel] =
-                coefficients.load_voltage_per_generator_voltage;
-        }
+        let circuit = coupled_trapezoidal_circuit_affine_step(
+            self.config,
+            duration_seconds,
+            self.coil_current_a,
+            self.load_output_voltage_v,
+            self.previous_generator_voltage_v,
+        )
+        .ok_or(MovingMagnetCartridgeError::NumericalFailure)?;
+        let current_bias_a = circuit.current_bias_a;
+        let current_per_generator_voltage_a_per_v = circuit.current_per_generator_voltage_a_per_v;
+        let load_voltage_bias_v = circuit.load_voltage_bias_v;
+        let load_voltage_per_generator_voltage = circuit.load_voltage_per_generator_voltage;
 
         let channel_matrix = self.config.channel_matrix();
         let coefficient = self.config.generator_coefficient_v_s_per_m;
@@ -418,11 +489,25 @@ impl MovingMagnetCartridge {
                     * interval_average_current_bias_a;
             }
             for other_axis in 0..2 {
-                for circuit in 0..2 {
-                    reciprocal_damping_n_s_per_m[velocity_axis][other_axis] +=
-                        generator_voltage_per_velocity_v_s_per_m[circuit][velocity_axis]
-                            * (0.5 * current_per_generator_voltage_a_per_v[circuit])
-                            * generator_voltage_per_velocity_v_s_per_m[circuit][other_axis];
+                if self.config.coil_mutual_inductance_h == 0.0 {
+                    for circuit in 0..2 {
+                        reciprocal_damping_n_s_per_m[velocity_axis][other_axis] +=
+                            generator_voltage_per_velocity_v_s_per_m[circuit][velocity_axis]
+                                * (0.5 * current_per_generator_voltage_a_per_v[circuit][circuit])
+                                * generator_voltage_per_velocity_v_s_per_m[circuit][other_axis];
+                    }
+                } else {
+                    for circuit in 0..2 {
+                        for driven_circuit in 0..2 {
+                            reciprocal_damping_n_s_per_m[velocity_axis][other_axis] +=
+                                generator_voltage_per_velocity_v_s_per_m[circuit][velocity_axis]
+                                    * (0.5
+                                        * current_per_generator_voltage_a_per_v[circuit]
+                                            [driven_circuit])
+                                    * generator_voltage_per_velocity_v_s_per_m[driven_circuit]
+                                        [other_axis];
+                        }
+                    }
                 }
             }
         }
@@ -447,9 +532,9 @@ impl MovingMagnetCartridge {
             .into_iter()
             .flatten()
             .chain(current_bias_a)
-            .chain(current_per_generator_voltage_a_per_v)
+            .chain(current_per_generator_voltage_a_per_v.into_iter().flatten())
             .chain(load_voltage_bias_v)
-            .chain(load_voltage_per_generator_voltage)
+            .chain(load_voltage_per_generator_voltage.into_iter().flatten())
             .chain(reaction_force_bias_n)
             .chain(reciprocal_damping_n_s_per_m.into_iter().flatten())
             .any(|value| !value.is_finite())
@@ -541,6 +626,9 @@ impl MovingMagnetCartridge {
                 .into_iter()
                 .map(|value| value * value)
                 .sum::<f64>()
+            + self.config.coil_mutual_inductance_h
+                * self.coil_current_a[0]
+                * self.coil_current_a[1]
             + 0.5
                 * self.config.load_capacitance_f
                 * self
@@ -640,6 +728,9 @@ impl MovingMagnetCartridge {
                 .into_iter()
                 .map(|value| value * value)
                 .sum::<f64>()
+            + config.coil_mutual_inductance_h
+                * snapshot.coil_current_a[0]
+                * snapshot.coil_current_a[1]
             + 0.5
                 * config.load_capacitance_f
                 * snapshot
@@ -700,6 +791,8 @@ pub enum MovingMagnetCartridgeConfigError {
     BelowMinimum { field: &'static str, minimum: f64 },
     #[error("{field} must be finite and at most {maximum}")]
     AboveMaximum { field: &'static str, maximum: f64 },
+    #[error("coil mutual inductance magnitude must be finite and at most {maximum_abs_h} H")]
+    InvalidMutualInductance { maximum_abs_h: f64 },
     #[error("the derived {field} value is invalid")]
     InvalidDerivedValue { field: &'static str },
 }
@@ -732,6 +825,86 @@ struct TrapezoidalCircuitAffineStep {
     load_voltage_per_generator_voltage: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CoupledTrapezoidalCircuitAffineStep {
+    current_bias_a: [f64; 2],
+    current_per_generator_voltage_a_per_v: [[f64; 2]; 2],
+    load_voltage_bias_v: [f64; 2],
+    load_voltage_per_generator_voltage: [[f64; 2]; 2],
+}
+
+fn coupled_trapezoidal_circuit_affine_step(
+    config: MovingMagnetCartridgeConfig,
+    duration_seconds: f64,
+    previous_current_a: [f64; 2],
+    previous_load_voltage_v: [f64; 2],
+    previous_generator_voltage_v: [f64; 2],
+) -> Option<CoupledTrapezoidalCircuitAffineStep> {
+    if config.coil_mutual_inductance_h == 0.0 {
+        let mut current_bias_a = [0.0; 2];
+        let mut current_per_generator_voltage_a_per_v = [[0.0; 2]; 2];
+        let mut load_voltage_bias_v = [0.0; 2];
+        let mut load_voltage_per_generator_voltage = [[0.0; 2]; 2];
+        for channel in 0..2 {
+            let coefficients = trapezoidal_circuit_affine_step(
+                config,
+                duration_seconds,
+                previous_current_a[channel],
+                previous_load_voltage_v[channel],
+                previous_generator_voltage_v[channel],
+            )?;
+            current_bias_a[channel] = coefficients.current_bias_a;
+            current_per_generator_voltage_a_per_v[channel][channel] =
+                coefficients.current_per_generator_voltage_a_per_v;
+            load_voltage_bias_v[channel] = coefficients.load_voltage_bias_v;
+            load_voltage_per_generator_voltage[channel][channel] =
+                coefficients.load_voltage_per_generator_voltage;
+        }
+        return Some(CoupledTrapezoidalCircuitAffineStep {
+            current_bias_a,
+            current_per_generator_voltage_a_per_v,
+            load_voltage_bias_v,
+            load_voltage_per_generator_voltage,
+        });
+    }
+
+    let previous_current_modes_a = to_symmetric_modes(previous_current_a);
+    let previous_load_voltage_modes_v = to_symmetric_modes(previous_load_voltage_v);
+    let previous_generator_voltage_modes_v = to_symmetric_modes(previous_generator_voltage_v);
+    let common = trapezoidal_circuit_affine_step_with_inductance(
+        config,
+        config.coil_inductance_h + config.coil_mutual_inductance_h,
+        duration_seconds,
+        previous_current_modes_a[0],
+        previous_load_voltage_modes_v[0],
+        previous_generator_voltage_modes_v[0],
+    )?;
+    let differential = trapezoidal_circuit_affine_step_with_inductance(
+        config,
+        config.coil_inductance_h - config.coil_mutual_inductance_h,
+        duration_seconds,
+        previous_current_modes_a[1],
+        previous_load_voltage_modes_v[1],
+        previous_generator_voltage_modes_v[1],
+    )?;
+
+    Some(CoupledTrapezoidalCircuitAffineStep {
+        current_bias_a: from_symmetric_modes([common.current_bias_a, differential.current_bias_a]),
+        current_per_generator_voltage_a_per_v: symmetric_modal_matrix(
+            common.current_per_generator_voltage_a_per_v,
+            differential.current_per_generator_voltage_a_per_v,
+        ),
+        load_voltage_bias_v: from_symmetric_modes([
+            common.load_voltage_bias_v,
+            differential.load_voltage_bias_v,
+        ]),
+        load_voltage_per_generator_voltage: symmetric_modal_matrix(
+            common.load_voltage_per_generator_voltage,
+            differential.load_voltage_per_generator_voltage,
+        ),
+    })
+}
+
 fn trapezoidal_circuit_affine_step(
     config: MovingMagnetCartridgeConfig,
     duration_seconds: f64,
@@ -739,9 +912,27 @@ fn trapezoidal_circuit_affine_step(
     previous_load_voltage_v: f64,
     previous_generator_voltage_v: f64,
 ) -> Option<TrapezoidalCircuitAffineStep> {
+    trapezoidal_circuit_affine_step_with_inductance(
+        config,
+        config.coil_inductance_h,
+        duration_seconds,
+        previous_current_a,
+        previous_load_voltage_v,
+        previous_generator_voltage_v,
+    )
+}
+
+fn trapezoidal_circuit_affine_step_with_inductance(
+    config: MovingMagnetCartridgeConfig,
+    coil_inductance_h: f64,
+    duration_seconds: f64,
+    previous_current_a: f64,
+    previous_load_voltage_v: f64,
+    previous_generator_voltage_v: f64,
+) -> Option<TrapezoidalCircuitAffineStep> {
     let half_step = 0.5 * duration_seconds;
-    let resistance_over_inductance = config.coil_resistance_ohm / config.coil_inductance_h;
-    let inverse_inductance = 1.0 / config.coil_inductance_h;
+    let resistance_over_inductance = config.coil_resistance_ohm / coil_inductance_h;
+    let inverse_inductance = 1.0 / coil_inductance_h;
     let inverse_capacitance = 1.0 / config.load_capacitance_f;
     let inverse_load_time_constant = 1.0 / (config.load_resistance_ohm * config.load_capacitance_f);
 
@@ -815,8 +1006,48 @@ fn matrix_vector(matrix: [[f64; 2]; 2], vector: [f64; 2]) -> [f64; 2] {
     ]
 }
 
+fn complex_real_matrix_product(
+    left: [[CartridgeComplexVoltageRatio; 2]; 2],
+    right: [[f64; 2]; 2],
+) -> [[CartridgeComplexVoltageRatio; 2]; 2] {
+    let mut product = [[CartridgeComplexVoltageRatio::default(); 2]; 2];
+    for row in 0..2 {
+        for column in 0..2 {
+            for inner in 0..2 {
+                product[row][column].real += left[row][inner].real * right[inner][column];
+                product[row][column].imaginary += left[row][inner].imaginary * right[inner][column];
+            }
+        }
+    }
+    product
+}
+
+fn add(left: [f64; 2], right: [f64; 2]) -> [f64; 2] {
+    [left[0] + right[0], left[1] + right[1]]
+}
+
 fn subtract(left: [f64; 2], right: [f64; 2]) -> [f64; 2] {
     [left[0] - right[0], left[1] - right[1]]
+}
+
+fn to_symmetric_modes(values: [f64; 2]) -> [f64; 2] {
+    [
+        (values[0] + values[1]) * INVERSE_SQRT_2,
+        (values[0] - values[1]) * INVERSE_SQRT_2,
+    ]
+}
+
+fn from_symmetric_modes(modes: [f64; 2]) -> [f64; 2] {
+    [
+        (modes[0] + modes[1]) * INVERSE_SQRT_2,
+        (modes[0] - modes[1]) * INVERSE_SQRT_2,
+    ]
+}
+
+fn symmetric_modal_matrix(common: f64, differential: f64) -> [[f64; 2]; 2] {
+    let direct = 0.5 * (common + differential);
+    let coupled = 0.5 * (common - differential);
+    [[direct, coupled], [coupled, direct]]
 }
 
 fn loaded_voltage_ratio(
@@ -836,6 +1067,75 @@ fn loaded_voltage_ratio(
     let total_real = coil_resistance_ohm + load_real;
     let total_imaginary = angular_frequency * coil_inductance_h + load_imaginary;
     load_real.hypot(load_imaginary) / total_real.hypot(total_imaginary)
+}
+
+fn coupled_loaded_voltage_transfer(
+    coil_resistance_ohm: f64,
+    coil_inductance_h: f64,
+    coil_mutual_inductance_h: f64,
+    load_resistance_ohm: f64,
+    load_capacitance_f: f64,
+    frequency_hz: f64,
+) -> [[CartridgeComplexVoltageRatio; 2]; 2] {
+    if coil_mutual_inductance_h == 0.0 {
+        let direct = loaded_voltage_complex_ratio(
+            coil_resistance_ohm,
+            coil_inductance_h,
+            load_resistance_ohm,
+            load_capacitance_f,
+            frequency_hz,
+        );
+        return [
+            [direct, CartridgeComplexVoltageRatio::default()],
+            [CartridgeComplexVoltageRatio::default(), direct],
+        ];
+    }
+    let common = loaded_voltage_complex_ratio(
+        coil_resistance_ohm,
+        coil_inductance_h + coil_mutual_inductance_h,
+        load_resistance_ohm,
+        load_capacitance_f,
+        frequency_hz,
+    );
+    let differential = loaded_voltage_complex_ratio(
+        coil_resistance_ohm,
+        coil_inductance_h - coil_mutual_inductance_h,
+        load_resistance_ohm,
+        load_capacitance_f,
+        frequency_hz,
+    );
+    let direct = CartridgeComplexVoltageRatio {
+        real: 0.5 * (common.real + differential.real),
+        imaginary: 0.5 * (common.imaginary + differential.imaginary),
+    };
+    let coupled = CartridgeComplexVoltageRatio {
+        real: 0.5 * (common.real - differential.real),
+        imaginary: 0.5 * (common.imaginary - differential.imaginary),
+    };
+    [[direct, coupled], [coupled, direct]]
+}
+
+fn loaded_voltage_complex_ratio(
+    coil_resistance_ohm: f64,
+    coil_inductance_h: f64,
+    load_resistance_ohm: f64,
+    load_capacitance_f: f64,
+    frequency_hz: f64,
+) -> CartridgeComplexVoltageRatio {
+    let angular_frequency = std::f64::consts::TAU * frequency_hz;
+    let load_conductance = 1.0 / load_resistance_ohm;
+    let load_susceptance = angular_frequency * load_capacitance_f;
+    let admittance_magnitude_squared =
+        load_conductance * load_conductance + load_susceptance * load_susceptance;
+    let load_real = load_conductance / admittance_magnitude_squared;
+    let load_imaginary = -load_susceptance / admittance_magnitude_squared;
+    let total_real = coil_resistance_ohm + load_real;
+    let total_imaginary = angular_frequency * coil_inductance_h + load_imaginary;
+    let denominator = total_real * total_real + total_imaginary * total_imaginary;
+    CartridgeComplexVoltageRatio {
+        real: (load_real * total_real + load_imaginary * total_imaginary) / denominator,
+        imaginary: (load_imaginary * total_real - load_real * total_imaginary) / denominator,
+    }
 }
 
 fn dot(left: [f64; 2], right: [f64; 2]) -> f64 {
@@ -880,6 +1180,16 @@ mod tests {
 
     const TEST_SAMPLE_RATE_HZ: f64 = 192_000.0;
 
+    fn mutual_config(coupling_ratio: f64) -> MovingMagnetCartridgeConfig {
+        let seed = MovingMagnetCartridgeConfig::default();
+        MovingMagnetCartridgeConfig {
+            coil_mutual_inductance_h: coupling_ratio * seed.coil_inductance_h,
+            channel_balance_db: 0.0,
+            channel_separation_db: 200.0,
+            ..seed
+        }
+    }
+
     #[test]
     fn seed_uses_published_values_and_a_derived_generator_coefficient() {
         let config = MovingMagnetCartridgeConfig::concorde_mkii_scratch_seed();
@@ -889,6 +1199,7 @@ mod tests {
         );
         assert_eq!(config.coil_resistance_ohm, 1_200.0);
         assert_eq!(config.coil_inductance_h, 0.850);
+        assert_eq!(config.coil_mutual_inductance_h, 0.0);
         assert_eq!(config.load_resistance_ohm, 47_000.0);
         assert_eq!(config.load_capacitance_f, 300.0e-12);
         assert_eq!(config.channel_separation_db, 22.0);
@@ -898,6 +1209,37 @@ mod tests {
             0.01 / (0.05 * config.loaded_voltage_ratio_at_hz(1_000.0).unwrap()),
             epsilon = 1.0e-12
         );
+    }
+
+    #[test]
+    fn zero_mutual_inductance_is_bit_identical_to_two_independent_circuits() {
+        let dt = 1.0 / TEST_SAMPLE_RATE_HZ;
+        let mut cartridge = MovingMagnetCartridge::default();
+        for sample in 0..10_000 {
+            let phase = sample as f64 * 0.137;
+            let velocity = [0.09 * phase.sin(), -0.07 * (phase * 1.31).cos()];
+            let expected = independent_circuit_reference(cartridge.snapshot(), dt, velocity);
+            let actual = cartridge.advance(dt, velocity).unwrap();
+            assert_array_bits_eq(actual.generator_voltage_v, expected.generator_voltage_v);
+            assert_array_bits_eq(actual.coil_current_a, expected.coil_current_a);
+            assert_array_bits_eq(actual.load_output_voltage_v, expected.load_output_voltage_v);
+            assert_array_bits_eq(
+                actual.interval_average_generator_voltage_v,
+                expected.interval_average_generator_voltage_v,
+            );
+            assert_array_bits_eq(
+                actual.interval_average_coil_current_a,
+                expected.interval_average_coil_current_a,
+            );
+            assert_array_bits_eq(
+                actual.interval_average_load_output_voltage_v,
+                expected.interval_average_load_output_voltage_v,
+            );
+            assert_array_bits_eq(
+                actual.electromagnetic_reaction_force_n,
+                expected.electromagnetic_reaction_force_n,
+            );
+        }
     }
 
     #[test]
@@ -1021,6 +1363,39 @@ mod tests {
     }
 
     #[test]
+    fn coupled_coil_affine_damping_is_reciprocal_and_passive() {
+        for coupling_ratio in [-0.95, -0.5, 0.5, 0.95] {
+            let mut cartridge = MovingMagnetCartridge::new(mutual_config(coupling_ratio)).unwrap();
+            for sample_rate_hz in [44_100.0, 48_000.0, 96_000.0, 192_000.0, 768_000.0] {
+                let dt = 1.0 / sample_rate_hz;
+                cartridge
+                    .advance(dt, [0.071 * coupling_ratio, -0.043])
+                    .unwrap();
+                let damping = cartridge
+                    .prepare_affine_step(dt)
+                    .unwrap()
+                    .reciprocal_damping_n_s_per_m();
+                assert_eq!(damping[0][1], damping[1][0]);
+                assert!(damping[0][0] >= 0.0);
+                assert!(damping[1][1] >= 0.0);
+                let determinant = damping[0][0] * damping[1][1] - damping[0][1] * damping[1][0];
+                let scale = (damping[0][0] * damping[1][1]).max(1.0e-30);
+                assert!(determinant >= -128.0 * f64::EPSILON * scale);
+                for velocity in [
+                    [1.0, 0.0],
+                    [0.0, 1.0],
+                    [1.0, -2.0],
+                    [-17.0, 31.0],
+                    [coupling_ratio, -coupling_ratio],
+                ] {
+                    let absorbed_power = dot(velocity, matrix_vector(damping, velocity));
+                    assert!(absorbed_power >= -128.0 * f64::EPSILON * scale);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn trapezoidal_port_closes_the_energy_balance_during_sample_reversals() {
         let dt = 1.0 / TEST_SAMPLE_RATE_HZ;
         let mut cartridge = MovingMagnetCartridge::default();
@@ -1044,6 +1419,35 @@ mod tests {
                 "sample {sample}: {energy_change_j} != {port_energy_j}"
             );
             previous_energy_j = telemetry.stored_electrical_energy_j;
+        }
+    }
+
+    #[test]
+    fn coupled_coil_port_closes_the_energy_balance_during_sample_reversals() {
+        let dt = 1.0 / TEST_SAMPLE_RATE_HZ;
+        for coupling_ratio in [-0.72, 0.72] {
+            let mut cartridge = MovingMagnetCartridge::new(mutual_config(coupling_ratio)).unwrap();
+            let mut previous_energy_j = cartridge.telemetry().stored_electrical_energy_j;
+            for sample in 0..20_000 {
+                let polarity = if sample & 1 == 0 { 1.0 } else { -1.0 };
+                let phase = sample as f64 * 0.371;
+                let velocity = [
+                    polarity * (0.15 + 0.11 * phase.sin()),
+                    -polarity * (0.09 + 0.07 * (phase * 1.73).cos()),
+                ];
+                let telemetry = cartridge.advance(dt, velocity).unwrap();
+                let energy_change_j = telemetry.stored_electrical_energy_j - previous_energy_j;
+                let port_energy_j = dt
+                    * (telemetry.generator_electrical_power_w
+                        - telemetry.coil_loss_power_w
+                        - telemetry.load_power_w);
+                let scale = energy_change_j.abs().max(port_energy_j.abs()).max(1.0e-30);
+                assert!(
+                    (energy_change_j - port_energy_j).abs() <= 5.0e-11 * scale + 2.0e-27,
+                    "ratio {coupling_ratio}, sample {sample}: {energy_change_j} != {port_energy_j}"
+                );
+                previous_energy_j = telemetry.stored_electrical_energy_j;
+            }
         }
     }
 
@@ -1160,6 +1564,78 @@ mod tests {
     }
 
     #[test]
+    fn full_complex_loaded_transfer_exposes_phase_and_mutual_polarity() {
+        let uncoupled = mutual_config(0.0)
+            .loaded_circuit_frequency_response_at_hz(1_000.0)
+            .unwrap()
+            .loaded_voltage_per_generator_voltage;
+        assert_eq!(uncoupled[0][1], CartridgeComplexVoltageRatio::default());
+        assert_eq!(uncoupled[1][0], CartridgeComplexVoltageRatio::default());
+        assert_eq!(uncoupled[0][0], uncoupled[1][1]);
+
+        for frequency_hz in [20.0, 1_000.0, 12_000.0, 40_000.0] {
+            let positive = mutual_config(0.42)
+                .loaded_circuit_frequency_response_at_hz(frequency_hz)
+                .unwrap()
+                .loaded_voltage_per_generator_voltage;
+            let negative = mutual_config(-0.42)
+                .loaded_circuit_frequency_response_at_hz(frequency_hz)
+                .unwrap()
+                .loaded_voltage_per_generator_voltage;
+            assert_eq!(positive[0][0], positive[1][1]);
+            assert_eq!(positive[0][1], positive[1][0]);
+            assert_relative_eq!(positive[0][0].real, negative[0][0].real, epsilon = 1.0e-15);
+            assert_relative_eq!(
+                positive[0][0].imaginary,
+                negative[0][0].imaginary,
+                epsilon = 1.0e-15
+            );
+            assert_relative_eq!(positive[0][1].real, -negative[0][1].real, epsilon = 1.0e-15);
+            assert_relative_eq!(
+                positive[0][1].imaginary,
+                -negative[0][1].imaginary,
+                epsilon = 1.0e-15
+            );
+            assert!(positive[0][1].magnitude() > 0.0);
+            assert!(positive[0][1].phase_radians().is_finite());
+        }
+
+        let low = mutual_config(0.42)
+            .loaded_circuit_frequency_response_at_hz(1_000.0)
+            .unwrap()
+            .loaded_voltage_per_generator_voltage;
+        let high = mutual_config(0.42)
+            .loaded_circuit_frequency_response_at_hz(12_000.0)
+            .unwrap()
+            .loaded_voltage_per_generator_voltage;
+        let low_relative = complex_divide(low[1][0], low[0][0]);
+        let high_relative = complex_divide(high[1][0], high[0][0]);
+        assert!((low_relative.magnitude() - high_relative.magnitude()).abs() > 0.01);
+        assert!((low_relative.phase_radians() - high_relative.phase_radians()).abs() > 0.05);
+    }
+
+    #[test]
+    fn time_domain_coupled_coil_response_matches_the_complex_transfer() {
+        let config = mutual_config(0.42);
+        for frequency_hz in [1_000.0, 12_000.0] {
+            let measured = measure_cross_to_direct_response(config, frequency_hz);
+            let effective_frequency_hz = TEST_SAMPLE_RATE_HZ / std::f64::consts::PI
+                * (std::f64::consts::PI * frequency_hz / TEST_SAMPLE_RATE_HZ).tan();
+            let response = config
+                .loaded_circuit_frequency_response_at_hz(effective_frequency_hz)
+                .unwrap();
+            let total = response.loaded_voltage_per_magnet_velocity_v_s_per_m;
+            let expected = complex_divide(total[1][0], total[0][0]);
+            assert_relative_eq!(measured.real, expected.real, epsilon = 2.0e-10);
+            assert_relative_eq!(measured.imaginary, expected.imaginary, epsilon = 2.0e-10);
+            assert_eq!(
+                measured,
+                measure_cross_to_direct_response(config, frequency_hz)
+            );
+        }
+    }
+
+    #[test]
     fn invalid_input_does_not_put_nan_in_the_state() {
         let mut cartridge = MovingMagnetCartridge::default();
         let before = cartridge.snapshot();
@@ -1176,6 +1652,55 @@ mod tests {
             Err(MovingMagnetCartridgeError::InvalidSnapshot)
         );
         assert_eq!(cartridge.snapshot(), before);
+    }
+
+    #[test]
+    fn coupled_coil_failures_roll_back_all_dynamic_state() {
+        let dt = 1.0 / TEST_SAMPLE_RATE_HZ;
+        let mut cartridge = MovingMagnetCartridge::new(mutual_config(0.63)).unwrap();
+        for sample in 0..2_000 {
+            let phase = sample as f64 * 0.031;
+            cartridge
+                .advance(dt, [0.04 * phase.sin(), -0.03 * phase.cos()])
+                .unwrap();
+        }
+
+        let before_nonfinite = cartridge.snapshot();
+        assert_eq!(
+            cartridge.advance(dt, [0.01, f64::INFINITY]),
+            Err(MovingMagnetCartridgeError::InvalidMagnetVelocity { channel: 1 })
+        );
+        assert_eq!(cartridge.snapshot(), before_nonfinite);
+
+        let stale = cartridge.prepare_affine_step(dt).unwrap();
+        cartridge.advance(dt, [0.02, -0.01]).unwrap();
+        let before_stale = cartridge.snapshot();
+        assert_eq!(
+            cartridge.commit_affine_step(stale, [0.0; 2]),
+            Err(MovingMagnetCartridgeError::StaleAffineStep)
+        );
+        assert_eq!(cartridge.snapshot(), before_stale);
+
+        let mut invalid_snapshot = before_stale;
+        invalid_snapshot.config.coil_mutual_inductance_h =
+            invalid_snapshot.config.coil_inductance_h;
+        assert!(matches!(
+            cartridge.restore(invalid_snapshot),
+            Err(MovingMagnetCartridgeError::InvalidConfig(
+                MovingMagnetCartridgeConfigError::InvalidMutualInductance { .. }
+            ))
+        ));
+        assert_eq!(cartridge.snapshot(), before_stale);
+
+        let mut old_snapshot = before_stale;
+        old_snapshot.version = SNAPSHOT_VERSION - 1;
+        assert_eq!(
+            cartridge.restore(old_snapshot),
+            Err(MovingMagnetCartridgeError::UnsupportedSnapshotVersion {
+                version: SNAPSHOT_VERSION - 1,
+            })
+        );
+        assert_eq!(cartridge.snapshot(), before_stale);
     }
 
     #[test]
@@ -1196,6 +1721,51 @@ mod tests {
             let actual = restored.advance(dt, [velocity, 0.25 * velocity]).unwrap();
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn coupled_coil_json_snapshot_continues_bit_identically() {
+        let dt = 1.0 / TEST_SAMPLE_RATE_HZ;
+        let mut original = MovingMagnetCartridge::new(mutual_config(-0.58)).unwrap();
+        for index in 0..3_000 {
+            let phase = index as f64 * 0.031;
+            original
+                .advance(dt, [0.04 * phase.sin(), -0.03 * phase.cos()])
+                .unwrap();
+        }
+
+        let encoded = serde_json::to_string(&original.snapshot()).unwrap();
+        let decoded: MovingMagnetCartridgeSnapshot = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.version, SNAPSHOT_VERSION);
+        assert_eq!(decoded.config.coil_mutual_inductance_h, -0.58 * 0.850);
+        let mut restored = MovingMagnetCartridge::default();
+        restored.restore(decoded).unwrap();
+        for index in 0..5_000 {
+            let phase = index as f64 * 0.017;
+            let velocity = [0.07 * phase.cos(), 0.025 * (phase * 1.43).sin()];
+            assert_eq!(
+                original.advance(dt, velocity),
+                restored.advance(dt, velocity)
+            );
+            assert_eq!(original.snapshot(), restored.snapshot());
+        }
+    }
+
+    #[test]
+    fn coupled_coil_realtime_steps_allocate_no_memory() {
+        let mut cartridge = MovingMagnetCartridge::new(mutual_config(0.67)).unwrap();
+        let dt = 1.0 / TEST_SAMPLE_RATE_HZ;
+        let mut completed = false;
+        assert_no_alloc::assert_no_alloc(|| {
+            for sample in 0..20_000 {
+                let phase = sample as f64 * 0.071;
+                cartridge
+                    .advance(dt, [0.08 * phase.sin(), -0.06 * (phase * 1.19).cos()])
+                    .unwrap();
+            }
+            completed = true;
+        });
+        assert!(completed);
     }
 
     #[test]
@@ -1229,6 +1799,23 @@ mod tests {
             ..MovingMagnetCartridgeConfig::default()
         };
         assert!(config.validate().is_err());
+
+        for coil_mutual_inductance_h in [f64::NAN, f64::INFINITY, 0.850, -0.850] {
+            let config = MovingMagnetCartridgeConfig {
+                coil_mutual_inductance_h,
+                ..MovingMagnetCartridgeConfig::default()
+            };
+            assert!(matches!(
+                config.validate(),
+                Err(MovingMagnetCartridgeConfigError::InvalidMutualInductance { .. })
+            ));
+        }
+
+        let boundary = MovingMagnetCartridgeConfig {
+            coil_mutual_inductance_h: 0.850 - MIN_INDUCTANCE_H,
+            ..MovingMagnetCartridgeConfig::default()
+        };
+        assert!(boundary.validate().is_ok());
     }
 
     fn measure_direct_output_rms(channel: usize) -> f64 {
@@ -1250,5 +1837,126 @@ mod tests {
             phase += phase_step;
         }
         (sum / count as f64).sqrt()
+    }
+
+    fn independent_circuit_reference(
+        snapshot: MovingMagnetCartridgeSnapshot,
+        duration_seconds: f64,
+        magnet_velocity_m_s: [f64; 2],
+    ) -> MovingMagnetCartridgeAffineOutput {
+        assert_eq!(snapshot.config.coil_mutual_inductance_h, 0.0);
+        let config = snapshot.config;
+        let matrix = config.channel_matrix();
+        let coefficient = config.generator_coefficient_v_s_per_m;
+        let generator_voltage_per_velocity_v_s_per_m =
+            matrix.map(|row| [coefficient * row[0], coefficient * row[1]]);
+        let generator_voltage_v = matrix_vector(
+            generator_voltage_per_velocity_v_s_per_m,
+            magnet_velocity_m_s,
+        );
+        let mut coil_current_a = [0.0; 2];
+        let mut load_output_voltage_v = [0.0; 2];
+        for channel in 0..2 {
+            let affine = trapezoidal_circuit_affine_step(
+                config,
+                duration_seconds,
+                snapshot.coil_current_a[channel],
+                snapshot.load_output_voltage_v[channel],
+                snapshot.previous_generator_voltage_v[channel],
+            )
+            .unwrap();
+            coil_current_a[channel] = affine.current_bias_a
+                + affine.current_per_generator_voltage_a_per_v * generator_voltage_v[channel];
+            load_output_voltage_v[channel] = affine.load_voltage_bias_v
+                + affine.load_voltage_per_generator_voltage * generator_voltage_v[channel];
+        }
+        let interval_average_generator_voltage_v = [
+            0.5 * (snapshot.previous_generator_voltage_v[0] + generator_voltage_v[0]),
+            0.5 * (snapshot.previous_generator_voltage_v[1] + generator_voltage_v[1]),
+        ];
+        let interval_average_coil_current_a = [
+            0.5 * (snapshot.coil_current_a[0] + coil_current_a[0]),
+            0.5 * (snapshot.coil_current_a[1] + coil_current_a[1]),
+        ];
+        let interval_average_load_output_voltage_v = [
+            0.5 * (snapshot.load_output_voltage_v[0] + load_output_voltage_v[0]),
+            0.5 * (snapshot.load_output_voltage_v[1] + load_output_voltage_v[1]),
+        ];
+        let electromagnetic_reaction_force_n = [
+            -coefficient
+                * (matrix[0][0] * interval_average_coil_current_a[0]
+                    + matrix[1][0] * interval_average_coil_current_a[1]),
+            -coefficient
+                * (matrix[0][1] * interval_average_coil_current_a[0]
+                    + matrix[1][1] * interval_average_coil_current_a[1]),
+        ];
+        MovingMagnetCartridgeAffineOutput {
+            magnet_velocity_m_s,
+            generator_voltage_v,
+            coil_current_a,
+            load_output_voltage_v,
+            interval_average_generator_voltage_v,
+            interval_average_coil_current_a,
+            interval_average_load_output_voltage_v,
+            electromagnetic_reaction_force_n,
+        }
+    }
+
+    fn assert_array_bits_eq(actual: [f64; 2], expected: [f64; 2]) {
+        assert_eq!(actual.map(f64::to_bits), expected.map(f64::to_bits));
+    }
+
+    fn measure_cross_to_direct_response(
+        config: MovingMagnetCartridgeConfig,
+        frequency_hz: f64,
+    ) -> CartridgeComplexVoltageRatio {
+        let mut cartridge = MovingMagnetCartridge::new(config).unwrap();
+        let dt = 1.0 / TEST_SAMPLE_RATE_HZ;
+        let phase_step = std::f64::consts::TAU * frequency_hz * dt;
+        let mut phase: f64 = 0.0;
+        for _ in 0..8_192 {
+            cartridge.advance(dt, [0.01 * phase.sin(), 0.0]).unwrap();
+            phase += phase_step;
+        }
+        let mut direct_in_phase = 0.0;
+        let mut direct_quadrature = 0.0;
+        let mut cross_in_phase = 0.0;
+        let mut cross_quadrature = 0.0;
+        let sample_count = 19_200;
+        for _ in 0..sample_count {
+            let sine = phase.sin();
+            let cosine = phase.cos();
+            let output = cartridge.advance(dt, [0.01 * sine, 0.0]).unwrap();
+            direct_in_phase += output.load_output_voltage_v[0] * sine;
+            direct_quadrature += output.load_output_voltage_v[0] * cosine;
+            cross_in_phase += output.load_output_voltage_v[1] * sine;
+            cross_quadrature += output.load_output_voltage_v[1] * cosine;
+            phase += phase_step;
+        }
+        complex_divide(
+            CartridgeComplexVoltageRatio {
+                real: cross_in_phase,
+                imaginary: cross_quadrature,
+            },
+            CartridgeComplexVoltageRatio {
+                real: direct_in_phase,
+                imaginary: direct_quadrature,
+            },
+        )
+    }
+
+    fn complex_divide(
+        numerator: CartridgeComplexVoltageRatio,
+        denominator: CartridgeComplexVoltageRatio,
+    ) -> CartridgeComplexVoltageRatio {
+        let scale =
+            denominator.real * denominator.real + denominator.imaginary * denominator.imaginary;
+        CartridgeComplexVoltageRatio {
+            real: (numerator.real * denominator.real + numerator.imaginary * denominator.imaginary)
+                / scale,
+            imaginary: (numerator.imaginary * denominator.real
+                - numerator.real * denominator.imaginary)
+                / scale,
+        }
     }
 }

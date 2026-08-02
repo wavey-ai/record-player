@@ -396,6 +396,47 @@ mod tests {
     }
 
     #[test]
+    fn coupled_coil_matrix_is_reciprocal_in_the_same_sample_without_allocation() {
+        let (mut pickup, _) = states();
+        let seed = MovingMagnetCartridgeConfig::default();
+        let mut cartridge = MovingMagnetCartridge::new(MovingMagnetCartridgeConfig {
+            coil_mutual_inductance_h: 0.61 * seed.coil_inductance_h,
+            channel_balance_db: 0.0,
+            channel_separation_db: 200.0,
+            ..seed
+        })
+        .unwrap();
+        let mut completed = false;
+        assert_no_alloc::assert_no_alloc(|| {
+            for sample in 0..10_000 {
+                let telemetry =
+                    process_coupled_pickup_cartridge(&mut pickup, &mut cartridge, signal(sample))
+                        .unwrap();
+                let expected_force = transform_vector_from_coil(
+                    telemetry.cartridge.electromagnetic_reaction_force_n,
+                );
+                assert!(vectors_nearly_equal(
+                    telemetry.pickup.electromagnetic_force_on_tip_n,
+                    expected_force,
+                ));
+                let scale = telemetry
+                    .electromagnetic_mechanical_power_w()
+                    .abs()
+                    .max(telemetry.cartridge.generator_electrical_power_w.abs())
+                    .max(1.0e-24);
+                assert!(
+                    (telemetry.electromagnetic_mechanical_power_w()
+                        + telemetry.cartridge.generator_electrical_power_w)
+                        .abs()
+                        <= 1.0e-10 * scale + 1.0e-18
+                );
+            }
+            completed = true;
+        });
+        assert!(completed);
+    }
+
+    #[test]
     fn partitions_and_snapshots_preserve_exact_continuation() {
         let inputs = (0..4_096).map(signal).collect::<Vec<_>>();
         let (mut whole_pickup, mut whole_cartridge) = states();

@@ -505,6 +505,7 @@ const PARAMETER_SCHEMA: &[ParameterSchema] = &[
     ),
     schema("cartridge.coilResistanceOhm", "ohm", FLOAT, MEASURE),
     schema("cartridge.coilInductanceH", "H", FLOAT, MEASURE),
+    schema("cartridge.coilMutualInductanceH", "H", FLOAT, MEASURE),
     schema("cartridge.loadResistanceOhm", "ohm", FLOAT, MEASURE),
     schema("cartridge.loadCapacitanceF", "F", FLOAT, MEASURE),
     schema("cartridge.channelBalanceDb", "dB", FLOAT, MEASURE),
@@ -652,6 +653,7 @@ fn required_test_for_parameter(parameter: &str) -> Option<CalibrationTest> {
         parameter,
         "cartridge.coilResistanceOhm"
             | "cartridge.coilInductanceH"
+            | "cartridge.coilMutualInductanceH"
             | "cartridge.loadResistanceOhm"
             | "cartridge.loadCapacitanceF"
     ) {
@@ -1264,11 +1266,28 @@ mod tests {
     fn seed_manifest_covers_every_serialized_configuration_leaf() {
         let profile = PhysicalProfile::sl_1200mk7_concorde_mkii_scratch_seed();
         let manifest = profile.parameter_manifest().unwrap();
-        assert_eq!(manifest.len(), 75);
+        assert_eq!(manifest.len(), 76);
         assert_eq!(profile.evidence.len(), manifest.len());
         assert!(profile.validate().is_ok());
         assert_eq!(profile.status, CalibrationStatus::Seed);
         assert!(!profile.permits_calibrated_claim());
+    }
+
+    #[test]
+    fn mutual_inductance_seed_is_zero_and_requires_an_impedance_measurement() {
+        let profile = PhysicalProfile::sl_1200mk7_concorde_mkii_scratch_seed();
+        let evidence = profile
+            .evidence
+            .iter()
+            .find(|entry| entry.parameter == "cartridge.coilMutualInductanceH")
+            .unwrap();
+        assert_eq!(evidence.value, ParameterValue::Float(0.0));
+        assert_eq!(evidence.kind, EvidenceKind::Estimated);
+        assert_eq!(
+            evidence.calibration_test,
+            Some(CalibrationTest::CartridgeImpedanceSweep)
+        );
+        assert!(evidence.source.is_none());
     }
 
     #[test]
