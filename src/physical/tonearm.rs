@@ -70,15 +70,36 @@ impl TonearmGeometry {
         if !tangential_force_on_stylus_n.is_finite() {
             return Err(TonearmError::InvalidForce);
         }
-        let (groove_angle, stylus_x, stylus_y) = self.stylus_geometry(groove_radius_m)?;
-        let arm = [stylus_x - self.pivot_to_spindle_m, stylus_y];
-        let tangent = [-groove_angle.sin(), groove_angle.cos()];
-        let radial = [groove_angle.cos(), groove_angle.sin()];
-        let radial_moment_arm = cross_2d(arm, radial);
-        if radial_moment_arm.abs() < 1.0e-12 {
+        Ok(self.skating_force_factor(groove_radius_m)? * tangential_force_on_stylus_n)
+    }
+
+    /// Returns K where radial force equals K times tangential stylus force.
+    pub(crate) fn skating_force_factor(self, groove_radius_m: f64) -> Result<f64, TonearmError> {
+        self.validate()?;
+        if !groove_radius_m.is_finite() || groove_radius_m <= 0.0 {
+            return Err(TonearmError::InvalidGrooveRadius);
+        }
+        let length = self.effective_length_m;
+        let pivot = self.pivot_to_spindle_m;
+        let cosine = (groove_radius_m * groove_radius_m + pivot * pivot - length * length)
+            / (2.0 * groove_radius_m * pivot);
+        if !cosine.is_finite() || cosine <= -1.0 || cosine >= 1.0 {
+            return Err(TonearmError::UnreachableGrooveRadius);
+        }
+        let sine_squared = 1.0 - cosine * cosine;
+        if !sine_squared.is_finite() || sine_squared <= 0.0 {
+            return Err(TonearmError::UnreachableGrooveRadius);
+        }
+        let sine = sine_squared.sqrt();
+        let radial_moment_arm = pivot * sine;
+        if !radial_moment_arm.is_finite() || radial_moment_arm < 1.0e-12 {
             return Err(TonearmError::SingularForceGeometry);
         }
-        Ok(cross_2d(arm, tangent) * tangential_force_on_stylus_n / radial_moment_arm)
+        let factor = (pivot * cosine - groove_radius_m) / radial_moment_arm;
+        if !factor.is_finite() {
+            return Err(TonearmError::SingularForceGeometry);
+        }
+        Ok(factor)
     }
 
     fn stylus_geometry(self, groove_radius_m: f64) -> Result<(f64, f64, f64), TonearmError> {
@@ -272,10 +293,6 @@ fn normalize_angle(angle: f64) -> f64 {
     (angle + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI
 }
 
-fn cross_2d(left: [f64; 2], right: [f64; 2]) -> f64 {
-    left[0] * right[1] - left[1] * right[0]
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum TonearmError {
     #[error("tonearm geometry field {field} is invalid")]
@@ -306,6 +323,43 @@ pub enum TonearmError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const OUTER_PROGRAM_RADIUS_M: f64 = 0.146_05;
+    const INNER_PROGRAM_RADIUS_M: f64 = 0.060_325;
+
+    fn trigonometric_skating_factor_reference(
+        geometry: TonearmGeometry,
+        groove_radius_m: f64,
+    ) -> f64 {
+        let length = geometry.effective_length_m;
+        let pivot = geometry.pivot_to_spindle_m;
+        let cosine = (groove_radius_m * groove_radius_m + pivot * pivot - length * length)
+            / (2.0 * groove_radius_m * pivot);
+        let groove_angle = cosine.acos();
+        let stylus_x = groove_radius_m * groove_angle.cos();
+        let stylus_y = groove_radius_m * groove_angle.sin();
+        let arm_x = stylus_x - pivot;
+        let tangent_x = -groove_angle.sin();
+        let tangent_y = groove_angle.cos();
+        let radial_x = groove_angle.cos();
+        let radial_y = groove_angle.sin();
+        let tangential_moment_arm = arm_x * tangent_y - stylus_y * tangent_x;
+        let radial_moment_arm = arm_x * radial_y - stylus_y * radial_x;
+        tangential_moment_arm / radial_moment_arm
+    }
+
+    fn ordered_bits(value: f64) -> u64 {
+        let bits = value.to_bits();
+        if bits & (1_u64 << 63) == 0 {
+            bits | (1_u64 << 63)
+        } else {
+            !bits
+        }
+    }
+
+    fn ulp_distance(left: f64, right: f64) -> u64 {
+        ordered_bits(left).abs_diff(ordered_bits(right))
+    }
 
     #[test]
     fn geometry_uses_published_length_overhang_and_offset() {
@@ -344,7 +398,7 @@ mod tests {
     #[test]
     fn equivalent_radial_force_is_finite_at_programme_radii() {
         let geometry = TonearmGeometry::default();
-        for radius_m in [0.146_05, 0.060_325] {
+        for radius_m in [OUTER_PROGRAM_RADIUS_M, INNER_PROGRAM_RADIUS_M] {
             let forward = geometry.equivalent_radial_force_n(radius_m, 0.010).unwrap();
             let reverse = geometry
                 .equivalent_radial_force_n(radius_m, -0.010)
@@ -353,6 +407,94 @@ mod tests {
             assert!(reverse.is_finite(), "{radius_m}: {reverse}");
             assert!(forward < 0.0, "{radius_m}: {forward}");
             assert!(reverse > 0.0, "{radius_m}: {reverse}");
+        }
+    }
+
+    #[test]
+    fn skating_factor_accepts_the_program_radius_endpoints() {
+        let geometry = TonearmGeometry::default();
+        for radius_m in [INNER_PROGRAM_RADIUS_M, OUTER_PROGRAM_RADIUS_M] {
+            let factor = geometry.skating_force_factor(radius_m).unwrap();
+            assert!(factor.is_finite(), "{radius_m}: {factor}");
+        }
+    }
+
+    #[test]
+    fn skating_factor_rejects_invalid_and_unreachable_geometry() {
+        let invalid_geometry = TonearmGeometry {
+            effective_length_m: 1.0,
+            pivot_to_spindle_m: 1.0,
+            offset_angle_degrees: 0.0,
+        };
+        assert!(matches!(
+            invalid_geometry.skating_force_factor(1.0),
+            Err(TonearmError::InvalidGeometry {
+                field: "pivotToSpindleM"
+            })
+        ));
+
+        let geometry = TonearmGeometry {
+            effective_length_m: 2.0,
+            pivot_to_spindle_m: 1.0,
+            offset_angle_degrees: 0.0,
+        };
+        for radius_m in [1.0, 3.0, 0.5, 3.5] {
+            assert_eq!(
+                geometry.skating_force_factor(radius_m),
+                Err(TonearmError::UnreachableGrooveRadius),
+                "{radius_m}"
+            );
+        }
+        for radius_m in [0.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                geometry.skating_force_factor(radius_m),
+                Err(TonearmError::InvalidGrooveRadius),
+                "{radius_m}"
+            );
+        }
+    }
+
+    #[test]
+    fn skating_factor_is_negative_and_nonzero_across_the_program_radius() {
+        let geometry = TonearmGeometry::default();
+        for index in 0..=1_024 {
+            let fraction = f64::from(index) / 1_024.0;
+            let radius_m = INNER_PROGRAM_RADIUS_M
+                + fraction * (OUTER_PROGRAM_RADIUS_M - INNER_PROGRAM_RADIUS_M);
+            let factor = geometry.skating_force_factor(radius_m).unwrap();
+            assert!(factor.is_finite(), "{radius_m}: {factor}");
+            assert!(factor < 0.0, "{radius_m}: {factor}");
+            assert_ne!(factor, 0.0, "{radius_m}");
+        }
+    }
+
+    #[test]
+    fn algebraic_skating_factor_matches_independent_references() {
+        let geometry = TonearmGeometry::default();
+        for index in 0..=256 {
+            let fraction = f64::from(index) / 256.0;
+            let radius_m = INNER_PROGRAM_RADIUS_M
+                + fraction * (OUTER_PROGRAM_RADIUS_M - INNER_PROGRAM_RADIUS_M);
+            let actual = geometry.skating_force_factor(radius_m).unwrap();
+            let reference = trigonometric_skating_factor_reference(geometry, radius_m);
+            assert!(
+                (actual - reference).abs() <= 16.0 * f64::EPSILON,
+                "{radius_m}: actual={actual}, reference={reference}"
+            );
+        }
+
+        // These values come from 100-digit arithmetic over the exact binary64 inputs.
+        for (radius_m, reference_bits) in [
+            (INNER_PROGRAM_RADIUS_M, 0xbfd9_9fa6_62af_758e),
+            (0.100, 0xbfd8_e4a4_a5be_de8e),
+            (OUTER_PROGRAM_RADIUS_M, 0xbfdd_59b6_7c2f_6cf0),
+        ] {
+            let actual = geometry.skating_force_factor(radius_m).unwrap();
+            let reference = f64::from_bits(reference_bits);
+            assert!(
+                ulp_distance(actual, reference) <= 1,
+                "{radius_m}: actual={actual}, reference={reference}"
+            );
         }
     }
 }

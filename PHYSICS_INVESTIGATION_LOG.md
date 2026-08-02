@@ -652,6 +652,13 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Cartridge rule**: Extract state-independent reciprocal damping from the state-dependent cartridge bias.
 - **Geometry rule**: Calculate the skating factor with algebraic operations and square root.
 - **Reason**: Portable directed rounding is not available for the current trigonometric functions.
+- **Implementation status**: Production now uses the algebraic skating factor.
+- **Boundary rule**: The cosine must remain strictly between negative one and positive one.
+- **Boundary rule**: The calculated squared sine must remain positive and finite.
+- **Result**: Exact geometric reach boundaries now reject as unreachable.
+- **Reference result**: The new program-radius endpoint values are within one ULP of 100-digit calculations.
+- **Change size**: The outer endpoint changed by one ULP. The inner endpoint changed by four ULP.
+- **Interpretation**: The bit changes replace less accurate trigonometric reconstruction results.
 - **Proof catalog**: Add 48 solve-only systems to the 288 contacting labels.
 - **Proof total**: The initial catalog therefore contains 336 records before safe equivalence aggregation.
 - **Interval method**: Use outward arithmetic and adaptive radius-and-slope subdivision.

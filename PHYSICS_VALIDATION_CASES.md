@@ -1797,6 +1797,12 @@ The accepted profile domain needs a P-matrix proof or an equivalent bounded proo
 - **Velocity order**: `[platter, record, tip-x, tip-z, body-x, body-z]`.
 - **Permutation test**: Use six distinct values to detect exchanged coordinates.
 - **Contact evaluation**: Evaluate the shared `H` and `G` algebra over radius and slope boxes.
+- **Skating algebra**: Production uses only arithmetic and square root for the force factor.
+- **Skating domain**: Require `-1 < c < 1` and `1 - c * c > 0`.
+- **Endpoint result**: Both program-radius factors are within one ULP of 100-digit calculations.
+- **Bit change**: The outer result changed by one ULP. The inner result changed by four ULP.
+- **Boundary result**: Exact geometric reach boundaries reject as unreachable.
+- **Permanent test**: `algebraic_skating_factor_matches_independent_references` checks 257 radii and three high-precision results.
 - **Sticking update**: Use the production tangential force column and equality row.
 - **Sticking proof**: Require the nonsymmetric Schur denominator interval to exclude zero.
 - **Catalog**: Generate 288 contacting labels from production mode mappings.
