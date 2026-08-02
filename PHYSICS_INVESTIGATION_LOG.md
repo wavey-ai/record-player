@@ -663,6 +663,12 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Velocity order**: Use platter, record, tip-x, tip-z, body-x, and body-z.
 - **Permanent requirement**: A six-value sentinel must detect any coordinate permutation.
 - **Cartridge rule**: Extract state-independent reciprocal damping from the state-dependent cartridge bias.
+- **Cartridge result**: A config-and-duration helper now calculates reciprocal damping without cartridge history.
+- **Formula rule**: Runtime and certificate paths use one canonical damping derivation.
+- **Runtime rule**: The affine step reuses its existing current response and does not repeat the circuit solve.
+- **Point-builder result**: The fixed-mode builder now uses the state-independent mechanical damping helper.
+- **Bit result**: Five cartridge configurations keep identical damping bits across 257 advanced states each.
+- **Transform result**: Coil and mechanical-coordinate helper results match the existing transform bits.
 - **Geometry rule**: Calculate the skating factor with algebraic operations and square root.
 - **Reason**: Portable directed rounding is not available for the current trigonometric functions.
 - **Implementation status**: Production now uses the algebraic skating factor.

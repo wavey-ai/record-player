@@ -417,6 +417,33 @@ impl Default for MovingMagnetCartridgeTelemetry {
     }
 }
 
+/// Returns the state-independent reciprocal damping in cartridge-coil coordinates.
+pub(crate) fn moving_magnet_coil_reciprocal_damping_n_s_per_m(
+    config: MovingMagnetCartridgeConfig,
+    duration_seconds: f64,
+) -> Result<[[f64; 2]; 2], MovingMagnetCartridgeError> {
+    validate_duration(duration_seconds)?;
+    let config = config.validate()?;
+    let circuit = coupled_trapezoidal_circuit_affine_step(
+        config,
+        duration_seconds,
+        [0.0; 2],
+        [0.0; 2],
+        [0.0; 2],
+        [[0.0; MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES]; 2],
+    )
+    .ok_or(MovingMagnetCartridgeError::NumericalFailure)?;
+    let coefficient = config.generator_coefficient_v_s_per_m;
+    let generator_voltage_per_velocity_v_s_per_m = config
+        .channel_matrix()
+        .map(|row| [coefficient * row[0], coefficient * row[1]]);
+    reciprocal_damping_from_current_response(
+        config,
+        generator_voltage_per_velocity_v_s_per_m,
+        circuit.current_per_generator_voltage_a_per_v,
+    )
+}
+
 /// Stores all values that affect later cartridge output.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -632,7 +659,6 @@ impl MovingMagnetCartridge {
         let generator_voltage_per_velocity_v_s_per_m =
             channel_matrix.map(|row| [coefficient * row[0], coefficient * row[1]]);
         let mut reaction_force_bias_n = [0.0; 2];
-        let mut reciprocal_damping_n_s_per_m = [[0.0; 2]; 2];
         for velocity_axis in 0..2 {
             for circuit in 0..2 {
                 let interval_average_current_bias_a =
@@ -641,46 +667,12 @@ impl MovingMagnetCartridge {
                     [circuit][velocity_axis]
                     * interval_average_current_bias_a;
             }
-            for other_axis in 0..2 {
-                if self.config.coil_mutual_inductance_h == 0.0 {
-                    for circuit in 0..2 {
-                        reciprocal_damping_n_s_per_m[velocity_axis][other_axis] +=
-                            generator_voltage_per_velocity_v_s_per_m[circuit][velocity_axis]
-                                * (0.5 * current_per_generator_voltage_a_per_v[circuit][circuit])
-                                * generator_voltage_per_velocity_v_s_per_m[circuit][other_axis];
-                    }
-                } else {
-                    for circuit in 0..2 {
-                        for driven_circuit in 0..2 {
-                            reciprocal_damping_n_s_per_m[velocity_axis][other_axis] +=
-                                generator_voltage_per_velocity_v_s_per_m[circuit][velocity_axis]
-                                    * (0.5
-                                        * current_per_generator_voltage_a_per_v[circuit]
-                                            [driven_circuit])
-                                    * generator_voltage_per_velocity_v_s_per_m[driven_circuit]
-                                        [other_axis];
-                        }
-                    }
-                }
-            }
         }
-        let mut off_diagonal =
-            0.5 * (reciprocal_damping_n_s_per_m[0][1] + reciprocal_damping_n_s_per_m[1][0]);
-        reciprocal_damping_n_s_per_m[0][1] = off_diagonal;
-        reciprocal_damping_n_s_per_m[1][0] = off_diagonal;
-        let maximum_passive_off_diagonal =
-            reciprocal_damping_n_s_per_m[0][0].sqrt() * reciprocal_damping_n_s_per_m[1][1].sqrt();
-        if off_diagonal.abs() > maximum_passive_off_diagonal {
-            let excess = off_diagonal.abs() - maximum_passive_off_diagonal;
-            let roundoff_tolerance =
-                64.0 * f64::EPSILON * off_diagonal.abs().max(maximum_passive_off_diagonal);
-            if excess > roundoff_tolerance {
-                return Err(MovingMagnetCartridgeError::NumericalFailure);
-            }
-            off_diagonal = off_diagonal.signum() * maximum_passive_off_diagonal;
-            reciprocal_damping_n_s_per_m[0][1] = off_diagonal;
-            reciprocal_damping_n_s_per_m[1][0] = off_diagonal;
-        }
+        let reciprocal_damping_n_s_per_m = reciprocal_damping_from_current_response(
+            self.config,
+            generator_voltage_per_velocity_v_s_per_m,
+            current_per_generator_voltage_a_per_v,
+        )?;
         if generator_voltage_per_velocity_v_s_per_m
             .into_iter()
             .flatten()
@@ -691,8 +683,6 @@ impl MovingMagnetCartridge {
             .chain(reaction_force_bias_n)
             .chain(reciprocal_damping_n_s_per_m.into_iter().flatten())
             .any(|value| !value.is_finite())
-            || reciprocal_damping_n_s_per_m[0][0] < 0.0
-            || reciprocal_damping_n_s_per_m[1][1] < 0.0
         {
             return Err(MovingMagnetCartridgeError::NumericalFailure);
         }
@@ -1354,6 +1344,65 @@ fn trapezoidal_circuit_affine_step_with_inductance(
         load_voltage_bias_v,
         load_voltage_per_generator_voltage,
     })
+}
+
+fn reciprocal_damping_from_current_response(
+    config: MovingMagnetCartridgeConfig,
+    generator_voltage_per_velocity_v_s_per_m: [[f64; 2]; 2],
+    current_per_generator_voltage_a_per_v: [[f64; 2]; 2],
+) -> Result<[[f64; 2]; 2], MovingMagnetCartridgeError> {
+    let mut reciprocal_damping_n_s_per_m = [[0.0; 2]; 2];
+    for velocity_axis in 0..2 {
+        for other_axis in 0..2 {
+            if config.coil_mutual_inductance_h == 0.0 {
+                for circuit in 0..2 {
+                    reciprocal_damping_n_s_per_m[velocity_axis][other_axis] +=
+                        generator_voltage_per_velocity_v_s_per_m[circuit][velocity_axis]
+                            * (0.5 * current_per_generator_voltage_a_per_v[circuit][circuit])
+                            * generator_voltage_per_velocity_v_s_per_m[circuit][other_axis];
+                }
+            } else {
+                for circuit in 0..2 {
+                    for driven_circuit in 0..2 {
+                        reciprocal_damping_n_s_per_m[velocity_axis][other_axis] +=
+                            generator_voltage_per_velocity_v_s_per_m[circuit][velocity_axis]
+                                * (0.5
+                                    * current_per_generator_voltage_a_per_v[circuit]
+                                        [driven_circuit])
+                                * generator_voltage_per_velocity_v_s_per_m[driven_circuit]
+                                    [other_axis];
+                    }
+                }
+            }
+        }
+    }
+    let mut off_diagonal =
+        0.5 * (reciprocal_damping_n_s_per_m[0][1] + reciprocal_damping_n_s_per_m[1][0]);
+    reciprocal_damping_n_s_per_m[0][1] = off_diagonal;
+    reciprocal_damping_n_s_per_m[1][0] = off_diagonal;
+    let maximum_passive_off_diagonal =
+        reciprocal_damping_n_s_per_m[0][0].sqrt() * reciprocal_damping_n_s_per_m[1][1].sqrt();
+    if off_diagonal.abs() > maximum_passive_off_diagonal {
+        let excess = off_diagonal.abs() - maximum_passive_off_diagonal;
+        let roundoff_tolerance =
+            64.0 * f64::EPSILON * off_diagonal.abs().max(maximum_passive_off_diagonal);
+        if excess > roundoff_tolerance {
+            return Err(MovingMagnetCartridgeError::NumericalFailure);
+        }
+        off_diagonal = off_diagonal.signum() * maximum_passive_off_diagonal;
+        reciprocal_damping_n_s_per_m[0][1] = off_diagonal;
+        reciprocal_damping_n_s_per_m[1][0] = off_diagonal;
+    }
+    if reciprocal_damping_n_s_per_m
+        .into_iter()
+        .flatten()
+        .any(|value| !value.is_finite())
+        || reciprocal_damping_n_s_per_m[0][0] < 0.0
+        || reciprocal_damping_n_s_per_m[1][1] < 0.0
+    {
+        return Err(MovingMagnetCartridgeError::NumericalFailure);
+    }
+    Ok(reciprocal_damping_n_s_per_m)
 }
 
 fn validate_duration(duration_seconds: f64) -> Result<(), MovingMagnetCartridgeError> {
@@ -2081,6 +2130,87 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn reciprocal_damping_bits_depend_only_on_config_and_duration() {
+        let duration_seconds = 1.0 / TEST_SAMPLE_RATE_HZ;
+        let configs = [
+            MovingMagnetCartridgeConfig::default(),
+            mutual_config(-0.63),
+            mutual_config(0.71),
+            magnetic_loss_config(-0.58),
+            magnetic_loss_config(0.67),
+        ];
+        for config in configs {
+            let expected =
+                moving_magnet_coil_reciprocal_damping_n_s_per_m(config, duration_seconds).unwrap();
+            let mut cartridge = MovingMagnetCartridge::new(config).unwrap();
+            for sample in 0..257 {
+                let snapshot = cartridge.snapshot();
+                let circuit = coupled_trapezoidal_circuit_affine_step(
+                    config,
+                    duration_seconds,
+                    snapshot.coil_current_a,
+                    snapshot.load_output_voltage_v,
+                    snapshot.previous_generator_voltage_v,
+                    snapshot.magnetic_loss_inductor_current_a,
+                )
+                .unwrap();
+                let coefficient = config.generator_coefficient_v_s_per_m;
+                let generator_voltage_per_velocity_v_s_per_m = config
+                    .channel_matrix()
+                    .map(|row| [coefficient * row[0], coefficient * row[1]]);
+                let state_derived = reciprocal_damping_from_current_response(
+                    config,
+                    generator_voltage_per_velocity_v_s_per_m,
+                    circuit.current_per_generator_voltage_a_per_v,
+                )
+                .unwrap();
+                assert_matrix_bits_eq(state_derived, expected);
+                assert_matrix_bits_eq(
+                    cartridge
+                        .prepare_affine_step(duration_seconds)
+                        .unwrap()
+                        .reciprocal_damping_n_s_per_m(),
+                    expected,
+                );
+
+                let phase = sample as f64 * 0.173;
+                let advance_duration_seconds = 1.0 / [44_100.0, 96_000.0, 384_000.0][sample % 3];
+                cartridge
+                    .advance(
+                        advance_duration_seconds,
+                        [0.19 * phase.sin(), -0.13 * (phase * 1.37).cos()],
+                    )
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn reciprocal_damping_helper_rejects_invalid_inputs() {
+        for duration_seconds in [f64::NAN, f64::INFINITY, 0.0, -1.0, 10.1] {
+            assert_eq!(
+                moving_magnet_coil_reciprocal_damping_n_s_per_m(
+                    MovingMagnetCartridgeConfig::default(),
+                    duration_seconds,
+                ),
+                Err(MovingMagnetCartridgeError::InvalidDuration)
+            );
+        }
+
+        let invalid_config = MovingMagnetCartridgeConfig {
+            coil_resistance_ohm: f64::NAN,
+            ..MovingMagnetCartridgeConfig::default()
+        };
+        assert!(matches!(
+            moving_magnet_coil_reciprocal_damping_n_s_per_m(
+                invalid_config,
+                1.0 / TEST_SAMPLE_RATE_HZ,
+            ),
+            Err(MovingMagnetCartridgeError::InvalidConfig(_))
+        ));
     }
 
     #[test]

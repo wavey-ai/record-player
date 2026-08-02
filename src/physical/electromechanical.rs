@@ -7,13 +7,14 @@
 use thiserror::Error;
 
 use super::{
+    cartridge::moving_magnet_coil_reciprocal_damping_n_s_per_m,
     contact::{
         solve_coupled_deck_pickup_midpoint, CoupledDeckPickupError, MidpointPickupGeometry,
         StylusTangentialMode,
     },
-    MovingMagnetCartridge, MovingMagnetCartridgeError, MovingMagnetCartridgeTelemetry,
-    PickupElectromagneticForceRelation, PickupMechanicalError, PickupMechanicalInput,
-    PickupMechanicalState, PickupMechanicalTelemetry,
+    MovingMagnetCartridge, MovingMagnetCartridgeConfig, MovingMagnetCartridgeError,
+    MovingMagnetCartridgeTelemetry, PickupElectromagneticForceRelation, PickupMechanicalError,
+    PickupMechanicalInput, PickupMechanicalState, PickupMechanicalTelemetry,
 };
 use crate::{DeckMechanicalControl, DeckMechanicalState, DeckMechanicalTelemetry};
 
@@ -156,6 +157,15 @@ pub(crate) fn process_coupled_record_player_midpoint(
 
 pub(crate) fn transform_vector_from_coil(coil: [f64; 2]) -> [f64; 2] {
     matrix_vector(COIL_FROM_MECHANICAL, coil)
+}
+
+/// Returns state-independent cartridge damping in pickup mechanical coordinates.
+pub(crate) fn cartridge_mechanical_reciprocal_damping_n_s_per_m(
+    config: MovingMagnetCartridgeConfig,
+    duration_seconds: f64,
+) -> Result<[[f64; 2]; 2], MovingMagnetCartridgeError> {
+    moving_magnet_coil_reciprocal_damping_n_s_per_m(config, duration_seconds)
+        .map(transform_damping_from_coil)
 }
 
 pub(crate) fn transform_damping_from_coil(coil: [[f64; 2]; 2]) -> [[f64; 2]; 2] {
@@ -377,6 +387,79 @@ mod tests {
             let damping_power = -dot(velocity, matrix_vector(damping, velocity));
             assert!(damping_power <= 1.0e-18, "{damping_power}");
         }
+    }
+
+    #[test]
+    fn mechanical_damping_helper_preserves_the_coil_transform_bits() {
+        let seed = MovingMagnetCartridgeConfig::default();
+        let magnetic_loss_branches = [
+            MagneticLossRelaxationBranchConfig {
+                relaxation_inductance_h: 0.020,
+                loss_resistance_ohm: 4_000.0,
+            },
+            MagneticLossRelaxationBranchConfig {
+                relaxation_inductance_h: 0.180,
+                loss_resistance_ohm: 1_800.0,
+            },
+            MagneticLossRelaxationBranchConfig::default(),
+            MagneticLossRelaxationBranchConfig::default(),
+        ];
+        let configs = [
+            seed,
+            MovingMagnetCartridgeConfig {
+                coil_mutual_inductance_h: -0.61 * seed.coil_inductance_h,
+                ..seed
+            },
+            MovingMagnetCartridgeConfig {
+                coil_mutual_inductance_h: 0.61 * (seed.coil_inductance_h - 0.2),
+                magnetic_loss_branches,
+                ..seed
+            },
+        ];
+        let duration_seconds = 1.0 / SAMPLE_RATE_HZ;
+        for config in configs {
+            let mut cartridge = MovingMagnetCartridge::new(config).unwrap();
+            for sample in 0..67 {
+                let phase = sample as f64 * 0.191;
+                cartridge
+                    .advance(
+                        1.0 / [48_000.0, 96_000.0, 384_000.0][sample % 3],
+                        [0.17 * phase.sin(), -0.11 * (phase * 1.29).cos()],
+                    )
+                    .unwrap();
+            }
+            let coil = cartridge
+                .prepare_affine_step(duration_seconds)
+                .unwrap()
+                .reciprocal_damping_n_s_per_m();
+            let expected = transform_damping_from_coil(coil);
+            let actual =
+                cartridge_mechanical_reciprocal_damping_n_s_per_m(config, duration_seconds)
+                    .unwrap();
+            assert_eq!(
+                actual.map(|row| row.map(f64::to_bits)),
+                expected.map(|row| row.map(f64::to_bits))
+            );
+        }
+    }
+
+    #[test]
+    fn mechanical_damping_helper_rejects_invalid_inputs() {
+        assert_eq!(
+            cartridge_mechanical_reciprocal_damping_n_s_per_m(
+                MovingMagnetCartridgeConfig::default(),
+                0.0,
+            ),
+            Err(MovingMagnetCartridgeError::InvalidDuration)
+        );
+        let invalid_config = MovingMagnetCartridgeConfig {
+            load_capacitance_f: f64::NAN,
+            ..MovingMagnetCartridgeConfig::default()
+        };
+        assert!(matches!(
+            cartridge_mechanical_reciprocal_damping_n_s_per_m(invalid_config, 1.0 / SAMPLE_RATE_HZ,),
+            Err(MovingMagnetCartridgeError::InvalidConfig(_))
+        ));
     }
 
     #[test]

@@ -1804,6 +1804,11 @@ The accepted profile domain needs a P-matrix proof or an equivalent bounded proo
 - **Coordinate result**: `typed_joint_coordinates_keep_equation_and_velocity_orders_distinct` guards coordinate mappings.
 - **Diagnostic result**: The builder reports scaled pivots, backward error, rank, and dependent equalities.
 - **Point-only limit**: The current builder does not enclose coefficient or solution rounding error.
+- **Cartridge helper**: Config and duration now determine reciprocal electromagnetic damping without state history.
+- **Canonical formula**: Runtime and proof helpers share one damping derivation.
+- **Runtime result**: The affine path reuses its current-response matrix and avoids a second circuit solve.
+- **State test**: Five configurations keep exact damping bits across 257 advanced cartridge states each.
+- **Transform test**: Mechanical-coordinate damping matches the existing coil transform by exact bits.
 - **Base verification**: Replay the production pivot schedule with outward intervals.
 - **Pivot rule**: Each scaled pivot interval must exclude zero and pass the production tolerance.
 - **Mobility definition**: Store response as velocity rows by equation columns.

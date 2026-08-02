@@ -1897,12 +1897,11 @@ pub(crate) fn coupled_fixed_mode_normal_response(
         .map_err(|_| CoupledFixedModeResponseError::InvalidContactPoint)?;
     let stylus_body_velocity_coefficient = -2.0 * skating_factor / point.groove_radius_m;
 
-    let cartridge = super::MovingMagnetCartridge::new(config.cartridge)
-        .map_err(super::PhysicalProfileError::from)?;
-    let affine = cartridge.prepare_affine_step(dt)?;
-    let reciprocal_damping_n_s_per_m = super::electromechanical::transform_damping_from_coil(
-        affine.reciprocal_damping_n_s_per_m(),
-    );
+    let reciprocal_damping_n_s_per_m =
+        super::electromechanical::cartridge_mechanical_reciprocal_damping_n_s_per_m(
+            config.cartridge,
+            dt,
+        )?;
     let mechanical = family.mechanical;
     let deck_bearing_mode = mechanical.deck_bearing_mode();
     let slipmat_mode = mechanical.slipmat_mode();
