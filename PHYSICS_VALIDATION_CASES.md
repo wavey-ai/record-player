@@ -1712,7 +1712,15 @@ The accepted profile domain needs a P-matrix proof or an equivalent bounded proo
 - **Mask total**: Principal-minor coverage gives 768 structurally distinct mode-mask families.
 - **Runtime maximum**: One hand-active groove sample evaluates 1,053 current branches.
 - **Registered bound**: The 1,296 bound is safe, but it is not the exact current fallback count.
-- **Implementation status**: Production code does not yet generate the versioned certificate catalog.
+- **Implementation status**: The crate generates the versioned 24-class and 288-label catalog.
+- **Point builder**: It reuses the production deck, pickup, constraint, `H`, and `G` assembly.
+- **KKT parity**: A permanent test compares every active point coefficient by exact `f64` bits.
+- **Coverage result**: Every labeled family builds a finite point mobility and contact response.
+- **Diagnostic result**: Each build reports rank, dependency, scaled pivots, and maximum backward error.
+- **Coordinate test**: Six distinct values protect the different equation and velocity orders.
+- **Witness result**: The builder reproduces `W_00 = -0.007329826622361105` for the negative witness.
+- **Current limit**: The builder supplies point values, not outward interval bounds.
+- **Admission limit**: The player does not bind these results to a loaded source.
 - **Required proof**: Prove both diagonal minors and the determinant for every family.
 - **Required domain**: Bind radius, both slopes, pitch, tonearm geometry, damping, profile, source, and generation.
 - **Required failure**: Reject an uncertified operator before any state change.
@@ -1788,8 +1796,14 @@ The accepted profile domain needs a P-matrix proof or an equivalent bounded proo
 ### Verified Mobility Proof Plan
 
 - **Observation date**: 2026-08-02.
-- **Status**: Reviewed design. Production admission does not use it yet.
+- **Status**: The point builder is implemented. Production admission does not use it yet.
 - **Base systems**: Build one exact KKT system for each of 24 mechanical mobility classes.
+- **Builder result**: All 24 mechanical classes build with the shared production KKT writers.
+- **Family result**: All 288 contacting labels build with shared production contact operators.
+- **Parity result**: `fixed_mode_builder_reuses_the_production_lhs_and_hg_operators` verifies exact assembly bits.
+- **Coordinate result**: `typed_joint_coordinates_keep_equation_and_velocity_orders_distinct` guards coordinate mappings.
+- **Diagnostic result**: The builder reports scaled pivots, backward error, rank, and dependent equalities.
+- **Point-only limit**: The current builder does not enclose coefficient or solution rounding error.
 - **Base verification**: Replay the production pivot schedule with outward intervals.
 - **Pivot rule**: Each scaled pivot interval must exclude zero and pass the production tolerance.
 - **Mobility definition**: Store response as velocity rows by equation columns.

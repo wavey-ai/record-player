@@ -72,7 +72,7 @@ Use this ledger to track requirements across the chronological findings.
 - **RP-036 — Surface friction geometry**: Resolve friction in the complete local surface basis. Couple all components in the same contact solve. **Status**: Sliding surface and skating-port coupling are implemented. Sloped sticking, coupled uniqueness proof, and measurements remain open.
 - **RP-037 — Trace asset admission**: Bind fixed trace work, representation bytes, page identity, geometry, and actual wall-slope bounds. **Status**: Implemented. An authoritative full-record catalog remains open.
 - **RP-038 — Tangential contact memory**: Add identified along-groove pickup motion and local tangential material state. Preserve that state through reversals. **Status**: Certified coordinate plumbing is implemented. Continuous state mapping and sloped sticking remain open.
-- **RP-039 — Fixed-mode admission**: Certify each fixed normal-contact operator over its complete profile and source domain. **Status**: Config identity is implemented. Mobility and interval proofs remain open.
+- **RP-039 — Fixed-mode admission**: Certify each fixed normal-contact operator over its complete profile and source domain. **Status**: Config identity and point mobility are implemented. Interval proofs remain open.
 
 ## 2026-08-01: Repository and History Investigation
 
@@ -638,6 +638,19 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Runtime count**: One hand-active groove sample evaluates at most 1,053 current branches.
 - **Bound correction**: The registered 1,296 limit is safe, but it is not the exact fallback count.
 - **Implementation requirement**: Generate the versioned family catalog from production logic.
+- **Implementation result**: The crate now generates all 24 mechanical classes and 288 contacting labels.
+- **Version rule**: The operator and family-set versions are explicit inputs to later certificates.
+- **Assembly result**: The point builder reuses the production deck, pickup, constraint, `H`, and `G` writers.
+- **Parity result**: A permanent test compares every active KKT coefficient with production assembly bits.
+- **Coverage result**: All 288 labels build finite point-valued mobilities with bounded residuals.
+- **Diagnostic result**: Each response reports equality rank, dependent constraints, scaled pivots, and backward error.
+- **Dependency limit**: Dependent equalities still require a runtime right-hand-side compatibility check.
+- **Coordinate protection**: Typed accessors keep dynamic equation rows separate from dynamic velocity columns.
+- **Permanent test**: `typed_joint_coordinates_keep_equation_and_velocity_orders_distinct` uses distinct coordinate values.
+- **Witness result**: The shared builder keeps `W_00` equal to `-0.007329826622361105` for the known witness.
+- **Behavior result**: This checkpoint does not change the runtime contact result.
+- **Proof limit**: These point values are not outward interval bounds.
+- **Admission limit**: The player does not use this builder as a source admission gate.
 - **Requirement**: Certify every permitted contact family for each profile and source.
 - **Requirement**: Reject an unproved operator before playback changes state.
 - **Proof decision**: Verify 24 point-valued base mobility systems before applying interval contact operators.

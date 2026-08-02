@@ -80,7 +80,7 @@ pub enum PickupContactSurface {
 }
 
 /// Identifies the fixed tangential contact branch for one pickup sample.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum StylusTangentialMode {
     #[default]
@@ -1234,13 +1234,382 @@ pub(crate) struct CoupledDeckPickupStep {
 const JOINT_DYNAMIC_VARIABLES: usize = 6;
 const JOINT_MAX_VARIABLES: usize = 13;
 const JOINT_RHS_COLUMN: usize = JOINT_MAX_VARIABLES;
+pub(crate) const COUPLED_FIXED_MODE_OPERATOR_VERSION: u32 = 1;
+pub(crate) const COUPLED_FIXED_MODE_FAMILY_SET_VERSION: u32 = 1;
+pub(crate) const COUPLED_FIXED_MECHANICAL_CLASS_COUNT: usize = 24;
+pub(crate) const COUPLED_FIXED_CONTACT_FAMILY_COUNT: usize = 288;
 // 3 bearing * 3 slipmat * 3 hand * 3 pickup * 4 masks * 4 tangent modes.
 pub(crate) const MAX_MIDPOINT_CANDIDATE_BRANCHES: u32 = 1_296;
 pub(crate) const MAX_MIDPOINT_LINEAR_SOLVES: u32 = 1_296;
 
+/// Identifies a fixed friction mobility without a kinetic direction.
+///
+/// Positive and negative sliding use the same production left-hand side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum FixedModeFrictionMobility {
+    Sticking,
+    Sliding,
+}
+
+/// Identifies a fixed hand-contact mobility without a kinetic direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum FixedModeHandMobility {
+    Separated,
+    Sticking,
+    Sliding,
+}
+
+/// Identifies one of the 24 mechanical left-hand-side classes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct CoupledFixedMechanicalMode {
+    pub(crate) deck_bearing: FixedModeFrictionMobility,
+    pub(crate) slipmat: FixedModeFrictionMobility,
+    pub(crate) hand: FixedModeHandMobility,
+    pub(crate) pickup_bearing: FixedModeFrictionMobility,
+}
+
+impl CoupledFixedMechanicalMode {
+    fn deck_bearing_mode(self) -> CoupledDeckFrictionMode {
+        fixed_deck_mode(self.deck_bearing)
+    }
+
+    fn slipmat_mode(self) -> CoupledDeckFrictionMode {
+        fixed_deck_mode(self.slipmat)
+    }
+
+    fn hand_mode(self) -> CoupledDeckFrictionMode {
+        match self.hand {
+            FixedModeHandMobility::Separated => CoupledDeckFrictionMode::Separated,
+            FixedModeHandMobility::Sticking => CoupledDeckFrictionMode::Sticking,
+            FixedModeHandMobility::Sliding => CoupledDeckFrictionMode::SlidingPositive,
+        }
+    }
+
+    fn pickup_bearing_mode(self) -> BearingMode {
+        match self.pickup_bearing {
+            FixedModeFrictionMobility::Sticking => BearingMode::Stick,
+            FixedModeFrictionMobility::Sliding => BearingMode::Positive,
+        }
+    }
+}
+
+const fn fixed_deck_mode(mobility: FixedModeFrictionMobility) -> CoupledDeckFrictionMode {
+    match mobility {
+        FixedModeFrictionMobility::Sticking => CoupledDeckFrictionMode::Sticking,
+        FixedModeFrictionMobility::Sliding => CoupledDeckFrictionMode::SlidingPositive,
+    }
+}
+
+const FIXED_FRICTION_MOBILITIES: [FixedModeFrictionMobility; 2] = [
+    FixedModeFrictionMobility::Sticking,
+    FixedModeFrictionMobility::Sliding,
+];
+const FIXED_HAND_MOBILITIES: [FixedModeHandMobility; 3] = [
+    FixedModeHandMobility::Separated,
+    FixedModeHandMobility::Sticking,
+    FixedModeHandMobility::Sliding,
+];
+const FIXED_STYLUS_MODES: [StylusTangentialMode; 4] = [
+    StylusTangentialMode::Separated,
+    StylusTangentialMode::Sticking,
+    StylusTangentialMode::SlidingPositive,
+    StylusTangentialMode::SlidingNegative,
+];
+
+/// Returns all mechanical classes in stable certificate order.
+pub(crate) fn coupled_fixed_mechanical_modes(
+) -> impl Iterator<Item = CoupledFixedMechanicalMode> + Clone {
+    FIXED_FRICTION_MOBILITIES
+        .into_iter()
+        .flat_map(|deck_bearing| {
+            FIXED_FRICTION_MOBILITIES
+                .into_iter()
+                .flat_map(move |slipmat| {
+                    FIXED_HAND_MOBILITIES.into_iter().flat_map(move |hand| {
+                        FIXED_FRICTION_MOBILITIES
+                            .into_iter()
+                            .map(move |pickup_bearing| CoupledFixedMechanicalMode {
+                                deck_bearing,
+                                slipmat,
+                                hand,
+                                pickup_bearing,
+                            })
+                    })
+                })
+        })
+}
+
+/// Identifies a contacting surface in the fixed-mode catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum CoupledFixedContactSurface {
+    GrooveWalls,
+    RecordLand,
+}
+
+/// Identifies the production spiral-origin law for a contacting surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum CoupledFixedOriginLaw {
+    InteriorSpiral,
+    HeldProgramBoundary,
+    SurfaceIndependent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct CoupledFixedContactGeometryLabel {
+    surface: CoupledFixedContactSurface,
+    origin_law: CoupledFixedOriginLaw,
+}
+
+const FIXED_CONTACT_GEOMETRY_LABELS: [CoupledFixedContactGeometryLabel; 3] = [
+    CoupledFixedContactGeometryLabel {
+        surface: CoupledFixedContactSurface::GrooveWalls,
+        origin_law: CoupledFixedOriginLaw::InteriorSpiral,
+    },
+    CoupledFixedContactGeometryLabel {
+        surface: CoupledFixedContactSurface::GrooveWalls,
+        origin_law: CoupledFixedOriginLaw::HeldProgramBoundary,
+    },
+    CoupledFixedContactGeometryLabel {
+        surface: CoupledFixedContactSurface::RecordLand,
+        origin_law: CoupledFixedOriginLaw::SurfaceIndependent,
+    },
+];
+
+/// Identifies one versioned fixed-mode contacting family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct CoupledFixedContactFamily {
+    family_set_version: u32,
+    pub(crate) mechanical: CoupledFixedMechanicalMode,
+    pub(crate) surface: CoupledFixedContactSurface,
+    pub(crate) origin_law: CoupledFixedOriginLaw,
+    pub(crate) stylus: StylusTangentialMode,
+}
+
+impl CoupledFixedContactFamily {
+    pub(crate) const fn family_set_version(self) -> u32 {
+        self.family_set_version
+    }
+}
+
+/// Returns all 288 contacting labels in stable certificate order.
+pub(crate) fn coupled_fixed_contact_families(
+) -> impl Iterator<Item = CoupledFixedContactFamily> + Clone {
+    coupled_fixed_mechanical_modes().flat_map(|mechanical| {
+        FIXED_CONTACT_GEOMETRY_LABELS
+            .into_iter()
+            .flat_map(move |geometry| {
+                FIXED_STYLUS_MODES
+                    .into_iter()
+                    .map(move |stylus| CoupledFixedContactFamily {
+                        family_set_version: COUPLED_FIXED_MODE_FAMILY_SET_VERSION,
+                        mechanical,
+                        surface: geometry.surface,
+                        origin_law: geometry.origin_law,
+                        stylus,
+                    })
+            })
+    })
+}
+
+/// Supplies the source-dependent coordinates for one fixed-mode response.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CoupledFixedContactPoint {
+    pub(crate) groove_radius_m: f64,
+    pub(crate) wall_slopes: [f64; 2],
+}
+
+/// Describes whether a labeled operator can represent a loaded runtime mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CoupledFixedModeReachability {
+    RuntimeConditional,
+    ZeroNormalForceOnly,
+    Infeasible(CoupledFixedModeInfeasibility),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CoupledFixedModeInfeasibility {
+    SlopedGrooveStickingWithFriction,
+    SlopedGrooveStickingAtHeldBoundary,
+}
+
+/// Reports the equality rank after production removes redundant constraints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CoupledFixedEqualityDiagnostics {
+    pub(crate) requested_count: usize,
+    pub(crate) rank: usize,
+    pub(crate) dependent_count: usize,
+    pub(crate) runtime_rhs_compatibility_required: bool,
+}
+
+/// Reports scaled-pivot and backward-error checks from the production solver.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CoupledFixedSolveDiagnostics {
+    pub(crate) system_size: usize,
+    pub(crate) minimum_scaled_pivot: f64,
+    pub(crate) maximum_scaled_pivot: f64,
+    pub(crate) scaled_pivot_ratio: f64,
+    pub(crate) maximum_backward_error: f64,
+}
+
+/// Stores the compact production KKT left-hand side for one fixed mode.
+///
+/// The first six rows use dynamic equation order. The first six columns use
+/// dynamic velocity order. Remaining rows and columns use equality-basis order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CoupledFixedModeKktLhs {
+    pub(crate) system_size: usize,
+    pub(crate) equality_count: usize,
+    pub(crate) coefficients: [[f64; JOINT_MAX_VARIABLES]; JOINT_MAX_VARIABLES],
+    pub(crate) equality_basis: [JointDynamicVelocityRow; 5],
+}
+
+impl CoupledFixedModeKktLhs {
+    pub(crate) const fn dynamic_coefficient(
+        self,
+        equation: JointDynamicEquation,
+        velocity: JointDynamicVelocity,
+    ) -> f64 {
+        self.coefficients[equation as usize][velocity as usize]
+    }
+}
+
+/// Maps dynamic equation RHS values to dynamic velocities for one fixed mode.
+///
+/// The outer index uses velocity order. The inner index uses equation-row order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CoupledFixedDynamicMobility {
+    pub(crate) velocity_by_equation_rhs: [[f64; JOINT_DYNAMIC_VARIABLES]; JOINT_DYNAMIC_VARIABLES],
+}
+
+/// Reports every profile-derived scalar used by the point-valued assembly.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CoupledFixedDerivedCoefficients {
+    pub(crate) dt: f64,
+    pub(crate) groove_pitch_m_per_revolution: f64,
+    pub(crate) friction_coefficient: f64,
+    pub(crate) skating_factor: f64,
+    pub(crate) stylus_body_velocity_coefficient: f64,
+    pub(crate) lateral_origin_shift_per_record_velocity_m_s: f64,
+    pub(crate) platter_inertial_coefficient: f64,
+    pub(crate) record_inertial_coefficient: f64,
+    pub(crate) stylus_inertial_coefficient: f64,
+    pub(crate) body_inertial_coefficients: [f64; 2],
+    pub(crate) suspension_stiffness_n_per_m: [f64; 2],
+    pub(crate) suspension_viscous_damping_n_s_per_m: [f64; 2],
+    pub(crate) suspension_coupling_n_s_per_m: [f64; 2],
+    pub(crate) deck_bearing_viscous_coefficient: f64,
+    pub(crate) slipmat_viscous_coefficient: f64,
+    pub(crate) hand_viscous_coefficient: f64,
+    pub(crate) pickup_bearing_viscous_coefficient: f64,
+    pub(crate) reciprocal_cartridge_damping_n_s_per_m: [[f64; 2]; 2],
+}
+
+impl CoupledFixedDynamicMobility {
+    pub(crate) const fn coefficient(
+        self,
+        velocity: JointDynamicVelocity,
+        equation: JointDynamicEquation,
+    ) -> f64 {
+        self.velocity_by_equation_rhs[velocity as usize][equation as usize]
+    }
+
+    pub(crate) fn response_for_equation_rhs(
+        self,
+        rhs: JointDynamicEquationRhs,
+    ) -> [f64; JOINT_DYNAMIC_VARIABLES] {
+        let rhs = rhs.coefficients_in_equation_row_order();
+        self.velocity_by_equation_rhs.map(|row| {
+            row.into_iter()
+                .zip(rhs)
+                .fold(0.0, |sum, (coefficient, value)| {
+                    coefficient.mul_add(value, sum)
+                })
+        })
+    }
+}
+
+/// Contains a typed one-wall or two-wall normal response.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum CoupledFixedNormalResponse {
+    RecordLand { w: f64 },
+    GrooveWalls { w: [[f64; 2]; 2] },
+}
+
+/// Contains the fixed-mode response and its production assembly diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CoupledFixedModeNormalResponse {
+    pub(crate) operator_version: u32,
+    pub(crate) family: CoupledFixedContactFamily,
+    pub(crate) reachability: CoupledFixedModeReachability,
+    pub(crate) equality: CoupledFixedEqualityDiagnostics,
+    pub(crate) solve: CoupledFixedSolveDiagnostics,
+    pub(crate) derived: CoupledFixedDerivedCoefficients,
+    pub(crate) kkt_lhs: CoupledFixedModeKktLhs,
+    pub(crate) dynamic_mobility: CoupledFixedDynamicMobility,
+    pub(crate) contact_operator: CoupledContactHgOperator,
+    pub(crate) normal_response: CoupledFixedNormalResponse,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum CoupledFixedModeResponseError {
+    #[error(transparent)]
+    InvalidConfig(#[from] super::PhysicalProfileError),
+    #[error("the fixed-mode point is outside the validated profile domain")]
+    InvalidContactPoint,
+    #[error("the fixed-mode family label is invalid")]
+    InvalidFamily,
+    #[error(transparent)]
+    Cartridge(#[from] super::MovingMagnetCartridgeError),
+    #[error("the fixed-mode left-hand side is singular or fails its residual check")]
+    SingularOrIllConditioned,
+}
+
 /// Stores six dynamic equation RHS values in equation-row order.
 ///
 /// The order is platter, record, tip-x, body-x, tip-z, body-z.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(usize)]
+pub(crate) enum JointDynamicEquation {
+    Platter = 0,
+    Record = 1,
+    TipX = 2,
+    BodyX = 3,
+    TipZ = 4,
+    BodyZ = 5,
+}
+
+pub(crate) const JOINT_DYNAMIC_EQUATIONS: [JointDynamicEquation; JOINT_DYNAMIC_VARIABLES] = [
+    JointDynamicEquation::Platter,
+    JointDynamicEquation::Record,
+    JointDynamicEquation::TipX,
+    JointDynamicEquation::BodyX,
+    JointDynamicEquation::TipZ,
+    JointDynamicEquation::BodyZ,
+];
+
+/// Identifies one dynamic velocity column.
+///
+/// The order is platter, record, tip-x, tip-z, body-x, body-z.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(usize)]
+pub(crate) enum JointDynamicVelocity {
+    Platter = 0,
+    Record = 1,
+    TipX = 2,
+    TipZ = 3,
+    BodyX = 4,
+    BodyZ = 5,
+}
+
+pub(crate) const JOINT_DYNAMIC_VELOCITIES: [JointDynamicVelocity; JOINT_DYNAMIC_VARIABLES] = [
+    JointDynamicVelocity::Platter,
+    JointDynamicVelocity::Record,
+    JointDynamicVelocity::TipX,
+    JointDynamicVelocity::TipZ,
+    JointDynamicVelocity::BodyX,
+    JointDynamicVelocity::BodyZ,
+];
+
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct JointDynamicEquationRhs {
     platter: f64,
@@ -1252,6 +1621,17 @@ pub(crate) struct JointDynamicEquationRhs {
 }
 
 impl JointDynamicEquationRhs {
+    pub(crate) const fn coefficient(self, equation: JointDynamicEquation) -> f64 {
+        match equation {
+            JointDynamicEquation::Platter => self.platter,
+            JointDynamicEquation::Record => self.record,
+            JointDynamicEquation::TipX => self.tip_x,
+            JointDynamicEquation::BodyX => self.body_x,
+            JointDynamicEquation::TipZ => self.tip_z,
+            JointDynamicEquation::BodyZ => self.body_z,
+        }
+    }
+
     pub(crate) const fn coefficients_in_equation_row_order(self) -> [f64; JOINT_DYNAMIC_VARIABLES] {
         [
             self.platter,
@@ -1303,6 +1683,17 @@ pub(crate) struct JointDynamicVelocityRow {
 }
 
 impl JointDynamicVelocityRow {
+    pub(crate) const fn coefficient(self, velocity: JointDynamicVelocity) -> f64 {
+        match velocity {
+            JointDynamicVelocity::Platter => self.platter,
+            JointDynamicVelocity::Record => self.record,
+            JointDynamicVelocity::TipX => self.tip_x,
+            JointDynamicVelocity::TipZ => self.tip_z,
+            JointDynamicVelocity::BodyX => self.body_x,
+            JointDynamicVelocity::BodyZ => self.body_z,
+        }
+    }
+
     pub(crate) const fn coefficients_in_velocity_column_order(
         self,
     ) -> [f64; JOINT_DYNAMIC_VARIABLES] {
@@ -1326,8 +1717,7 @@ impl JointDynamicVelocityRow {
         row[4] += body_x;
     }
 
-    #[cfg(test)]
-    fn response_for_velocity(self, velocity: [f64; JOINT_MAX_VARIABLES]) -> f64 {
+    fn response_for_velocity(self, velocity: [f64; JOINT_DYNAMIC_VARIABLES]) -> f64 {
         self.coefficients_in_velocity_column_order()
             .into_iter()
             .zip(velocity)
@@ -1433,6 +1823,364 @@ pub(crate) fn coupled_contact_hg_operator(
         constraint_count,
         normal_force_rhs,
         normal_gap_velocity,
+    }
+}
+
+/// Builds the production point-valued KKT mobility and normal response.
+///
+/// The configuration supplies every physical coefficient. The contact point
+/// supplies only the source-dependent radius and wall slopes.
+pub(crate) fn coupled_fixed_mode_normal_response(
+    config: super::PhysicalPlaybackConfig,
+    family: CoupledFixedContactFamily,
+    point: CoupledFixedContactPoint,
+) -> Result<CoupledFixedModeNormalResponse, CoupledFixedModeResponseError> {
+    let config = config.validate()?;
+    validate_fixed_family(family)?;
+    if !point.groove_radius_m.is_finite()
+        || !(config.groove.inner_program_radius_m..=config.groove.outer_program_radius_m)
+            .contains(&point.groove_radius_m)
+        || point
+            .wall_slopes
+            .into_iter()
+            .any(|slope| !slope.is_finite())
+    {
+        return Err(CoupledFixedModeResponseError::InvalidContactPoint);
+    }
+
+    let dt = 1.0 / config.solver.internal_sample_rate_hz;
+    let surface = match family.surface {
+        CoupledFixedContactSurface::GrooveWalls => PickupContactSurface::GrooveWalls,
+        CoupledFixedContactSurface::RecordLand => PickupContactSurface::RecordLand,
+    };
+    let wall_slopes = if surface == PickupContactSurface::GrooveWalls {
+        point.wall_slopes
+    } else {
+        [0.0; 2]
+    };
+    let wall_contacts = wall_slopes.map(|groove_slope| {
+        let mut set = StylusTraceContactSet {
+            contact_count: 1,
+            ..StylusTraceContactSet::default()
+        };
+        set.contacts[0].groove_slope = groove_slope;
+        set
+    });
+    let input = PickupMechanicalInput {
+        wall_contacts,
+        contact_surface: surface,
+        groove_radius_m: point.groove_radius_m,
+        stylus_lowered: true,
+        ..PickupMechanicalInput::default()
+    };
+    validate_input(input).map_err(|_| CoupledFixedModeResponseError::InvalidContactPoint)?;
+    validate_friction_geometry(config.contact, input)
+        .map_err(|_| CoupledFixedModeResponseError::InvalidContactPoint)?;
+
+    let lateral_origin_shift_per_record_velocity_m_s = match family.origin_law {
+        CoupledFixedOriginLaw::InteriorSpiral => {
+            -config.record_cut.groove_pitch_m_per_revolution * 0.5 * dt / std::f64::consts::TAU
+        }
+        CoupledFixedOriginLaw::HeldProgramBoundary | CoupledFixedOriginLaw::SurfaceIndependent => {
+            0.0
+        }
+    };
+    let geometry = MidpointPickupGeometry {
+        input,
+        lateral_origin_shift_bias_m: 0.0,
+        lateral_origin_shift_per_record_velocity_m_s,
+    };
+    let skating_factor = config
+        .tonearm
+        .geometry
+        .equivalent_radial_force_n(point.groove_radius_m, 1.0)
+        .map_err(|_| CoupledFixedModeResponseError::InvalidContactPoint)?;
+    let stylus_body_velocity_coefficient = -2.0 * skating_factor / point.groove_radius_m;
+
+    let cartridge = super::MovingMagnetCartridge::new(config.cartridge)
+        .map_err(super::PhysicalProfileError::from)?;
+    let affine = cartridge.prepare_affine_step(dt)?;
+    let reciprocal_damping_n_s_per_m = super::electromechanical::transform_damping_from_coil(
+        affine.reciprocal_damping_n_s_per_m(),
+    );
+    let mechanical = family.mechanical;
+    let deck_bearing_mode = mechanical.deck_bearing_mode();
+    let slipmat_mode = mechanical.slipmat_mode();
+    let hand_mode = mechanical.hand_mode();
+    let pickup_bearing_mode = mechanical.pickup_bearing_mode();
+    let static_constraints = select_independent_deck_constraints(
+        deck_bearing_mode,
+        slipmat_mode,
+        hand_mode,
+        family.stylus,
+        pickup_bearing_mode,
+        0.0,
+        0.0,
+        stylus_body_velocity_coefficient,
+    )
+    .ok_or(CoupledFixedModeResponseError::SingularOrIllConditioned)?;
+
+    let mut next_column = JOINT_DYNAMIC_VARIABLES;
+    let pickup_bearing_column = (pickup_bearing_mode == BearingMode::Stick).then(|| {
+        let column = next_column;
+        next_column += 1;
+        column
+    });
+    let deck_bearing_column = static_constraints[0].then(|| {
+        let column = next_column;
+        next_column += 1;
+        column
+    });
+    let slipmat_column = static_constraints[1].then(|| {
+        let column = next_column;
+        next_column += 1;
+        column
+    });
+    let hand_column = static_constraints[2].then(|| {
+        let column = next_column;
+        next_column += 1;
+        column
+    });
+    let stylus_column = static_constraints[3].then(|| {
+        let column = next_column;
+        next_column += 1;
+        column
+    });
+    let static_columns = JointStaticConstraintColumns {
+        pickup_bearing: pickup_bearing_column,
+        deck_bearing: deck_bearing_column,
+        slipmat: slipmat_column,
+        hand: hand_column,
+        stylus: stylus_column,
+    };
+    if next_column > JOINT_MAX_VARIABLES {
+        return Err(CoupledFixedModeResponseError::SingularOrIllConditioned);
+    }
+
+    let mut augmented = [[0.0_f64; JOINT_MAX_VARIABLES + 1]; JOINT_MAX_VARIABLES];
+    assemble_deck_lhs(
+        &mut augmented,
+        config.deck,
+        dt,
+        deck_bearing_mode,
+        slipmat_mode,
+        hand_mode,
+        deck_bearing_column,
+        slipmat_column,
+        hand_column,
+    )
+    .ok_or(CoupledFixedModeResponseError::SingularOrIllConditioned)?;
+    assemble_pickup_lhs(
+        &mut augmented,
+        config.contact,
+        config.tonearm,
+        dt,
+        true,
+        reciprocal_damping_n_s_per_m,
+        pickup_bearing_column,
+    );
+    write_joint_static_force_columns(&mut augmented, input, skating_factor, static_columns);
+    let static_rows = append_joint_static_constraint_rows(
+        &mut augmented,
+        JOINT_DYNAMIC_VARIABLES,
+        stylus_body_velocity_coefficient,
+        static_columns,
+    );
+    if static_rows.next_row != next_column {
+        return Err(CoupledFixedModeResponseError::SingularOrIllConditioned);
+    }
+    for row in &mut augmented {
+        row[JOINT_RHS_COLUMN] = 0.0;
+    }
+
+    let requested_count =
+        usize::from(mechanical.deck_bearing == FixedModeFrictionMobility::Sticking)
+            + usize::from(mechanical.slipmat == FixedModeFrictionMobility::Sticking)
+            + usize::from(mechanical.hand == FixedModeHandMobility::Sticking)
+            + usize::from(mechanical.pickup_bearing == FixedModeFrictionMobility::Sticking)
+            + usize::from(family.stylus == StylusTangentialMode::Sticking);
+    let equality_count = next_column - JOINT_DYNAMIC_VARIABLES;
+    let dependent_count = requested_count.saturating_sub(equality_count);
+    let equality = CoupledFixedEqualityDiagnostics {
+        requested_count,
+        rank: equality_count,
+        dependent_count,
+        runtime_rhs_compatibility_required: dependent_count != 0,
+    };
+
+    let mut equality_basis = [JointDynamicVelocityRow::default(); 5];
+    for (basis, row) in equality_basis
+        .iter_mut()
+        .zip(JOINT_DYNAMIC_VARIABLES..next_column)
+    {
+        *basis = dynamic_velocity_row_from_kkt_row(augmented[row]);
+    }
+    let mut coefficients = [[0.0; JOINT_MAX_VARIABLES]; JOINT_MAX_VARIABLES];
+    for row in 0..next_column {
+        coefficients[row][..next_column].copy_from_slice(&augmented[row][..next_column]);
+    }
+    let kkt_lhs = CoupledFixedModeKktLhs {
+        system_size: next_column,
+        equality_count,
+        coefficients,
+        equality_basis,
+    };
+
+    let mut dynamic_mobility = CoupledFixedDynamicMobility {
+        velocity_by_equation_rhs: [[0.0; JOINT_DYNAMIC_VARIABLES]; JOINT_DYNAMIC_VARIABLES],
+    };
+    let mut minimum_scaled_pivot = f64::INFINITY;
+    let mut maximum_scaled_pivot = 0.0_f64;
+    let mut maximum_backward_error = 0.0_f64;
+    for equation_rhs in 0..JOINT_DYNAMIC_VARIABLES {
+        let mut system = augmented;
+        system[equation_rhs][JOINT_RHS_COLUMN] = 1.0;
+        let solved = solve_joint_linear_system_with_diagnostics(&mut system, next_column)
+            .ok_or(CoupledFixedModeResponseError::SingularOrIllConditioned)?;
+        for velocity in 0..JOINT_DYNAMIC_VARIABLES {
+            dynamic_mobility.velocity_by_equation_rhs[velocity][equation_rhs] =
+                solved.solution[velocity];
+        }
+        minimum_scaled_pivot = minimum_scaled_pivot.min(solved.diagnostics.minimum_scaled_pivot);
+        maximum_scaled_pivot = maximum_scaled_pivot.max(solved.diagnostics.maximum_scaled_pivot);
+        maximum_backward_error = maximum_backward_error.max(solved.diagnostics.backward_error);
+    }
+    let solve = CoupledFixedSolveDiagnostics {
+        system_size: next_column,
+        minimum_scaled_pivot,
+        maximum_scaled_pivot,
+        scaled_pivot_ratio: minimum_scaled_pivot / maximum_scaled_pivot,
+        maximum_backward_error,
+    };
+
+    let friction_coefficient = match surface {
+        PickupContactSurface::GrooveWalls => config.contact.groove_friction_coefficient,
+        PickupContactSurface::RecordLand => config.contact.record_surface_friction_coefficient,
+        PickupContactSurface::None => 0.0,
+    };
+    let contact_operator = coupled_contact_hg_operator(
+        geometry,
+        dt,
+        friction_coefficient,
+        family.stylus,
+        skating_factor,
+    );
+    let suspension_axes = [config.tonearm.lateral, config.tonearm.vertical];
+    let suspension_stiffness_n_per_m = suspension_axes.map(|axis| axis.stiffness_n_per_m());
+    let suspension_viscous_damping_n_s_per_m =
+        suspension_axes.map(|axis| axis.viscous_damping_n_s_per_m());
+    let derived = CoupledFixedDerivedCoefficients {
+        dt,
+        groove_pitch_m_per_revolution: config.record_cut.groove_pitch_m_per_revolution,
+        friction_coefficient,
+        skating_factor,
+        stylus_body_velocity_coefficient,
+        lateral_origin_shift_per_record_velocity_m_s,
+        platter_inertial_coefficient: config.deck.platter_inertia_kg_m2 / dt,
+        record_inertial_coefficient: config.deck.record_inertia_kg_m2 / dt,
+        stylus_inertial_coefficient: config.contact.moving_mass_kg / dt,
+        body_inertial_coefficients: suspension_axes.map(|axis| axis.effective_mass_kg / dt),
+        suspension_stiffness_n_per_m,
+        suspension_viscous_damping_n_s_per_m,
+        suspension_coupling_n_s_per_m: [0, 1].map(|axis| {
+            suspension_stiffness_n_per_m[axis] * dt + suspension_viscous_damping_n_s_per_m[axis]
+        }),
+        deck_bearing_viscous_coefficient: config.deck.bearing_viscous_torque_nm_per_rad_s,
+        slipmat_viscous_coefficient: config.deck.slipmat_viscous_torque_nm_per_rad_s,
+        hand_viscous_coefficient: config.deck.hand_viscous_torque_nm_per_rad_s,
+        pickup_bearing_viscous_coefficient: config
+            .tonearm
+            .lateral_bearing_viscous_damping_n_s_per_m,
+        reciprocal_cartridge_damping_n_s_per_m: reciprocal_damping_n_s_per_m,
+    };
+    let mut w = [[0.0; 2]; 2];
+    for source in 0..contact_operator.constraint_count() {
+        let velocity =
+            dynamic_mobility.response_for_equation_rhs(contact_operator.normal_force_rhs(source));
+        for (target, response_row) in w
+            .iter_mut()
+            .enumerate()
+            .take(contact_operator.constraint_count())
+        {
+            response_row[source] = contact_operator
+                .normal_gap_velocity(target)
+                .response_for_velocity(velocity);
+        }
+    }
+    let normal_response = match family.surface {
+        CoupledFixedContactSurface::GrooveWalls => CoupledFixedNormalResponse::GrooveWalls { w },
+        CoupledFixedContactSurface::RecordLand => {
+            CoupledFixedNormalResponse::RecordLand { w: w[0][0] }
+        }
+    };
+    let nonzero_slope = point.wall_slopes.into_iter().any(|slope| slope != 0.0);
+    let reachability = match family.stylus {
+        StylusTangentialMode::Separated if friction_coefficient > 0.0 => {
+            CoupledFixedModeReachability::ZeroNormalForceOnly
+        }
+        StylusTangentialMode::Sticking
+            if family.surface == CoupledFixedContactSurface::GrooveWalls
+                && family.origin_law == CoupledFixedOriginLaw::HeldProgramBoundary
+                && nonzero_slope =>
+        {
+            CoupledFixedModeReachability::Infeasible(
+                CoupledFixedModeInfeasibility::SlopedGrooveStickingAtHeldBoundary,
+            )
+        }
+        StylusTangentialMode::Sticking
+            if family.surface == CoupledFixedContactSurface::GrooveWalls
+                && friction_coefficient > 0.0
+                && nonzero_slope =>
+        {
+            CoupledFixedModeReachability::Infeasible(
+                CoupledFixedModeInfeasibility::SlopedGrooveStickingWithFriction,
+            )
+        }
+        _ => CoupledFixedModeReachability::RuntimeConditional,
+    };
+    Ok(CoupledFixedModeNormalResponse {
+        operator_version: COUPLED_FIXED_MODE_OPERATOR_VERSION,
+        family,
+        reachability,
+        equality,
+        solve,
+        derived,
+        kkt_lhs,
+        dynamic_mobility,
+        contact_operator,
+        normal_response,
+    })
+}
+
+fn validate_fixed_family(
+    family: CoupledFixedContactFamily,
+) -> Result<(), CoupledFixedModeResponseError> {
+    let origin_is_valid = matches!(
+        (family.surface, family.origin_law),
+        (
+            CoupledFixedContactSurface::GrooveWalls,
+            CoupledFixedOriginLaw::InteriorSpiral | CoupledFixedOriginLaw::HeldProgramBoundary
+        ) | (
+            CoupledFixedContactSurface::RecordLand,
+            CoupledFixedOriginLaw::SurfaceIndependent
+        )
+    );
+    if family.family_set_version != COUPLED_FIXED_MODE_FAMILY_SET_VERSION || !origin_is_valid {
+        return Err(CoupledFixedModeResponseError::InvalidFamily);
+    }
+    Ok(())
+}
+
+fn dynamic_velocity_row_from_kkt_row(
+    row: [f64; JOINT_MAX_VARIABLES + 1],
+) -> JointDynamicVelocityRow {
+    JointDynamicVelocityRow {
+        platter: row[0],
+        record: row[1],
+        tip_x: row[2],
+        tip_z: row[3],
+        body_x: row[4],
+        body_z: row[5],
     }
 }
 
@@ -1604,6 +2352,73 @@ struct JointCandidate {
     wall_endpoint_displacement_m: [f64; 2],
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct JointStaticConstraintColumns {
+    pickup_bearing: Option<usize>,
+    deck_bearing: Option<usize>,
+    slipmat: Option<usize>,
+    hand: Option<usize>,
+    stylus: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct JointStaticConstraintRows {
+    next_row: usize,
+    hand: Option<usize>,
+    stylus: Option<usize>,
+}
+
+fn write_joint_static_force_columns(
+    augmented: &mut [[f64; JOINT_MAX_VARIABLES + 1]; JOINT_MAX_VARIABLES],
+    input: PickupMechanicalInput,
+    skating_factor: f64,
+    columns: JointStaticConstraintColumns,
+) {
+    if let Some(column) = columns.stylus {
+        augmented[1][column] = -input.groove_radius_m;
+        augmented[3][column] = skating_factor;
+    }
+}
+
+fn append_joint_static_constraint_rows(
+    augmented: &mut [[f64; JOINT_MAX_VARIABLES + 1]; JOINT_MAX_VARIABLES],
+    mut next_row: usize,
+    stylus_body_velocity_coefficient: f64,
+    columns: JointStaticConstraintColumns,
+) -> JointStaticConstraintRows {
+    if columns.pickup_bearing.is_some() {
+        augmented[next_row][4] = 1.0;
+        next_row += 1;
+    }
+    if columns.deck_bearing.is_some() {
+        augmented[next_row][0] = 1.0;
+        next_row += 1;
+    }
+    if columns.slipmat.is_some() {
+        augmented[next_row][0] = 1.0;
+        augmented[next_row][1] = -1.0;
+        next_row += 1;
+    }
+    let hand = columns.hand.map(|_| {
+        let row = next_row;
+        augmented[row][1] = 1.0;
+        next_row += 1;
+        row
+    });
+    let stylus = columns.stylus.map(|_| {
+        let row = next_row;
+        augmented[row][1] = 1.0;
+        augmented[row][4] = stylus_body_velocity_coefficient;
+        next_row += 1;
+        row
+    });
+    JointStaticConstraintRows {
+        next_row,
+        hand,
+        stylus,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn solve_joint_branch(
     deck: DeckMidpointPreparation,
@@ -1665,6 +2480,13 @@ fn solve_joint_branch(
         next_column += 1;
         column
     });
+    let static_columns = JointStaticConstraintColumns {
+        pickup_bearing: pickup_bearing_column,
+        deck_bearing: deck_bearing_column,
+        slipmat: slipmat_column,
+        hand: hand_column,
+        stylus: stylus_force_column,
+    };
     if next_column > JOINT_MAX_VARIABLES {
         return None;
     }
@@ -1700,12 +2522,7 @@ fn solve_joint_branch(
         stylus_mode,
         skating_factor,
     );
-    if stylus_mode == StylusTangentialMode::Sticking {
-        if let Some(column) = stylus_force_column {
-            augmented[1][column] = -input.groove_radius_m;
-            augmented[3][column] = skating_factor;
-        }
-    }
+    write_joint_static_force_columns(&mut augmented, input, skating_factor, static_columns);
     for (constraint, lambda_column) in lambda_columns
         .into_iter()
         .enumerate()
@@ -1731,30 +2548,19 @@ fn solve_joint_branch(
             / deck.dt;
         next_row += 1;
     }
-    if pickup_bearing_column.is_some() {
-        augmented[next_row][4] = 1.0;
-        next_row += 1;
+    let static_rows = append_joint_static_constraint_rows(
+        &mut augmented,
+        next_row,
+        stylus_body_velocity_coefficient,
+        static_columns,
+    );
+    if let Some(row) = static_rows.hand {
+        augmented[row][JOINT_RHS_COLUMN] = deck.hand_velocity_rad_s;
     }
-    if deck_bearing_column.is_some() {
-        augmented[next_row][0] = 1.0;
-        next_row += 1;
+    if let Some(row) = static_rows.stylus {
+        augmented[row][JOINT_RHS_COLUMN] = -deck.previous_record_velocity_rad_s;
     }
-    if slipmat_column.is_some() {
-        augmented[next_row][0] = 1.0;
-        augmented[next_row][1] = -1.0;
-        next_row += 1;
-    }
-    if hand_column.is_some() {
-        augmented[next_row][1] = 1.0;
-        augmented[next_row][JOINT_RHS_COLUMN] = deck.hand_velocity_rad_s;
-        next_row += 1;
-    }
-    if stylus_force_column.is_some() {
-        augmented[next_row][1] = 1.0;
-        augmented[next_row][4] = stylus_body_velocity_coefficient;
-        augmented[next_row][JOINT_RHS_COLUMN] = -deck.previous_record_velocity_rad_s;
-        next_row += 1;
-    }
+    next_row = static_rows.next_row;
     if next_row != next_column {
         return None;
     }
@@ -1953,13 +2759,37 @@ fn assemble_deck_dynamics(
     slipmat_column: Option<usize>,
     hand_column: Option<usize>,
 ) -> Option<()> {
-    let platter_mass = deck.config.platter_inertia_kg_m2 / deck.dt;
-    let record_mass = deck.config.record_inertia_kg_m2 / deck.dt;
+    assemble_deck_lhs(
+        augmented,
+        deck.config,
+        deck.dt,
+        bearing_mode,
+        slipmat_mode,
+        hand_mode,
+        bearing_column,
+        slipmat_column,
+        hand_column,
+    )?;
+    assemble_deck_rhs(augmented, deck, bearing_mode, slipmat_mode, hand_mode);
+    Some(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_deck_lhs(
+    augmented: &mut [[f64; JOINT_MAX_VARIABLES + 1]; JOINT_MAX_VARIABLES],
+    config: crate::PhysicalDeckConfig,
+    dt: f64,
+    bearing_mode: CoupledDeckFrictionMode,
+    slipmat_mode: CoupledDeckFrictionMode,
+    hand_mode: CoupledDeckFrictionMode,
+    bearing_column: Option<usize>,
+    slipmat_column: Option<usize>,
+    hand_column: Option<usize>,
+) -> Option<()> {
+    let platter_mass = config.platter_inertia_kg_m2 / dt;
+    let record_mass = config.record_inertia_kg_m2 / dt;
     augmented[0][0] = platter_mass;
-    augmented[0][JOINT_RHS_COLUMN] =
-        platter_mass * deck.previous_platter_velocity_rad_s + deck.motor_torque_nm;
     augmented[1][1] = record_mass;
-    augmented[1][JOINT_RHS_COLUMN] = record_mass * deck.previous_record_velocity_rad_s;
 
     match bearing_mode {
         CoupledDeckFrictionMode::Sticking => {
@@ -1968,12 +2798,10 @@ fn assemble_deck_dynamics(
             }
         }
         CoupledDeckFrictionMode::SlidingPositive => {
-            augmented[0][0] += deck.config.bearing_viscous_torque_nm_per_rad_s;
-            augmented[0][JOINT_RHS_COLUMN] -= deck.config.bearing_kinetic_torque_nm;
+            augmented[0][0] += config.bearing_viscous_torque_nm_per_rad_s;
         }
         CoupledDeckFrictionMode::SlidingNegative => {
-            augmented[0][0] += deck.config.bearing_viscous_torque_nm_per_rad_s;
-            augmented[0][JOINT_RHS_COLUMN] += deck.config.bearing_kinetic_torque_nm;
+            augmented[0][0] += config.bearing_viscous_torque_nm_per_rad_s;
         }
         CoupledDeckFrictionMode::Separated => return None,
     }
@@ -1985,18 +2813,11 @@ fn assemble_deck_dynamics(
             }
         }
         CoupledDeckFrictionMode::SlidingPositive | CoupledDeckFrictionMode::SlidingNegative => {
-            let bias = if slipmat_mode == CoupledDeckFrictionMode::SlidingPositive {
-                deck.config.slipmat_kinetic_torque_nm
-            } else {
-                -deck.config.slipmat_kinetic_torque_nm
-            };
-            let damping = deck.config.slipmat_viscous_torque_nm_per_rad_s;
+            let damping = config.slipmat_viscous_torque_nm_per_rad_s;
             augmented[0][0] += damping;
             augmented[0][1] -= damping;
-            augmented[0][JOINT_RHS_COLUMN] -= bias;
             augmented[1][0] -= damping;
             augmented[1][1] += damping;
-            augmented[1][JOINT_RHS_COLUMN] += bias;
         }
         CoupledDeckFrictionMode::Separated => return None,
     }
@@ -2007,18 +2828,59 @@ fn assemble_deck_dynamics(
             }
         }
         CoupledDeckFrictionMode::SlidingPositive | CoupledDeckFrictionMode::SlidingNegative => {
-            let bias = if hand_mode == CoupledDeckFrictionMode::SlidingPositive {
-                deck.hand_kinetic_limit_nm
-            } else {
-                -deck.hand_kinetic_limit_nm
-            };
-            let damping = deck.config.hand_viscous_torque_nm_per_rad_s;
+            let damping = config.hand_viscous_torque_nm_per_rad_s;
             augmented[1][1] += damping;
-            augmented[1][JOINT_RHS_COLUMN] += bias + damping * deck.hand_velocity_rad_s;
         }
         CoupledDeckFrictionMode::Separated => {}
     }
     Some(())
+}
+
+fn assemble_deck_rhs(
+    augmented: &mut [[f64; JOINT_MAX_VARIABLES + 1]; JOINT_MAX_VARIABLES],
+    deck: DeckMidpointPreparation,
+    bearing_mode: CoupledDeckFrictionMode,
+    slipmat_mode: CoupledDeckFrictionMode,
+    hand_mode: CoupledDeckFrictionMode,
+) {
+    let platter_mass = deck.config.platter_inertia_kg_m2 / deck.dt;
+    let record_mass = deck.config.record_inertia_kg_m2 / deck.dt;
+    augmented[0][JOINT_RHS_COLUMN] =
+        platter_mass * deck.previous_platter_velocity_rad_s + deck.motor_torque_nm;
+    augmented[1][JOINT_RHS_COLUMN] = record_mass * deck.previous_record_velocity_rad_s;
+    match bearing_mode {
+        CoupledDeckFrictionMode::SlidingPositive => {
+            augmented[0][JOINT_RHS_COLUMN] -= deck.config.bearing_kinetic_torque_nm;
+        }
+        CoupledDeckFrictionMode::SlidingNegative => {
+            augmented[0][JOINT_RHS_COLUMN] += deck.config.bearing_kinetic_torque_nm;
+        }
+        CoupledDeckFrictionMode::Sticking | CoupledDeckFrictionMode::Separated => {}
+    }
+    if matches!(
+        slipmat_mode,
+        CoupledDeckFrictionMode::SlidingPositive | CoupledDeckFrictionMode::SlidingNegative
+    ) {
+        let bias = if slipmat_mode == CoupledDeckFrictionMode::SlidingPositive {
+            deck.config.slipmat_kinetic_torque_nm
+        } else {
+            -deck.config.slipmat_kinetic_torque_nm
+        };
+        augmented[0][JOINT_RHS_COLUMN] -= bias;
+        augmented[1][JOINT_RHS_COLUMN] += bias;
+    }
+    if matches!(
+        hand_mode,
+        CoupledDeckFrictionMode::SlidingPositive | CoupledDeckFrictionMode::SlidingNegative
+    ) {
+        let bias = if hand_mode == CoupledDeckFrictionMode::SlidingPositive {
+            deck.hand_kinetic_limit_nm
+        } else {
+            -deck.hand_kinetic_limit_nm
+        };
+        let damping = deck.config.hand_viscous_torque_nm_per_rad_s;
+        augmented[1][JOINT_RHS_COLUMN] += bias + damping * deck.hand_velocity_rad_s;
+    }
 }
 
 fn assemble_pickup_dynamics(
@@ -2030,11 +2892,29 @@ fn assemble_pickup_dynamics(
     bearing_column: Option<usize>,
 ) {
     let dt = 1.0 / pickup.sample_rate_hz;
-    let axes = [pickup.tonearm.lateral, pickup.tonearm.vertical];
-    let body_external_force_n = [
-        pickup.tonearm.anti_skate_force_n,
-        -pickup.tonearm.vertical_tracking_force_n,
-    ];
+    assemble_pickup_lhs(
+        augmented,
+        pickup.contact,
+        pickup.tonearm,
+        dt,
+        input.stylus_lowered,
+        relation.reciprocal_damping_n_s_per_m,
+        bearing_column,
+    );
+    assemble_pickup_rhs(augmented, pickup, input, relation, bearing_mode);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_pickup_lhs(
+    augmented: &mut [[f64; JOINT_MAX_VARIABLES + 1]; JOINT_MAX_VARIABLES],
+    contact: StylusContactConfig,
+    tonearm: TonearmConfig,
+    dt: f64,
+    stylus_lowered: bool,
+    reciprocal_damping_n_s_per_m: [[f64; 2]; 2],
+    bearing_column: Option<usize>,
+) {
+    let axes = [tonearm.lateral, tonearm.vertical];
     for axis in 0..2 {
         let tip_row = 2 + axis * 2;
         let body_row = tip_row + 1;
@@ -2043,44 +2923,67 @@ fn assemble_pickup_dynamics(
         let stiffness = axes[axis].stiffness_n_per_m();
         let damping = axes[axis].viscous_damping_n_s_per_m();
         let coupling = stiffness * dt + damping;
-        let relative_displacement =
-            pickup.tip_displacement_m[axis] - pickup.body_displacement_m[axis];
-        augmented[tip_row][tip_column] = pickup.contact.moving_mass_kg / dt + coupling;
+        augmented[tip_row][tip_column] = contact.moving_mass_kg / dt + coupling;
         augmented[tip_row][body_column] = -coupling;
-        augmented[tip_row][JOINT_RHS_COLUMN] = pickup.contact.moving_mass_kg / dt
-            * pickup.tip_velocity_m_s[axis]
-            - stiffness * relative_displacement
-            + relation.force_bias_n[axis];
         augmented[body_row][tip_column] = -coupling;
         augmented[body_row][body_column] = axes[axis].effective_mass_kg / dt + coupling;
-        augmented[body_row][JOINT_RHS_COLUMN] = axes[axis].effective_mass_kg / dt
-            * pickup.body_velocity_m_s[axis]
-            + stiffness * relative_displacement
-            + body_external_force_n[axis]
-            - relation.force_bias_n[axis];
         for velocity_axis in 0..2 {
-            let reciprocal_damping = relation.reciprocal_damping_n_s_per_m[axis][velocity_axis];
+            let reciprocal_damping = reciprocal_damping_n_s_per_m[axis][velocity_axis];
             augmented[tip_row][2 + velocity_axis] += reciprocal_damping;
             augmented[tip_row][4 + velocity_axis] -= reciprocal_damping;
             augmented[body_row][2 + velocity_axis] -= reciprocal_damping;
             augmented[body_row][4 + velocity_axis] += reciprocal_damping;
         }
         if axis == 0 {
-            augmented[body_row][body_column] +=
-                pickup.tonearm.lateral_bearing_viscous_damping_n_s_per_m;
+            augmented[body_row][body_column] += tonearm.lateral_bearing_viscous_damping_n_s_per_m;
+            if let Some(column) = bearing_column {
+                augmented[body_row][column] = -1.0;
+            }
+        }
+        if axis == 1 && !stylus_lowered {
+            let cue_coupling =
+                tonearm.cue_support_stiffness_n_per_m * dt + tonearm.cue_support_damping_n_s_per_m;
+            augmented[body_row][body_column] += cue_coupling;
+        }
+    }
+}
+
+fn assemble_pickup_rhs(
+    augmented: &mut [[f64; JOINT_MAX_VARIABLES + 1]; JOINT_MAX_VARIABLES],
+    pickup: PickupMechanicalState,
+    input: PickupMechanicalInput,
+    relation: PickupElectromagneticForceRelation,
+    bearing_mode: BearingMode,
+) {
+    let dt = 1.0 / pickup.sample_rate_hz;
+    let axes = [pickup.tonearm.lateral, pickup.tonearm.vertical];
+    let body_external_force_n = [
+        pickup.tonearm.anti_skate_force_n,
+        -pickup.tonearm.vertical_tracking_force_n,
+    ];
+    for axis in 0..2 {
+        let tip_row = 2 + axis * 2;
+        let body_row = tip_row + 1;
+        let stiffness = axes[axis].stiffness_n_per_m();
+        let relative_displacement =
+            pickup.tip_displacement_m[axis] - pickup.body_displacement_m[axis];
+        augmented[tip_row][JOINT_RHS_COLUMN] = pickup.contact.moving_mass_kg / dt
+            * pickup.tip_velocity_m_s[axis]
+            - stiffness * relative_displacement
+            + relation.force_bias_n[axis];
+        augmented[body_row][JOINT_RHS_COLUMN] = axes[axis].effective_mass_kg / dt
+            * pickup.body_velocity_m_s[axis]
+            + stiffness * relative_displacement
+            + body_external_force_n[axis]
+            - relation.force_bias_n[axis];
+        if axis == 0 {
             augmented[body_row][JOINT_RHS_COLUMN] += match bearing_mode {
                 BearingMode::Stick => 0.0,
                 BearingMode::Positive => -pickup.tonearm.lateral_bearing_kinetic_friction_n,
                 BearingMode::Negative => pickup.tonearm.lateral_bearing_kinetic_friction_n,
             };
-            if let Some(column) = bearing_column {
-                augmented[body_row][column] = -1.0;
-            }
         }
         if axis == 1 && !input.stylus_lowered {
-            let cue_coupling = pickup.tonearm.cue_support_stiffness_n_per_m * dt
-                + pickup.tonearm.cue_support_damping_n_s_per_m;
-            augmented[body_row][body_column] += cue_coupling;
             augmented[body_row][JOINT_RHS_COLUMN] += pickup.tonearm.cue_support_stiffness_n_per_m
                 * (pickup.tonearm.cue_lift_height_m - pickup.body_displacement_m[1]);
         }
@@ -2406,6 +3309,26 @@ fn solve_joint_linear_system(
     augmented: &mut [[f64; JOINT_MAX_VARIABLES + 1]; JOINT_MAX_VARIABLES],
     size: usize,
 ) -> Option<[f64; JOINT_MAX_VARIABLES]> {
+    solve_joint_linear_system_with_diagnostics(augmented, size).map(|solved| solved.solution)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct JointLinearSolveDiagnostics {
+    minimum_scaled_pivot: f64,
+    maximum_scaled_pivot: f64,
+    backward_error: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct JointLinearSolveResult {
+    solution: [f64; JOINT_MAX_VARIABLES],
+    diagnostics: JointLinearSolveDiagnostics,
+}
+
+fn solve_joint_linear_system_with_diagnostics(
+    augmented: &mut [[f64; JOINT_MAX_VARIABLES + 1]; JOINT_MAX_VARIABLES],
+    size: usize,
+) -> Option<JointLinearSolveResult> {
     if size == 0 || size > JOINT_MAX_VARIABLES {
         return None;
     }
@@ -2438,6 +3361,8 @@ fn solve_joint_linear_system(
         }
     }
     let relative_pivot_tolerance = 128.0 * f64::EPSILON * size as f64;
+    let mut minimum_scaled_pivot = f64::INFINITY;
+    let mut maximum_scaled_pivot = 0.0_f64;
     for pivot_column in 0..size {
         let pivot_row = (pivot_column..size).max_by(|left, right| {
             augmented[*left][pivot_column]
@@ -2448,9 +3373,11 @@ fn solve_joint_linear_system(
         if !pivot.is_finite() || pivot.abs() <= relative_pivot_tolerance {
             return None;
         }
+        minimum_scaled_pivot = minimum_scaled_pivot.min(pivot.abs());
+        maximum_scaled_pivot = maximum_scaled_pivot.max(pivot.abs());
         augmented.swap(pivot_column, pivot_row);
-        for column in pivot_column..size {
-            augmented[pivot_column][column] /= pivot;
+        for coefficient in &mut augmented[pivot_column][pivot_column..size] {
+            *coefficient /= pivot;
         }
         augmented[pivot_column][JOINT_RHS_COLUMN] /= pivot;
         let pivot_values = augmented[pivot_column];
@@ -2494,7 +3421,14 @@ fn solve_joint_linear_system(
         .mul_add(solution_norm, right_hand_side_norm)
         .max(f64::MIN_POSITIVE);
     let backward_error = residual_norm / normalization;
-    (backward_error.is_finite() && backward_error <= 1.0e-10).then_some(solution)
+    (backward_error.is_finite() && backward_error <= 1.0e-10).then_some(JointLinearSolveResult {
+        solution,
+        diagnostics: JointLinearSolveDiagnostics {
+            minimum_scaled_pivot,
+            maximum_scaled_pivot,
+            backward_error,
+        },
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3602,6 +4536,49 @@ mod tests {
         .unwrap()
     }
 
+    fn fixed_mechanical_mode(
+        deck_bearing: FixedModeFrictionMobility,
+        slipmat: FixedModeFrictionMobility,
+        hand: FixedModeHandMobility,
+        pickup_bearing: FixedModeFrictionMobility,
+    ) -> CoupledFixedMechanicalMode {
+        coupled_fixed_mechanical_modes()
+            .find(|mode| {
+                mode.deck_bearing == deck_bearing
+                    && mode.slipmat == slipmat
+                    && mode.hand == hand
+                    && mode.pickup_bearing == pickup_bearing
+            })
+            .unwrap()
+    }
+
+    fn fixed_contact_family(
+        mechanical: CoupledFixedMechanicalMode,
+        surface: CoupledFixedContactSurface,
+        origin_law: CoupledFixedOriginLaw,
+        stylus: StylusTangentialMode,
+    ) -> CoupledFixedContactFamily {
+        coupled_fixed_contact_families()
+            .find(|family| {
+                family.mechanical == mechanical
+                    && family.surface == surface
+                    && family.origin_law == origin_law
+                    && family.stylus == stylus
+            })
+            .unwrap()
+    }
+
+    fn seed_playback_config() -> super::super::PhysicalPlaybackConfig {
+        super::super::PhysicalProfile::sl_1200mk7_concorde_mkii_scratch_seed().config
+    }
+
+    fn fixed_response_matrix(response: CoupledFixedModeNormalResponse) -> [[f64; 2]; 2] {
+        match response.normal_response {
+            CoupledFixedNormalResponse::GrooveWalls { w } => w,
+            CoupledFixedNormalResponse::RecordLand { w } => [[w, 0.0], [0.0; 2]],
+        }
+    }
+
     fn assert_operator_vector_close(
         actual: [f64; JOINT_DYNAMIC_VARIABLES],
         expected: [f64; JOINT_DYNAMIC_VARIABLES],
@@ -3653,6 +4630,8 @@ mod tests {
             operator.normal_force_rhs(source).write_rhs(&mut augmented);
             let velocity =
                 solve_joint_linear_system(&mut augmented, JOINT_DYNAMIC_VARIABLES + 1).unwrap();
+            let velocity: [f64; JOINT_DYNAMIC_VARIABLES] =
+                velocity[..JOINT_DYNAMIC_VARIABLES].try_into().unwrap();
             for (target, target_response) in response
                 .iter_mut()
                 .enumerate()
@@ -3745,6 +4724,502 @@ mod tests {
             preparation,
             skating_factor,
         )
+    }
+
+    #[test]
+    fn fixed_mode_catalog_enumerates_24_mechanical_and_288_contacting_labels() {
+        let mechanical = coupled_fixed_mechanical_modes().collect::<Vec<_>>();
+        assert_eq!(mechanical.len(), COUPLED_FIXED_MECHANICAL_CLASS_COUNT);
+        let mechanical_unique = mechanical
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(mechanical_unique.len(), mechanical.len());
+
+        let families = coupled_fixed_contact_families().collect::<Vec<_>>();
+        assert_eq!(families.len(), COUPLED_FIXED_CONTACT_FAMILY_COUNT);
+        let unique = families
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), families.len());
+        assert!(families.iter().all(|family| {
+            family.family_set_version() == COUPLED_FIXED_MODE_FAMILY_SET_VERSION
+        }));
+        assert_eq!(
+            families
+                .iter()
+                .filter(|family| family.surface == CoupledFixedContactSurface::GrooveWalls)
+                .count(),
+            192
+        );
+        assert_eq!(
+            families
+                .iter()
+                .filter(|family| family.surface == CoupledFixedContactSurface::RecordLand)
+                .count(),
+            96
+        );
+        for stylus in FIXED_STYLUS_MODES {
+            assert_eq!(
+                families
+                    .iter()
+                    .filter(|family| family.stylus == stylus)
+                    .count(),
+                72
+            );
+        }
+    }
+
+    #[test]
+    fn typed_joint_coordinates_keep_equation_and_velocity_orders_distinct() {
+        let rhs = JointDynamicEquationRhs {
+            platter: 1.0,
+            record: 2.0,
+            tip_x: 3.0,
+            body_x: 4.0,
+            tip_z: 5.0,
+            body_z: 6.0,
+        };
+        assert_eq!(
+            JOINT_DYNAMIC_EQUATIONS.map(|equation| rhs.coefficient(equation)),
+            [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        );
+
+        let velocity_row = JointDynamicVelocityRow {
+            platter: 10.0,
+            record: 20.0,
+            tip_x: 30.0,
+            tip_z: 40.0,
+            body_x: 50.0,
+            body_z: 60.0,
+        };
+        assert_eq!(
+            JOINT_DYNAMIC_VELOCITIES.map(|velocity| velocity_row.coefficient(velocity)),
+            [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+        );
+
+        let mut mobility = CoupledFixedDynamicMobility {
+            velocity_by_equation_rhs: [[0.0; JOINT_DYNAMIC_VARIABLES]; JOINT_DYNAMIC_VARIABLES],
+        };
+        mobility.velocity_by_equation_rhs[JointDynamicVelocity::TipZ as usize]
+            [JointDynamicEquation::TipZ as usize] = 34.0;
+        mobility.velocity_by_equation_rhs[JointDynamicVelocity::BodyX as usize]
+            [JointDynamicEquation::BodyX as usize] = 43.0;
+        assert_eq!(
+            mobility.coefficient(JointDynamicVelocity::TipZ, JointDynamicEquation::TipZ),
+            34.0
+        );
+        assert_eq!(
+            mobility.coefficient(JointDynamicVelocity::BodyX, JointDynamicEquation::BodyX),
+            43.0
+        );
+        assert_eq!(
+            mobility.coefficient(JointDynamicVelocity::TipZ, JointDynamicEquation::BodyX),
+            0.0
+        );
+        assert_eq!(
+            mobility.coefficient(JointDynamicVelocity::BodyX, JointDynamicEquation::TipZ),
+            0.0
+        );
+
+        let mut kkt = CoupledFixedModeKktLhs {
+            system_size: JOINT_DYNAMIC_VARIABLES,
+            equality_count: 0,
+            coefficients: [[0.0; JOINT_MAX_VARIABLES]; JOINT_MAX_VARIABLES],
+            equality_basis: [JointDynamicVelocityRow::default(); 5],
+        };
+        kkt.coefficients[JointDynamicEquation::TipZ as usize]
+            [JointDynamicVelocity::TipZ as usize] = 53.0;
+        kkt.coefficients[JointDynamicEquation::BodyX as usize]
+            [JointDynamicVelocity::BodyX as usize] = 45.0;
+        assert_eq!(
+            kkt.dynamic_coefficient(JointDynamicEquation::TipZ, JointDynamicVelocity::TipZ),
+            53.0
+        );
+        assert_eq!(
+            kkt.dynamic_coefficient(JointDynamicEquation::BodyX, JointDynamicVelocity::BodyX),
+            45.0
+        );
+        assert_eq!(
+            kkt.dynamic_coefficient(JointDynamicEquation::TipZ, JointDynamicVelocity::BodyX),
+            0.0
+        );
+        assert_eq!(
+            kkt.dynamic_coefficient(JointDynamicEquation::BodyX, JointDynamicVelocity::TipZ),
+            0.0
+        );
+    }
+
+    #[test]
+    fn all_288_fixed_mode_labels_build_finite_production_mobilities() {
+        let config = seed_playback_config();
+        let point = CoupledFixedContactPoint {
+            groove_radius_m: config.groove.outer_program_radius_m,
+            wall_slopes: [0.0; 2],
+        };
+        let mut evaluated = 0;
+        for family in coupled_fixed_contact_families() {
+            let response = coupled_fixed_mode_normal_response(config, family, point)
+                .unwrap_or_else(|error| panic!("{family:?}: {error}"));
+            evaluated += 1;
+            assert_eq!(
+                response.operator_version,
+                COUPLED_FIXED_MODE_OPERATOR_VERSION
+            );
+            assert_eq!(response.family, family);
+            assert_eq!(response.solve.system_size, response.kkt_lhs.system_size);
+            assert_eq!(response.equality.rank, response.kkt_lhs.equality_count);
+            assert_eq!(
+                response.equality.dependent_count,
+                response
+                    .equality
+                    .requested_count
+                    .saturating_sub(response.equality.rank)
+            );
+            assert!(response.solve.minimum_scaled_pivot > 0.0);
+            assert!(response.solve.maximum_scaled_pivot.is_finite());
+            assert!(response.solve.scaled_pivot_ratio > 0.0);
+            assert!(response.solve.maximum_backward_error <= 1.0e-10);
+            assert!(response
+                .dynamic_mobility
+                .velocity_by_equation_rhs
+                .into_iter()
+                .flatten()
+                .all(f64::is_finite));
+            assert!(fixed_response_matrix(response)
+                .into_iter()
+                .flatten()
+                .all(f64::is_finite));
+            match family.stylus {
+                StylusTangentialMode::Separated => assert_eq!(
+                    response.reachability,
+                    CoupledFixedModeReachability::ZeroNormalForceOnly
+                ),
+                _ => assert_eq!(
+                    response.reachability,
+                    CoupledFixedModeReachability::RuntimeConditional
+                ),
+            }
+        }
+        assert_eq!(evaluated, COUPLED_FIXED_CONTACT_FAMILY_COUNT);
+    }
+
+    #[test]
+    fn fixed_mode_builder_reuses_the_production_lhs_and_hg_operators() {
+        let config = seed_playback_config();
+        let mechanical = fixed_mechanical_mode(
+            FixedModeFrictionMobility::Sliding,
+            FixedModeFrictionMobility::Sliding,
+            FixedModeHandMobility::Separated,
+            FixedModeFrictionMobility::Sticking,
+        );
+        let family = fixed_contact_family(
+            mechanical,
+            CoupledFixedContactSurface::GrooveWalls,
+            CoupledFixedOriginLaw::InteriorSpiral,
+            StylusTangentialMode::SlidingNegative,
+        );
+        let point = CoupledFixedContactPoint {
+            groove_radius_m: config.groove.outer_program_radius_m,
+            wall_slopes: [0.35, -0.20],
+        };
+        let response = coupled_fixed_mode_normal_response(config, family, point).unwrap();
+
+        let dt = 1.0 / config.solver.internal_sample_rate_hz;
+        let mut deck = DeckMechanicalState::new(config.deck).unwrap();
+        deck.reset(1.0, 1.0, 0.0, 0.0).unwrap();
+        let preparation = deck
+            .prepare_midpoint_step(dt, crate::DeckMechanicalControl::default())
+            .unwrap();
+        let pickup = PickupMechanicalState::new(config.contact, config.tonearm, 1.0 / dt).unwrap();
+        let cartridge = crate::physical::MovingMagnetCartridge::new(config.cartridge).unwrap();
+        let affine = cartridge.prepare_affine_step(dt).unwrap();
+        let relation = PickupElectromagneticForceRelation::new(
+            crate::physical::electromechanical::transform_vector_from_coil(
+                affine.reaction_force_bias_n(),
+            ),
+            crate::physical::electromechanical::transform_damping_from_coil(
+                affine.reciprocal_damping_n_s_per_m(),
+            ),
+        )
+        .unwrap();
+        let input = PickupMechanicalInput {
+            wall_contacts: test_single_wall_contacts([0.0; 2], point.wall_slopes),
+            groove_radius_m: point.groove_radius_m,
+            ..PickupMechanicalInput::default()
+        };
+        let geometry = MidpointPickupGeometry {
+            input,
+            lateral_origin_shift_bias_m: 0.0,
+            lateral_origin_shift_per_record_velocity_m_s: -config
+                .record_cut
+                .groove_pitch_m_per_revolution
+                * 0.5
+                * dt
+                / std::f64::consts::TAU,
+        };
+        let skating_factor = config
+            .tonearm
+            .geometry
+            .equivalent_radial_force_n(point.groove_radius_m, 1.0)
+            .unwrap();
+        let operator = coupled_contact_hg_operator(
+            geometry,
+            dt,
+            config.contact.groove_friction_coefficient,
+            family.stylus,
+            skating_factor,
+        );
+        assert_eq!(response.contact_operator, operator);
+        assert_eq!(response.derived.dt, dt);
+        assert_eq!(
+            response.derived.groove_pitch_m_per_revolution,
+            config.record_cut.groove_pitch_m_per_revolution
+        );
+        assert_eq!(
+            response.derived.friction_coefficient,
+            config.contact.groove_friction_coefficient
+        );
+        assert_eq!(response.derived.skating_factor, skating_factor);
+        assert_eq!(
+            response.derived.reciprocal_cartridge_damping_n_s_per_m,
+            relation.reciprocal_damping_n_s_per_m()
+        );
+        let expected =
+            probe_coupled_normal_response(preparation, pickup, input, relation, operator);
+        let actual = fixed_response_matrix(response);
+        for row in 0..2 {
+            for column in 0..2 {
+                assert!(
+                    (actual[row][column] - expected[row][column]).abs() < 1.0e-15,
+                    "actual={actual:?}, expected={expected:?}"
+                );
+            }
+        }
+
+        let mut production_lhs = [[0.0_f64; JOINT_MAX_VARIABLES + 1]; JOINT_MAX_VARIABLES];
+        assemble_deck_dynamics(
+            &mut production_lhs,
+            preparation,
+            CoupledDeckFrictionMode::SlidingPositive,
+            CoupledDeckFrictionMode::SlidingPositive,
+            CoupledDeckFrictionMode::Separated,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assemble_pickup_dynamics(
+            &mut production_lhs,
+            pickup,
+            input,
+            relation,
+            BearingMode::Stick,
+            Some(JOINT_DYNAMIC_VARIABLES),
+        );
+        production_lhs[JOINT_DYNAMIC_VARIABLES][4] = 1.0;
+        for (row, (actual_row, expected_row)) in response
+            .kkt_lhs
+            .coefficients
+            .iter()
+            .zip(production_lhs.iter())
+            .take(response.kkt_lhs.system_size)
+            .enumerate()
+        {
+            for (column, (actual, expected)) in actual_row
+                .iter()
+                .zip(expected_row.iter())
+                .take(response.kkt_lhs.system_size)
+                .enumerate()
+            {
+                assert_eq!(
+                    actual.to_bits(),
+                    expected.to_bits(),
+                    "coefficient [{row}][{column}]"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_mode_builder_confirms_the_negative_normal_minor() {
+        let mut config = seed_playback_config();
+        config.deck.record_inertia_kg_m2 = 1.0e-7;
+        config.contact.moving_mass_kg = 1.0e-2;
+        config.cartridge.generator_coefficient_v_s_per_m = 1.0e-12;
+        config.cartridge.generator_coefficient_source =
+            crate::physical::GeneratorCoefficientSource::UserSupplied;
+        let mechanical = fixed_mechanical_mode(
+            FixedModeFrictionMobility::Sliding,
+            FixedModeFrictionMobility::Sliding,
+            FixedModeHandMobility::Separated,
+            FixedModeFrictionMobility::Sticking,
+        );
+        let family = fixed_contact_family(
+            mechanical,
+            CoupledFixedContactSurface::GrooveWalls,
+            CoupledFixedOriginLaw::InteriorSpiral,
+            StylusTangentialMode::SlidingPositive,
+        );
+        let response = coupled_fixed_mode_normal_response(
+            config,
+            family,
+            CoupledFixedContactPoint {
+                groove_radius_m: 0.146_05,
+                wall_slopes: [-0.125; 2],
+            },
+        )
+        .unwrap();
+        let w = fixed_response_matrix(response);
+        assert!(w[0][0] < 0.0, "W={w:?}");
+        assert!(
+            (w[0][0] + 0.007_329_826_622_361_105).abs() < 1.0e-12,
+            "W={w:?}"
+        );
+    }
+
+    #[test]
+    fn fixed_mode_builder_keeps_the_origin_laws_distinct() {
+        let config = seed_playback_config();
+        let mechanical = fixed_mechanical_mode(
+            FixedModeFrictionMobility::Sliding,
+            FixedModeFrictionMobility::Sliding,
+            FixedModeHandMobility::Separated,
+            FixedModeFrictionMobility::Sliding,
+        );
+        let point = CoupledFixedContactPoint {
+            groove_radius_m: config.groove.outer_program_radius_m,
+            wall_slopes: [0.0; 2],
+        };
+        let interior = coupled_fixed_mode_normal_response(
+            config,
+            fixed_contact_family(
+                mechanical,
+                CoupledFixedContactSurface::GrooveWalls,
+                CoupledFixedOriginLaw::InteriorSpiral,
+                StylusTangentialMode::SlidingPositive,
+            ),
+            point,
+        )
+        .unwrap();
+        let held = coupled_fixed_mode_normal_response(
+            config,
+            fixed_contact_family(
+                mechanical,
+                CoupledFixedContactSurface::GrooveWalls,
+                CoupledFixedOriginLaw::HeldProgramBoundary,
+                StylusTangentialMode::SlidingPositive,
+            ),
+            point,
+        )
+        .unwrap();
+        assert_ne!(fixed_response_matrix(interior), fixed_response_matrix(held));
+        assert_eq!(interior.kkt_lhs, held.kkt_lhs);
+        assert_eq!(interior.dynamic_mobility, held.dynamic_mobility);
+    }
+
+    #[test]
+    fn fixed_mode_reachability_separates_force_and_slope_conditions() {
+        let config = seed_playback_config();
+        let mechanical = fixed_mechanical_mode(
+            FixedModeFrictionMobility::Sliding,
+            FixedModeFrictionMobility::Sliding,
+            FixedModeHandMobility::Separated,
+            FixedModeFrictionMobility::Sliding,
+        );
+        let sloped = CoupledFixedContactPoint {
+            groove_radius_m: config.groove.outer_program_radius_m,
+            wall_slopes: [0.1, -0.1],
+        };
+        let interior_sticking = fixed_contact_family(
+            mechanical,
+            CoupledFixedContactSurface::GrooveWalls,
+            CoupledFixedOriginLaw::InteriorSpiral,
+            StylusTangentialMode::Sticking,
+        );
+        assert_eq!(
+            coupled_fixed_mode_normal_response(config, interior_sticking, sloped)
+                .unwrap()
+                .reachability,
+            CoupledFixedModeReachability::Infeasible(
+                CoupledFixedModeInfeasibility::SlopedGrooveStickingWithFriction
+            )
+        );
+
+        let mut frictionless = config;
+        frictionless.contact.groove_friction_coefficient = 0.0;
+        assert_eq!(
+            coupled_fixed_mode_normal_response(frictionless, interior_sticking, sloped)
+                .unwrap()
+                .reachability,
+            CoupledFixedModeReachability::RuntimeConditional
+        );
+        let held_sticking = fixed_contact_family(
+            mechanical,
+            CoupledFixedContactSurface::GrooveWalls,
+            CoupledFixedOriginLaw::HeldProgramBoundary,
+            StylusTangentialMode::Sticking,
+        );
+        assert_eq!(
+            coupled_fixed_mode_normal_response(frictionless, held_sticking, sloped)
+                .unwrap()
+                .reachability,
+            CoupledFixedModeReachability::Infeasible(
+                CoupledFixedModeInfeasibility::SlopedGrooveStickingAtHeldBoundary
+            )
+        );
+        let separated = fixed_contact_family(
+            mechanical,
+            CoupledFixedContactSurface::GrooveWalls,
+            CoupledFixedOriginLaw::InteriorSpiral,
+            StylusTangentialMode::Separated,
+        );
+        assert_eq!(
+            coupled_fixed_mode_normal_response(config, separated, sloped)
+                .unwrap()
+                .reachability,
+            CoupledFixedModeReachability::ZeroNormalForceOnly
+        );
+        assert_eq!(
+            coupled_fixed_mode_normal_response(frictionless, separated, sloped)
+                .unwrap()
+                .reachability,
+            CoupledFixedModeReachability::RuntimeConditional
+        );
+    }
+
+    #[test]
+    fn fixed_mode_builder_reports_dependent_equalities_without_runtime_rhs() {
+        let config = seed_playback_config();
+        let mechanical = fixed_mechanical_mode(
+            FixedModeFrictionMobility::Sticking,
+            FixedModeFrictionMobility::Sticking,
+            FixedModeHandMobility::Sticking,
+            FixedModeFrictionMobility::Sticking,
+        );
+        let family = fixed_contact_family(
+            mechanical,
+            CoupledFixedContactSurface::RecordLand,
+            CoupledFixedOriginLaw::SurfaceIndependent,
+            StylusTangentialMode::Sticking,
+        );
+        let response = coupled_fixed_mode_normal_response(
+            config,
+            family,
+            CoupledFixedContactPoint {
+                groove_radius_m: config.groove.outer_program_radius_m,
+                wall_slopes: [0.0; 2],
+            },
+        )
+        .unwrap();
+        assert_eq!(response.equality.requested_count, 5);
+        assert!(response.equality.rank < response.equality.requested_count);
+        assert_eq!(
+            response.equality.dependent_count,
+            response.equality.requested_count - response.equality.rank
+        );
+        assert!(response.equality.runtime_rhs_compatibility_required);
     }
 
     #[test]
