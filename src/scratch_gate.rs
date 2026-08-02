@@ -6,9 +6,9 @@ use thiserror::Error;
 
 pub const MIN_SCRATCH_CLICKS: u8 = 1;
 pub const MAX_SCRATCH_CLICKS: u8 = 8;
-pub const SCRATCH_GATE_ALGORITHM_VERSION: u32 = 6;
-pub const SCRATCH_GATE_SNAPSHOT_VERSION: u32 = 1;
-pub const SCRATCH_PERFORMANCE_SNAPSHOT_VERSION: u32 = 1;
+pub const SCRATCH_GATE_ALGORITHM_VERSION: u32 = 7;
+pub const SCRATCH_GATE_SNAPSHOT_VERSION: u32 = 2;
+pub const SCRATCH_PERFORMANCE_SNAPSHOT_VERSION: u32 = 2;
 pub const MAXIMUM_SCRATCH_RECORD_RATE: f64 = 20.0;
 const MAXIMUM_FRAME_DELTA_SECONDS: f64 = 1.0 / 8_000.0;
 
@@ -226,7 +226,7 @@ enum MotionEvent {
 /// Direction changes use intent for responsiveness and rendered motion as a
 /// fallback, while pattern phase follows audible travel in the confirmed
 /// stroke direction.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScratchGate {
     preset: ScratchPreset,
@@ -255,7 +255,7 @@ pub struct ScratchGate {
 }
 
 /// Stores all automatic gate state that can affect later audio frames.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScratchGateSnapshot {
     version: u32,
@@ -331,6 +331,8 @@ impl ScratchPerformanceInput {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScratchPerformanceOutput {
+    pub preset: ScratchPreset,
+    pub clicks: u8,
     pub audible_gain: f64,
     pub automatic_gate_gain: f64,
     pub automatic_gate_target: f64,
@@ -343,7 +345,7 @@ pub struct ScratchPerformanceOutput {
 }
 
 /// Stores all helper state that can affect later audible gain.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScratchPerformanceSnapshot {
     version: u32,
@@ -352,7 +354,7 @@ pub struct ScratchPerformanceSnapshot {
 }
 
 /// Canonical allocation-free scratch helper for physical player consumers.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScratchPerformance {
     gate: ScratchGate,
     audible_gain: f64,
@@ -400,6 +402,23 @@ impl ScratchPerformance {
         &self.gate
     }
 
+    /// Reports the current output state without advancing the helper.
+    pub fn output(&self) -> ScratchPerformanceOutput {
+        ScratchPerformanceOutput {
+            preset: self.gate.preset(),
+            clicks: self.gate.clicks(),
+            audible_gain: self.audible_gain,
+            automatic_gate_gain: self.gate.gate(),
+            automatic_gate_target: self.gate.target(),
+            owner: self.crossfader_owner(),
+            direction: self.gate.direction(),
+            moving: self.gate.moving(),
+            phase: self.gate.phase(),
+            stroke_progress: self.gate.stroke_progress(),
+            span_prediction_confidence: self.gate.span_prediction_confidence(),
+        }
+    }
+
     /// Processes one frame after the physical mechanics step for that frame.
     pub fn process_frame(
         &mut self,
@@ -413,28 +432,14 @@ impl ScratchPerformance {
             input.rendered_record_rate,
             input.rendered_source_travel_seconds,
         );
-        let owner = if self.gate.preset() == ScratchPreset::Baby {
-            ScratchCrossfaderOwner::Manual
-        } else {
-            ScratchCrossfaderOwner::AutomaticPreset
-        };
+        let owner = self.crossfader_owner();
         let target = match owner {
             ScratchCrossfaderOwner::Manual => input.manual_crossfader_gain,
             ScratchCrossfaderOwner::AutomaticPreset => self.gate.target(),
         };
         let speed = input.rendered_record_rate.abs();
         advance_gain_envelope(&mut self.audible_gain, target, input.delta_seconds, speed);
-        Ok(ScratchPerformanceOutput {
-            audible_gain: self.audible_gain,
-            automatic_gate_gain: self.gate.gate(),
-            automatic_gate_target: self.gate.target(),
-            owner,
-            direction: self.gate.direction(),
-            moving: self.gate.moving(),
-            phase: self.gate.phase(),
-            stroke_progress: self.gate.stroke_progress(),
-            span_prediction_confidence: self.gate.span_prediction_confidence(),
-        })
+        Ok(self.output())
     }
 
     pub fn snapshot(&self) -> ScratchPerformanceSnapshot {
@@ -467,6 +472,14 @@ impl ScratchPerformance {
         self.gate = restored_gate;
         self.audible_gain = snapshot.audible_gain;
         Ok(())
+    }
+
+    fn crossfader_owner(&self) -> ScratchCrossfaderOwner {
+        if self.gate.preset() == ScratchPreset::Baby {
+            ScratchCrossfaderOwner::Manual
+        } else {
+            ScratchCrossfaderOwner::AutomaticPreset
+        }
     }
 }
 
@@ -850,8 +863,11 @@ impl ScratchGate {
         if sign(rendered_source_travel_seconds) == candidate {
             self.pending_stroke_travel += rendered_source_travel_seconds.abs();
         }
-        if self.pending_seconds < confirmation_seconds
-            || !predicted_direction_is_physically_plausible(candidate, rendered_rate)
+        let physical_motion_confirms_direction =
+            sign(rendered_rate) == candidate && rendered_rate.abs() >= MOTION_ONSET_RATE;
+        if !physical_motion_confirms_direction
+            && (self.pending_seconds < confirmation_seconds
+                || !predicted_direction_is_physically_plausible(candidate, rendered_rate))
         {
             return (MotionEvent::None, 0.0);
         }
@@ -1220,6 +1236,51 @@ mod tests {
         runs
     }
 
+    fn target_at_stroke_progress(
+        preset: ScratchPreset,
+        clicks: u8,
+        direction: i8,
+        progress: f64,
+        speed: f64,
+    ) -> f64 {
+        let mut gate = ScratchGate::new(preset);
+        gate.set_clicks(clicks);
+        gate.contact_active = true;
+        gate.direction = direction;
+        gate.moving = direction != 0;
+        gate.stroke_travel = gate.learned_span() * progress;
+        gate.update_phase();
+        gate.compute_target(f64::from(direction) * speed, f64::from(direction) * speed)
+    }
+
+    fn count_maximum_rate_target_runs(
+        preset: ScratchPreset,
+        clicks: u8,
+        counted_target: f64,
+    ) -> usize {
+        let mut gate = ScratchGate::new(preset);
+        gate.set_clicks(clicks);
+        let frames = (preset.initial_stroke_span() / MAXIMUM_SCRATCH_RECORD_RATE * SAMPLE_RATE)
+            .ceil() as usize
+            + 1;
+        let mut previous = None;
+        let mut runs = 0;
+        for _ in 0..frames {
+            gate.process(
+                1.0 / SAMPLE_RATE,
+                true,
+                MAXIMUM_SCRATCH_RECORD_RATE,
+                MAXIMUM_SCRATCH_RECORD_RATE,
+            );
+            let target = gate.target();
+            if target == counted_target && previous != Some(counted_target) {
+                runs += 1;
+            }
+            previous = Some(target);
+        }
+        runs
+    }
+
     fn audio_fixture_sample(frame: usize, transient: bool) -> f64 {
         if transient {
             let age = frame % 257;
@@ -1279,7 +1340,7 @@ mod tests {
             "../tests/fixtures/pvc_005_scratch_semantics.json"
         ))
         .unwrap();
-        assert_eq!(fixture["schemaVersion"], 1);
+        assert_eq!(fixture["schemaVersion"], 2);
         assert_eq!(fixture["caseId"], "PVC-005");
         assert_eq!(fixture["sampleRateHz"], SAMPLE_RATE);
         assert_eq!(fixture["algorithmVersion"], SCRATCH_GATE_ALGORITHM_VERSION);
@@ -1312,8 +1373,9 @@ mod tests {
                 "maximumPredictedReversalOutgoingRate",
                 MAX_PREDICTED_REVERSAL_OUTGOING_RATE,
             ),
-            ("onsetConfirmSeconds", ONSET_CONFIRM_SECONDS),
-            ("reversalConfirmSeconds", REVERSAL_CONFIRM_SECONDS),
+            ("physicalDirectionConfirmationRate", MOTION_ONSET_RATE),
+            ("intentOnsetConfirmSeconds", ONSET_CONFIRM_SECONDS),
+            ("intentReversalConfirmSeconds", REVERSAL_CONFIRM_SECONDS),
             ("restConfirmSeconds", REST_CONFIRM_SECONDS),
         ] {
             assert_eq!(motion[name], value, "{name}");
@@ -1522,6 +1584,49 @@ mod tests {
             fixtures["maximumRateReversal"]["expectedGainBounds"],
             serde_json::json!([0.0, 1.0])
         );
+        let physical_confirmation = &fixtures["physicalMaximumRateConfirmation"];
+        assert_eq!(
+            physical_confirmation["recordRate"],
+            MAXIMUM_SCRATCH_RECORD_RATE
+        );
+        assert_eq!(
+            physical_confirmation["formerIntentOnsetDelaySeconds"],
+            ONSET_CONFIRM_SECONDS
+        );
+        assert_eq!(
+            physical_confirmation["formerOnsetBufferedSourceSeconds"],
+            ONSET_CONFIRM_SECONDS * MAXIMUM_SCRATCH_RECORD_RATE
+        );
+        assert_eq!(
+            physical_confirmation["formerIntentReversalDelaySeconds"],
+            REVERSAL_CONFIRM_SECONDS
+        );
+        assert_eq!(
+            physical_confirmation["formerReversalBufferedSourceSeconds"],
+            REVERSAL_CONFIRM_SECONDS * MAXIMUM_SCRATCH_RECORD_RATE
+        );
+        assert_eq!(
+            physical_confirmation["stabSeedSpanSourceSeconds"],
+            ScratchPreset::Stab.initial_stroke_span()
+        );
+        assert_eq!(
+            physical_confirmation["formerOnsetSeedSpanFraction"],
+            ONSET_CONFIRM_SECONDS * MAXIMUM_SCRATCH_RECORD_RATE
+                / ScratchPreset::Stab.initial_stroke_span()
+        );
+        assert_eq!(
+            physical_confirmation["formerReversalSeedSpanFraction"],
+            REVERSAL_CONFIRM_SECONDS * MAXIMUM_SCRATCH_RECORD_RATE
+                / ScratchPreset::Stab.initial_stroke_span()
+        );
+        assert_eq!(
+            physical_confirmation["expectedFirstStabAttack"],
+            "preserved"
+        );
+        assert_eq!(
+            physical_confirmation["expectedEarlyClickRunCountRule"],
+            "selected click count"
+        );
         assert_eq!(fixtures["snapshotReplay"]["preset"], "crab");
         assert_eq!(fixtures["snapshotReplay"]["clicks"], 5);
         assert_eq!(fixtures["snapshotReplay"]["replayedFrames"], 128);
@@ -1541,7 +1646,8 @@ mod tests {
                 "This case does not validate the timing against measured DJ crossfader traces.",
                 "The technique fractions and Drum thresholds are provisional calibration values.",
                 "The first-stroke seed is not a measured endpoint prediction.",
-                "This case does not prove integration with the physical player, C ABI, or WASM."
+                "Physical-player, C ABI, and native Swift tests verify the production gain path.",
+                "This case does not prove WASM or browser integration."
             ])
         );
     }
@@ -1553,6 +1659,130 @@ mod tests {
         assert_eq!(gate.clicks(), MIN_SCRATCH_CLICKS);
         gate.set_clicks(u8::MAX);
         assert_eq!(gate.clicks(), MAX_SCRATCH_CLICKS);
+    }
+
+    #[test]
+    fn technique_contract_has_defining_direction_and_fader_edges() {
+        assert_eq!(
+            target_at_stroke_progress(ScratchPreset::Baby, 1, 1, 0.5, 2.0),
+            1.0
+        );
+        assert_eq!(
+            target_at_stroke_progress(ScratchPreset::Baby, 1, -1, 0.5, 2.0),
+            1.0
+        );
+
+        for (progress, target) in [(0.039, 0.0), (0.041, 1.0), (0.279, 1.0), (0.281, 0.0)] {
+            assert_eq!(
+                target_at_stroke_progress(ScratchPreset::Stab, 1, 1, progress, 2.0),
+                target,
+                "stab at {progress}"
+            );
+        }
+        assert_eq!(
+            target_at_stroke_progress(ScratchPreset::Stab, 1, -1, 0.16, 2.0),
+            0.0
+        );
+
+        for (direction, before, edge) in [(1, 0.179, 0.181), (-1, 0.139, 0.141)] {
+            let before_target = if direction > 0 { 1.0 } else { 0.0 };
+            let edge_target = 1.0 - before_target;
+            assert_eq!(
+                target_at_stroke_progress(ScratchPreset::Chirp, 1, direction, before, 2.0,),
+                before_target
+            );
+            assert_eq!(
+                target_at_stroke_progress(ScratchPreset::Chirp, 1, direction, edge, 2.0,),
+                edge_target
+            );
+        }
+
+        assert_eq!(
+            target_at_stroke_progress(ScratchPreset::Transform, 2, 1, 0.119, 2.0),
+            1.0
+        );
+        assert_eq!(
+            target_at_stroke_progress(ScratchPreset::Transform, 2, 1, 0.121, 2.0),
+            0.0
+        );
+        assert_eq!(
+            target_at_stroke_progress(ScratchPreset::Transform, 2, 1, 0.500, 2.0),
+            1.0
+        );
+
+        assert_eq!(
+            target_at_stroke_progress(ScratchPreset::Flare, 1, 1, 0.429, 2.0),
+            1.0
+        );
+        assert_eq!(
+            target_at_stroke_progress(ScratchPreset::Flare, 1, 1, 0.431, 2.0),
+            0.0
+        );
+        assert_eq!(
+            target_at_stroke_progress(ScratchPreset::Flare, 1, -1, 0.500, 2.0),
+            1.0,
+            "the Flare preset represents one forward flare, not a two-stroke orbit"
+        );
+
+        assert_eq!(
+            target_at_stroke_progress(ScratchPreset::Crab, 4, 1, 0.10, 2.0),
+            0.0
+        );
+        for center in [0.18, 0.36, 0.54, 0.72] {
+            assert_eq!(
+                target_at_stroke_progress(ScratchPreset::Crab, 4, 1, center, 2.0),
+                1.0,
+                "crab pulse at {center}"
+            );
+        }
+        assert_eq!(
+            target_at_stroke_progress(ScratchPreset::Crab, 4, 1, 0.80, 2.0),
+            0.0
+        );
+
+        for direction in [1, -1] {
+            assert_eq!(
+                target_at_stroke_progress(ScratchPreset::Orbit, 2, direction, 0.26, 2.0),
+                0.0
+            );
+            assert_eq!(
+                target_at_stroke_progress(ScratchPreset::Orbit, 2, direction, 0.35, 2.0),
+                1.0
+            );
+        }
+
+        let mut drum = ScratchGate::new(ScratchPreset::Drum);
+        settle_direction(&mut drum, 0.5);
+        assert_eq!(drum.target(), 1.0);
+        run(&mut drum, DRUM_MAX_OPEN_SECONDS, true, 0.5, 0.5);
+        assert_eq!(drum.target(), 0.0);
+    }
+
+    #[test]
+    fn every_technique_tracks_record_direction_with_continuous_same_sample_gain() {
+        let maximum_alpha = 1.0 - (-(1.0 / SAMPLE_RATE) / 0.00035_f64).exp();
+        for preset in ScratchPreset::ALL {
+            let mut performance = ScratchPerformance::new(preset);
+            let mut previous_gain = performance.audible_gain();
+            let mut last_output = performance.output();
+            for direction in [1.0, -1.0] {
+                for _ in 0..((0.010 * SAMPLE_RATE) as usize) {
+                    last_output = performance
+                        .process_frame(performance_input(true, direction, direction, 1.0))
+                        .unwrap();
+                    assert_eq!(last_output.audible_gain, performance.audible_gain());
+                    assert!((0.0..=1.0).contains(&last_output.audible_gain));
+                    assert!(
+                        (last_output.audible_gain - previous_gain).abs() <= maximum_alpha + 1.0e-12,
+                        "{preset:?} introduced an unbounded gain step"
+                    );
+                    previous_gain = last_output.audible_gain;
+                }
+                assert_eq!(last_output.direction, sign(direction), "{preset:?}");
+                assert_eq!(last_output.preset, preset);
+                assert_eq!(last_output.clicks, preset.default_clicks());
+            }
+        }
     }
 
     #[test]
@@ -1594,6 +1824,89 @@ mod tests {
         run(&mut gate, 0.020, true, -1.0, -1.0);
         assert_eq!(gate.direction(), -1);
         assert_eq!(gate.target(), 0.0);
+    }
+
+    #[test]
+    fn physical_maximum_rate_onset_preserves_the_first_stab_attack() {
+        let mut gate = ScratchGate::new(ScratchPreset::Stab);
+        let mut saw_open = false;
+        let frames_through_open_window = (STAB_OPEN_END_FRACTION
+            * ScratchPreset::Stab.initial_stroke_span()
+            / MAXIMUM_SCRATCH_RECORD_RATE
+            * SAMPLE_RATE)
+            .ceil() as usize;
+        for frame in 0..frames_through_open_window {
+            gate.process(
+                1.0 / SAMPLE_RATE,
+                true,
+                MAXIMUM_SCRATCH_RECORD_RATE,
+                MAXIMUM_SCRATCH_RECORD_RATE,
+            );
+            if frame == 0 {
+                assert_eq!(gate.direction(), 1);
+                assert!(gate.moving());
+                assert_eq!(gate.target(), 0.0);
+            }
+            saw_open |= gate.target() == 1.0;
+        }
+        assert!(
+            saw_open,
+            "the confirmation must not consume the first Stab pulse"
+        );
+        assert_eq!(gate.target(), 0.0);
+    }
+
+    #[test]
+    fn physical_maximum_rate_onset_preserves_every_early_click_event() {
+        let clicks = 4;
+        for (preset, counted_target) in [
+            (ScratchPreset::Transform, 1.0),
+            (ScratchPreset::Flare, 0.0),
+            (ScratchPreset::Crab, 1.0),
+            (ScratchPreset::Orbit, 0.0),
+        ] {
+            assert_eq!(
+                count_maximum_rate_target_runs(preset, clicks, counted_target),
+                usize::from(clicks),
+                "{preset:?} lost an early event at maximum rate"
+            );
+        }
+    }
+
+    #[test]
+    fn outgoing_physical_motion_rejects_predicted_reversal_until_the_crossing_sample() {
+        let mut gate = ScratchGate::new(ScratchPreset::Transform);
+        gate.process(
+            1.0 / SAMPLE_RATE,
+            true,
+            MAXIMUM_SCRATCH_RECORD_RATE,
+            MAXIMUM_SCRATCH_RECORD_RATE,
+        );
+        assert_eq!(gate.direction(), 1);
+
+        for _ in 0..((REVERSAL_CONFIRM_SECONDS * SAMPLE_RATE).ceil() as usize + 16) {
+            gate.process(
+                1.0 / SAMPLE_RATE,
+                true,
+                -MAXIMUM_SCRATCH_RECORD_RATE,
+                MAXIMUM_SCRATCH_RECORD_RATE,
+            );
+        }
+        assert_eq!(gate.direction(), 1);
+
+        gate.process(
+            1.0 / SAMPLE_RATE,
+            true,
+            -MAXIMUM_SCRATCH_RECORD_RATE,
+            -MAXIMUM_SCRATCH_RECORD_RATE,
+        );
+        assert_eq!(gate.direction(), -1);
+        assert!(
+            gate.stroke_progress()
+                < 2.0 * MAXIMUM_SCRATCH_RECORD_RATE
+                    / SAMPLE_RATE
+                    / ScratchPreset::Transform.initial_stroke_span()
+        );
     }
 
     #[test]
@@ -1654,23 +1967,23 @@ mod tests {
     }
 
     #[test]
-    fn rejected_reversal_discards_its_buffered_travel() {
+    fn rejected_intent_reversal_discards_pending_state_without_changing_direction() {
         let mut gate = ScratchGate::new(ScratchPreset::Transform);
         settle_direction(&mut gate, 1.0);
         run(&mut gate, 0.030, true, 1.0, 1.0);
         let travel_before_jitter = gate.stroke_travel;
         let phase_before_jitter = gate.phase();
 
-        run(&mut gate, 0.003, true, -8.0, -8.0);
+        run(&mut gate, 0.003, true, -8.0, 8.0);
         assert_eq!(gate.direction(), 1);
-        assert_eq!(gate.stroke_travel, travel_before_jitter);
-        assert_eq!(gate.phase(), phase_before_jitter);
-        assert!(gate.pending_stroke_travel > 0.02);
+        assert!((gate.stroke_travel - (travel_before_jitter + 0.024)).abs() < 1.0e-12);
+        assert_ne!(gate.phase(), phase_before_jitter);
+        assert!(gate.pending_seconds > 0.002);
+        assert_eq!(gate.pending_stroke_travel, 0.0);
 
         run(&mut gate, 0.001, true, 1.0, 1.0);
         assert_eq!(gate.pending_stroke_travel, 0.0);
-        assert!(gate.stroke_travel > travel_before_jitter);
-        assert!(gate.stroke_travel < travel_before_jitter + 0.002);
+        assert!((gate.stroke_travel - (travel_before_jitter + 0.025)).abs() < 1.0e-12);
     }
 
     #[test]
@@ -2040,7 +2353,7 @@ mod tests {
         let mut gate = ScratchGate::new(ScratchPreset::Drum);
         settle_direction(&mut gate, 0.5);
         assert_eq!(gate.target(), 1.0);
-        run(&mut gate, 0.038, true, 0.5, 0.5);
+        run(&mut gate, 0.034, true, 0.5, 0.5);
         assert_eq!(gate.target(), 0.0);
 
         gate.process(1.0 / SAMPLE_RATE, true, 1.5, 1.5);
@@ -2453,6 +2766,22 @@ mod tests {
             Err(ScratchPerformanceError::InvalidInput {
                 field: "renderedSourceTravelSeconds"
             })
+        );
+        assert_eq!(performance.snapshot(), before);
+
+        let mut previous_performance_version = before;
+        previous_performance_version.version = SCRATCH_PERFORMANCE_SNAPSHOT_VERSION - 1;
+        assert_eq!(
+            performance.restore(&previous_performance_version),
+            Err(ScratchPerformanceError::UnsupportedPerformanceSnapshotVersion { version: 1 })
+        );
+        assert_eq!(performance.snapshot(), before);
+
+        let mut previous_gate_version = before;
+        previous_gate_version.gate.version = SCRATCH_GATE_SNAPSHOT_VERSION - 1;
+        assert_eq!(
+            performance.restore(&previous_gate_version),
+            Err(ScratchPerformanceError::UnsupportedGateSnapshotVersion { version: 1 })
         );
         assert_eq!(performance.snapshot(), before);
 

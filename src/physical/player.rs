@@ -30,6 +30,10 @@ use super::{
     MAX_ABS_PHYSICAL_OUTPUT_SAMPLE, MAX_PAGED_GROOVE_PREFETCH_CANDIDATES,
     MAX_PAGED_GROOVE_RENDER_SPEED,
 };
+use crate::scratch_gate::{
+    ScratchPerformance, ScratchPerformanceError, ScratchPerformanceInput, ScratchPerformanceOutput,
+    ScratchPerformanceSnapshot,
+};
 use crate::spsc::{SpscCommitOutcome, SpscPopError, TimedPlayerControlConsumer};
 use crate::timed_control::{
     ControlBlockItem, ControlTimelineAdvanceError, ControlTimelineCheckpointRestoreError,
@@ -41,7 +45,7 @@ use crate::{
     DeckMechanicalError, DeckMechanicalSnapshot, DeckMechanicalState, DeckMechanicalTelemetry,
 };
 
-const PHYSICAL_RECORD_PLAYER_SNAPSHOT_VERSION: u32 = 10;
+const PHYSICAL_RECORD_PLAYER_SNAPSHOT_VERSION: u32 = 11;
 const MAX_EXACT_GROOVE_FRAME_COUNT: u64 = 1_u64 << 53;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -463,6 +467,7 @@ pub struct PhysicalRenderTelemetry {
     pub phono_output_v: [f64; 2],
     pub phono_input_overload: [bool; 2],
     pub phono_output_overload: [bool; 2],
+    pub scratch: ScratchPerformanceOutput,
     pub phono: PhysicalPhonoStageTelemetry,
     pub radial_tracking: RadialTrackingTelemetry,
     pub mechanics: DeckMechanicalTelemetry,
@@ -485,6 +490,7 @@ pub struct PhysicalRecordPlayerSnapshot {
     pickup: PickupMechanicalSnapshot,
     cartridge: MovingMagnetCartridgeSnapshot,
     phono: PhysicalPhonoStageSnapshot,
+    scratch: ScratchPerformanceSnapshot,
     radial_tracking: RadialTrackingSnapshot,
     stylus_torque_nm: f64,
     last_telemetry: PhysicalRenderTelemetry,
@@ -501,6 +507,7 @@ pub struct PhysicalRecordPlayerRenderCheckpoint {
     pickup: PickupMechanicalSnapshot,
     cartridge: MovingMagnetCartridgeSnapshot,
     phono: PhysicalPhonoStageSnapshot,
+    scratch: ScratchPerformanceSnapshot,
     radial_tracking: RadialTrackingSnapshot,
     spiral_frame_position: f64,
     groove_frame_position: f64,
@@ -549,6 +556,7 @@ pub struct PhysicalRecordPlayer {
     pickup: PickupMechanicalState,
     cartridge: MovingMagnetCartridge,
     phono: PhysicalPhonoStage,
+    scratch: ScratchPerformance,
     radial_tracking: RadialTrackingState,
     stylus_torque_nm: f64,
     control_items: Vec<ControlBlockItem>,
@@ -579,6 +587,7 @@ impl PhysicalRecordPlayer {
             config.solver.internal_sample_rate_hz,
             config.record_cut.cutter_bandwidth_hz,
         )?;
+        let scratch = ScratchPerformance::default();
         let radial_tracking = RadialTrackingState::new(
             config.radial_tracking,
             config.solver.internal_sample_rate_hz,
@@ -606,6 +615,7 @@ impl PhysicalRecordPlayer {
             phono_output_v: [0.0; 2],
             phono_input_overload: [false; 2],
             phono_output_overload: [false; 2],
+            scratch: scratch.output(),
             phono: phono.telemetry(),
             radial_tracking: radial_tracking.telemetry(),
             mechanics: deck.telemetry(),
@@ -622,6 +632,7 @@ impl PhysicalRecordPlayer {
             pickup,
             cartridge,
             phono,
+            scratch,
             radial_tracking,
             stylus_torque_nm: 0.0,
             control_items: Vec::with_capacity(control_item_capacity),
@@ -1116,6 +1127,7 @@ impl PhysicalRecordPlayer {
             pickup: self.pickup.snapshot(),
             cartridge: self.cartridge.snapshot(),
             phono: self.phono.snapshot(),
+            scratch: self.scratch.snapshot(),
             radial_tracking: self.radial_tracking.snapshot(),
             stylus_torque_nm: self.stylus_torque_nm,
             last_telemetry: self.last_telemetry,
@@ -1129,6 +1141,7 @@ impl PhysicalRecordPlayer {
             pickup: self.pickup.snapshot(),
             cartridge: self.cartridge.snapshot(),
             phono: self.phono.snapshot(),
+            scratch: self.scratch.snapshot(),
             radial_tracking: self.radial_tracking.snapshot(),
             spiral_frame_position: self.spiral_frame_position,
             groove_frame_position: self.groove_frame_position,
@@ -1146,6 +1159,7 @@ impl PhysicalRecordPlayer {
         self.pickup.restore(checkpoint.pickup)?;
         self.cartridge.restore(checkpoint.cartridge)?;
         self.phono.restore(&checkpoint.phono)?;
+        self.scratch.restore(&checkpoint.scratch)?;
         self.radial_tracking.restore(checkpoint.radial_tracking)?;
         self.spiral_frame_position = checkpoint.spiral_frame_position;
         self.groove_frame_position = checkpoint.groove_frame_position;
@@ -1229,6 +1243,8 @@ impl PhysicalRecordPlayer {
         {
             return Err(PhysicalRecordPlayerError::SnapshotProfileMismatch);
         }
+        let mut scratch = ScratchPerformance::default();
+        scratch.restore(&snapshot.scratch)?;
         let mut radial_tracking = RadialTrackingState::new(
             config.radial_tracking,
             config.solver.internal_sample_rate_hz,
@@ -1282,6 +1298,7 @@ impl PhysicalRecordPlayer {
             &pickup,
             &cartridge,
             &phono,
+            &scratch,
             &radial_tracking,
             config,
             self.source.as_ref(),
@@ -1296,6 +1313,7 @@ impl PhysicalRecordPlayer {
         self.pickup = pickup;
         self.cartridge = cartridge;
         self.phono = phono;
+        self.scratch = scratch;
         self.radial_tracking = radial_tracking;
         self.stylus_torque_nm = snapshot.stylus_torque_nm;
         self.control_items.clear();
@@ -1572,7 +1590,27 @@ impl PhysicalRecordPlayer {
         }
 
         let phono = self.phono.process_frame(cartridge.load_output_voltage_v)?;
-        let phono_output_v = phono.output_v;
+        if self.scratch.preset() != control.scratch_preset {
+            self.scratch.set_preset(control.scratch_preset);
+        }
+        if self.scratch.clicks() != control.scratch_clicks {
+            self.scratch.set_clicks(control.scratch_clicks);
+        }
+        let nominal_angular_velocity_rad_s = config.deck.nominal_angular_velocity_rad_s();
+        let rendered_source_travel_seconds =
+            delta_record_turns * std::f64::consts::TAU / nominal_angular_velocity_rad_s;
+        let rendered_record_rate = rendered_source_travel_seconds / dt;
+        let intent_record_rate =
+            control.deck.hand_target_angular_velocity_rad_s / nominal_angular_velocity_rad_s;
+        let scratch = self.scratch.process_frame(ScratchPerformanceInput {
+            delta_seconds: dt,
+            hand_contact: control.deck.hand_contact,
+            intent_record_rate,
+            rendered_record_rate,
+            rendered_source_travel_seconds,
+            manual_crossfader_gain: control.manual_crossfader_gain,
+        })?;
+        let phono_output_v = phono.output_v.map(|sample| sample * scratch.audible_gain);
         let phono_input_overload = phono.input_overload;
         let phono_output_overload = phono.output_overload;
         self.last_telemetry = PhysicalRenderTelemetry {
@@ -1591,6 +1629,7 @@ impl PhysicalRecordPlayer {
             phono_output_v,
             phono_input_overload,
             phono_output_overload,
+            scratch,
             phono,
             radial_tracking,
             mechanics,
@@ -1643,6 +1682,7 @@ fn render_telemetry_matches_snapshot(
     pickup: &PickupMechanicalState,
     cartridge: &MovingMagnetCartridge,
     phono: &PhysicalPhonoStage,
+    scratch: &ScratchPerformance,
     radial_tracking: &RadialTrackingState,
     config: PhysicalPlaybackConfig,
     source: Option<&PhysicalGrooveSource>,
@@ -1678,8 +1718,13 @@ fn render_telemetry_matches_snapshot(
         && telemetry.pickup == pickup.telemetry()
         && telemetry.cartridge == cartridge.telemetry()
         && telemetry.phono == phono.telemetry()
+        && telemetry.scratch == scratch.output()
         && telemetry.radial_tracking == radial_tracking.telemetry()
-        && telemetry.phono_output_v == phono.telemetry().output_v
+        && telemetry.phono_output_v
+            == phono
+                .telemetry()
+                .output_v
+                .map(|sample| sample * scratch.audible_gain())
         && telemetry.phono_input_overload == phono.telemetry().input_overload
         && telemetry.phono_output_overload == phono.telemetry().output_overload
 }
@@ -1714,6 +1759,8 @@ pub enum PhysicalRecordPlayerError {
     CoupledRecordPlayerStep(#[from] CoupledRecordPlayerStepError),
     #[error(transparent)]
     Phono(#[from] super::PhysicalPhonoStageError),
+    #[error(transparent)]
+    Scratch(#[from] ScratchPerformanceError),
     #[error(transparent)]
     RadialTracking(#[from] super::RadialTrackingError),
     #[error(transparent)]
@@ -1929,6 +1976,22 @@ mod tests {
 
     fn player_control(config: PhysicalDeckConfig, rate: f64) -> PlayerControl {
         PlayerControl::new(motor_control(config, rate), true)
+    }
+
+    fn scratch_player_control(
+        config: PhysicalDeckConfig,
+        motor_rate: f64,
+        hand_rate: f64,
+        preset: crate::ScratchPreset,
+        clicks: u8,
+        manual_crossfader_gain: f64,
+    ) -> PlayerControl {
+        let mut deck = motor_control(config, motor_rate);
+        deck.hand_contact = true;
+        deck.hand_target_angular_velocity_rad_s =
+            hand_rate * config.nominal_angular_velocity_rad_s();
+        deck.hand_normal_force_n = 5.0;
+        PlayerControl::new(deck, true).with_scratch(preset, clicks, manual_crossfader_gain)
     }
 
     fn assert_player_state_matches_ignoring_source_representation(
@@ -2364,20 +2427,30 @@ mod tests {
     }
 
     #[test]
-    fn render_partitioning_produces_identical_state_and_samples() {
+    fn sample_timed_manual_crossfader_waveform_is_partition_invariant() {
         let profile = PhysicalProfile::sl_1200mk7_concorde_mkii_scratch_seed();
         let groove = sine_groove(&profile, 997.0);
         let control = player_control(profile.config.deck, 1.0);
+        let muted = control.with_scratch(crate::ScratchPreset::Baby, 1, 0.0);
+        let transition_frame = 257_usize;
         let mut whole = PhysicalRecordPlayer::new(profile.clone()).unwrap();
-        let mut split = PhysicalRecordPlayer::new(profile).unwrap();
+        let mut split = PhysicalRecordPlayer::new(profile.clone()).unwrap();
+        let mut open = PhysicalRecordPlayer::new(profile).unwrap();
         whole.load_groove(Arc::clone(&groove)).unwrap();
-        split.load_groove(groove).unwrap();
-        whole
-            .enqueue_control(TimedPlayerControl::new(0, 1, control))
-            .unwrap();
-        split
-            .enqueue_control(TimedPlayerControl::new(0, 1, control))
-            .unwrap();
+        split.load_groove(Arc::clone(&groove)).unwrap();
+        open.load_groove(groove).unwrap();
+        for player in [&mut whole, &mut split, &mut open] {
+            player.set_groove_frame_position(10_000.0).unwrap();
+            player.reset_transport(1.0, 1.0, 0.0, 0.0).unwrap();
+            player
+                .enqueue_control(TimedPlayerControl::new(0, 1, control))
+                .unwrap();
+        }
+        for player in [&mut whole, &mut split] {
+            player
+                .enqueue_control(TimedPlayerControl::new(transition_frame as u64, 2, muted))
+                .unwrap();
+        }
         let mut whole_output = vec![0.0_f32; 2 * 512];
         whole
             .render_internal_interleaved(&mut whole_output)
@@ -2388,7 +2461,30 @@ mod tests {
             split.render_internal_interleaved(&mut block).unwrap();
             split_output.extend(block);
         }
+        let mut open_output = vec![0.0_f32; whole_output.len()];
+        open.render_internal_interleaved(&mut open_output).unwrap();
         assert_eq!(whole_output, split_output);
+        assert_eq!(
+            &whole_output[..transition_frame * 2],
+            &open_output[..transition_frame * 2]
+        );
+        assert!(whole_output[transition_frame * 2..]
+            .iter()
+            .zip(&open_output[transition_frame * 2..])
+            .any(|(gated, open)| gated.to_bits() != open.to_bits()));
+        assert_eq!(
+            whole.telemetry().scratch.owner,
+            crate::ScratchCrossfaderOwner::Manual
+        );
+        assert!(whole.telemetry().scratch.audible_gain < 1.0);
+        assert_eq!(
+            whole.telemetry().phono_output_v,
+            whole
+                .telemetry()
+                .phono
+                .output_v
+                .map(|sample| sample * whole.telemetry().scratch.audible_gain)
+        );
         let whole_telemetry = whole.telemetry();
         let split_telemetry = split.telemetry();
         assert_eq!(whole_telemetry.rendered_internal_frames, 512);
@@ -2403,6 +2499,86 @@ mod tests {
                 ..split_telemetry
             }
         );
+    }
+
+    #[test]
+    fn automatic_preset_uses_clicks_and_same_sample_record_travel() {
+        let profile = PhysicalProfile::sl_1200mk7_concorde_mkii_scratch_seed();
+        let groove = sine_groove(&profile, 1_337.0);
+        let mut one_click = PhysicalRecordPlayer::new(profile.clone()).unwrap();
+        let mut four_clicks = PhysicalRecordPlayer::new(profile.clone()).unwrap();
+        one_click.load_groove(Arc::clone(&groove)).unwrap();
+        four_clicks.load_groove(groove).unwrap();
+        for player in [&mut one_click, &mut four_clicks] {
+            player.set_groove_frame_position(10_000.0).unwrap();
+            player.reset_transport(10.0, 10.0, 0.0, 0.0).unwrap();
+        }
+        one_click
+            .enqueue_control(TimedPlayerControl::new(
+                0,
+                1,
+                scratch_player_control(
+                    profile.config.deck,
+                    10.0,
+                    10.0,
+                    crate::ScratchPreset::Transform,
+                    1,
+                    1.0,
+                ),
+            ))
+            .unwrap();
+        four_clicks
+            .enqueue_control(TimedPlayerControl::new(
+                0,
+                1,
+                scratch_player_control(
+                    profile.config.deck,
+                    10.0,
+                    10.0,
+                    crate::ScratchPreset::Transform,
+                    4,
+                    1.0,
+                ),
+            ))
+            .unwrap();
+
+        let mut one_click_output = vec![0.0_f32; 2 * 820];
+        let mut four_click_output = vec![0.0_f32; one_click_output.len()];
+        one_click
+            .render_internal_interleaved(&mut one_click_output)
+            .unwrap();
+        four_clicks
+            .render_internal_interleaved(&mut four_click_output)
+            .unwrap();
+
+        let one = one_click.telemetry();
+        let four = four_clicks.telemetry();
+        assert_eq!(one.mechanics, four.mechanics);
+        assert_eq!(one.pickup, four.pickup);
+        assert_eq!(one.cartridge, four.cartridge);
+        assert_eq!(one.phono, four.phono);
+        assert_eq!(one.scratch.preset, crate::ScratchPreset::Transform);
+        assert_eq!(one.scratch.clicks, 1);
+        assert_eq!(four.scratch.clicks, 4);
+        assert_eq!(
+            one.scratch.owner,
+            crate::ScratchCrossfaderOwner::AutomaticPreset
+        );
+        assert_eq!(one.scratch.direction, 1);
+        assert!(one.scratch.moving);
+        assert_eq!(one.scratch.automatic_gate_target, 1.0);
+        assert_eq!(four.scratch.automatic_gate_target, 0.0);
+        assert!(one_click_output
+            .iter()
+            .zip(&four_click_output)
+            .any(|(left, right)| left.to_bits() != right.to_bits()));
+
+        let exact_travel_seconds = one.mechanics.record_angle_turns * std::f64::consts::TAU
+            / profile.config.deck.nominal_angular_velocity_rad_s();
+        let expected_progress =
+            exact_travel_seconds / crate::ScratchPreset::Transform.initial_stroke_span();
+        assert!((one.scratch.stroke_progress - expected_progress).abs() < 1.0e-10);
+        assert_eq!(one.scratch.stroke_progress, four.scratch.stroke_progress);
     }
 
     #[test]
@@ -2559,28 +2735,59 @@ mod tests {
             .enqueue_control(TimedPlayerControl::new(
                 0,
                 1,
-                player_control(profile.config.deck, 1.0),
+                scratch_player_control(
+                    profile.config.deck,
+                    1.0,
+                    1.0,
+                    crate::ScratchPreset::Transform,
+                    4,
+                    0.3,
+                ),
             ))
             .unwrap();
         player
             .enqueue_control(TimedPlayerControl::new(
                 400,
                 2,
-                player_control(profile.config.deck, -1.0),
+                scratch_player_control(
+                    profile.config.deck,
+                    1.0,
+                    -1.0,
+                    crate::ScratchPreset::Transform,
+                    4,
+                    0.3,
+                ),
             ))
             .unwrap();
         player
             .enqueue_control(TimedPlayerControl::new(
                 700,
                 3,
-                player_control(profile.config.deck, 1.0),
+                scratch_player_control(
+                    profile.config.deck,
+                    1.0,
+                    1.0,
+                    crate::ScratchPreset::Transform,
+                    4,
+                    0.3,
+                ),
             ))
             .unwrap();
 
         let mut preroll = vec![0.0_f32; 2 * 256];
         player.render_internal_interleaved(&mut preroll).unwrap();
         let snapshot = player.snapshot();
-        assert_eq!(snapshot.version, 10);
+        assert_eq!(snapshot.version, 11);
+        assert_eq!(
+            snapshot.last_telemetry.scratch.preset,
+            crate::ScratchPreset::Transform
+        );
+        assert_eq!(snapshot.last_telemetry.scratch.clicks, 4);
+        assert_eq!(
+            snapshot.last_telemetry.scratch.owner,
+            crate::ScratchCrossfaderOwner::AutomaticPreset
+        );
+        assert!(snapshot.last_telemetry.scratch.audible_gain < 1.0);
         let json = serde_json::to_string(&snapshot).unwrap();
         let checkpoint: PhysicalRecordPlayerSnapshot = serde_json::from_str(&json).unwrap();
 
@@ -2632,7 +2839,14 @@ mod tests {
             .enqueue_control(TimedPlayerControl::new(
                 0,
                 1,
-                player_control(profile.config.deck, 1.0),
+                scratch_player_control(
+                    profile.config.deck,
+                    1.0,
+                    1.0,
+                    crate::ScratchPreset::Transform,
+                    4,
+                    0.25,
+                ),
             ))
             .unwrap();
         player.inject_render_failure_at_completed_step(4);

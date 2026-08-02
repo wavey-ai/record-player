@@ -67,9 +67,9 @@ Use this ledger to track requirements across the chronological findings.
 - **RP-031 — Three-dimensional contact reduction**: State when independent 45/45 wall envelopes are exact. Add longitudinal and rotational dynamics when profiles require them. **Status**: Reduced rigid-sphere geometry verified; finite-patch and extra dynamics remain open.
 - **RP-032 — Host voltage calibration**: Keep phono output in volts inside physics. Convert volts through an explicit host full-scale boundary. **Status**: Boundary implemented in Rust, C, WASM, and native Swift. Product calibration evidence remains open.
 - **RP-033 — Same-wall multiple contact**: Detect separated possible global positions. Do not treat interval overlap as equality. **Status**: Contact sets propagate through production paths. Unqualified sets reject safely. Certified equality and measured compliance remain open.
-- **RP-034 — Canonical scratch techniques**: Keep the catalog, prediction, and automatic crossfader policy in Rust. Use exact same-sample physical travel. **Status**: Rust core implemented. Player, calibration, iOS, and browser integration remain open.
+- **RP-034 — Canonical scratch techniques**: Keep the catalog, prediction, and automatic crossfader policy in Rust. Use exact same-sample physical travel. **Status**: Rust, physical-player, C ABI, and native Swift paths are implemented. Calibration and browser integration remain open.
 - **RP-035 — Non-smooth contact**: Reject unresolved normal cones until the contact solve represents their complete force set. **Status**: In progress.
-- **RP-036 — Surface friction geometry**: Resolve friction in the complete local surface basis. Couple all components in the same contact solve. **Status**: Sliding surface and skating-port coupling are implemented. Sloped sticking, coupled uniqueness proof, and measurements remain open.
+- **RP-036 — Surface friction geometry**: Resolve friction in the complete local surface basis. Couple all components in the same contact solve. **Status**: Sliding coupling and bounded zero-speed regularization are implemented. Identified sloped sticking and measurements remain open.
 - **RP-037 — Trace asset admission**: Bind fixed trace work, representation bytes, page identity, geometry, and actual wall-slope bounds. **Status**: Implemented. An authoritative full-record catalog remains open.
 - **RP-038 — Tangential contact memory**: Add identified along-groove pickup motion and local tangential material state. Preserve that state through reversals. **Status**: Certified coordinate plumbing is implemented. Continuous state mapping and sloped sticking remain open.
 - **RP-039 — Fixed-mode admission**: Certify each fixed normal-contact operator over its complete profile and source domain.
@@ -949,9 +949,15 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Consequence**: Those power values disagree when same-wall slopes differ.
 - **Current protection**: Production rejects same-wall sets without a physical qualification.
 - **Requirement**: Keep that rejection until each accepted contact has one represented port.
-- **Result**: Exact-zero sloped sticking returns `UnsupportedGrooveWallSticking`.
+- **Former result**: Exact-zero sloped sticking returned `UnsupportedGrooveWallSticking`.
 - **Reason**: Two wall tractions have one global sticking constraint.
 - **Reason**: A single longitudinal coordinate does not identify their distribution.
+- **Production correction**: A relative speed at or below `1.0e-9` meters per second selects zero traction.
+- **Physical basis**: Ideal Coulomb friction permits zero traction at zero slip.
+- **State rule**: The correction preserves normal contact and the configured friction coefficient.
+- **Exit rule**: The next signed-slip sample uses the complete kinetic-friction solve.
+- **Limit**: The `1.0e-9` threshold is a numerical regularization value, not a measured material value.
+- **Regression result**: A short modulated groove no longer aborts on the first stopped sample after a seek.
 - **Rejected hypothesis**: Divide static force in proportion to normal force.
 - **Reason**: That rule has no measured tangential constitutive law.
 - **Requirement**: Add measured per-contact tangential compliance and relaxation state.
@@ -2331,7 +2337,46 @@ It is not a measured product calibration value.
 - Packetized and per-frame Drum intent produce equal output for `PVC-005`.
 - Tests cover 44.1, 48, and 96 kilohertz timing invariance.
 - Tests cover rapid reversal at the maximum plus or minus 20 record rate.
-- The focused scratch suite passes 53 tests.
+- The physical player applies the Rust gain to phono volts at each physical sample.
+- Timed controls carry preset, click count, and manual crossfader gain.
+- Player checkpoints contain the complete scratch state.
+- The C ABI exposes controls and scratch telemetry.
+- Native Swift uses the C ABI and contains no technique equation.
+- A native test proves that Rust manual gain changes rendered audio.
+- The focused scratch suite passes 58 tests.
+
+### Maximum-Rate Confirmation Counterexample
+
+- **Former onset delay**: Intent-only onset confirmation waited `0.004` seconds.
+- **Former reversal delay**: Intent-only reversal confirmation waited `0.006` seconds.
+- **Rate**: The exact counterexample uses `20x` source travel.
+- **Onset travel**: The former onset delay buffered `0.080` source seconds.
+- **Reversal travel**: The former reversal delay buffered `0.120` source seconds.
+- **Stab seed span**: The initial Stab span is `0.22` source seconds.
+- **Onset ratio**: The buffered onset travel was `36.4` percent of that span.
+- **Reversal ratio**: The buffered reversal travel was `54.5` percent of that span.
+- **Physical effect**: The onset delay could remove the complete first Stab opening.
+- **Physical effect**: The reversal delay could remove early click events.
+- **Correction**: Same-sample rendered motion now confirms its direction immediately.
+- **Protection**: Intent alone cannot reverse the gate while physical motion remains outgoing.
+- **Permanent result**: The first Stab attack remains at `20x`.
+- **Permanent result**: Transform, Flare, Crab, and Orbit retain all early events at `20x`.
+
+### Current Technique Limits
+
+- **Scope**: The presets automate crossfader gain. They do not generate record motion.
+- **Stab limit**: The current pulse uses a provisional `0.04` through `0.28` stroke window.
+- **Chirp limit**: The current gate closes a broad region instead of a measured turnaround cut.
+- **Flare limit**: The current preset notches only the forward stroke.
+- **Crab limit**: The current preset implements one closed-baseline variant.
+- **Drum limit**: The current preset uses acceleration. It does not use a cue-position motion plan.
+- **Prediction limit**: One span estimate serves both stroke directions.
+- **Confidence limit**: Four observations produce full confidence without a variance test.
+- **Envelope limit**: The crossfader time constants have no hardware measurement.
+- **Requirement**: Do not open a new stroke before the physical direction crossing.
+- **Requirement**: Correct Stab and Chirp topology before a faithful-technique claim.
+- **Requirement**: Test output audio at `1x`, `8x`, and `20x`.
+- **Requirement**: Fit technique timing to expert motion and crossfader traces.
 
 ### Calibration boundary
 
@@ -2347,6 +2392,98 @@ It is not a measured product calibration value.
 - Initial stroke spans remain estimated values.
 
 These values are provisional calibration parameters.
+
+## 2026-08-02: Skipproof Research and Hardware Authenticity
+
+### Paper Scope
+
+- **Source**: Hansen and Bresin, [*The Skipproof Virtual Turntable for High-Level Control of Scratching*](https://doi.org/10.1162/comj.2010.34.2.39), 2010.
+- **System**: Skipproof combines turntable simulation, mixer simulation, and high-level scratch control.
+- **High-level meaning**: One simple action can produce coordinated record and crossfader gestures.
+- **Evidence source**: The authors analyzed sensor recordings from professional DJs.
+- **Preset method**: Skipproof stored selected recordings as lookup tables.
+- **Table controls**: The system changed duration, speed, amplitude, and deviation from nominal speed.
+- **Coordination result**: The authors state that precise record and crossfader coordination preserves technique character.
+- **Timing scale**: The paper describes a typical technique duration near `0.2` seconds.
+- **Evidence limit**: The paper does not publish the complete recorded lookup-table values.
+- **Calibration limit**: Do not digitize Figure 3 as an authoritative production trace.
+
+### Product Interpretation
+
+- **User requirement**: Each preset uses one control.
+- **Hardware requirement**: The audible result must remain consistent with current turntable and mixer hardware.
+- **Architecture decision**: The user's hand is the only source of record-motion targets.
+- **Preset decision**: Rust predicts that record motion and produces only the crossfader target.
+- **Physics decision**: The physical player resolves hand motion before the preset advances.
+- **Rejected shortcut**: Do not bypass record mechanics with direct source-position playback.
+- **Rejected shortcut**: Do not permit the unrealistic speeds that the Skipproof research interface permits.
+- **Control limit**: Keep all planned and rendered record rates inside the signed `20x` engine limit.
+- **Naming limit**: Describe presets as high-level controls, not as physical properties of the turntable.
+
+### Technique Catalog Evidence
+
+Skipproof includes these twelve examples:
+
+- Baby.
+- Tear.
+- Rolltear.
+- Chop.
+- Forward.
+- Silent Back.
+- Scribble.
+- Uzi.
+- Chirp.
+- Flare.
+- Crab.
+- Twiddle.
+
+The current Rust catalog already includes Baby, Chirp, Flare, and Crab.
+
+The current catalog also includes Stab, Transform, Orbit, and Drum.
+
+- **No new preset**: Tear changes record motion while its crossfader stays open.
+- **No new preset**: Scribble changes record motion while its crossfader stays open.
+- **Existing path**: Baby already provides the open-fader behavior for Tear and Scribble.
+- **Add candidate**: Rolltear can add a distinct automatic fader envelope over user motion.
+- **Add candidate**: Uzi adds rapid record oscillation with coordinated amplitude cuts.
+- **Add candidate**: Twiddle adds repeated fader cuts over one record stroke.
+- **Add candidate**: Forward adds an audible forward stroke with a muted return.
+- **Internal primitive**: Silent Back is the muted return for Forward and other techniques.
+- **Overlap risk**: Chop can overlap the intended Stab topology.
+- **Requirement**: Compare Chop and Stab against expert traces before both names enter the public catalog.
+- **Requirement**: Do not give a new preset name to a technique that only changes user record motion.
+
+### Current Implementation Gap
+
+- **Current behavior**: The user supplies record motion, and Rust automates crossfader gain.
+- **Benefit**: One record gesture can control a two-hand technique.
+- **Requirement**: Keep the user's record trajectory unchanged.
+- **Requirement**: Use rendered physical motion to clock and correct the crossfader plan.
+- **Research use**: Use recorded record traces only to locate crossfader events.
+- **Rejected use**: Do not replay or reshape a recorded record trajectory.
+- **Requirement**: Keep manual Baby control as the direct hardware behavior.
+- **Requirement**: Let a user disable preset assistance and control both hardware inputs directly.
+
+### Crossfader Evidence
+
+- **Paper observation**: Scratch mixers can change from mute to full output over approximately one millimeter.
+- **Paper observation**: DJs can produce bursts or gaps near `0.010` seconds.
+- **Skipproof feature**: Its simulated crossfader has adjustable curve steepness and reverse direction.
+- **Current gap**: The Rust model accepts gain, not physical fader position.
+- **Current gap**: The Rust model has no cut-in distance, curve control, or hamster switch.
+- **Requirement**: Add a hardware crossfader position-to-gain model before calibration.
+- **Requirement**: Measure current target mixers instead of treating the 2010 interface as current hardware.
+- **Requirement**: Keep smoothing separate from the static fader curve.
+
+### Other Physical Evidence
+
+- **Latency observation**: The authors report that DJs object to very small gesture-to-sound latency.
+- **Wear observation**: Their spectra show substantial wear after repeated scratching.
+- **Wear limit**: The paper does not identify a reusable physical wear law.
+- **Decision**: Do not enable an estimated wear model from Figure 2.
+- **Mechanics support**: The paper names platter inertia, motor torque, friction, and hand radius as relevant controls.
+- **Existing coverage**: The physical engine already represents these quantities in its deck and hand models.
+- **Calibration limit**: The paper supplies no current-hardware values for those quantities.
 
 They require measured DJ motion, crossfader traces, or blinded expert calibration.
 

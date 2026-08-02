@@ -6,6 +6,7 @@
 //! values in order.
 
 use crate::mechanics::{DeckMechanicalControl, MotorMode};
+use crate::scratch_gate::ScratchPreset;
 use crate::timed_control::{PlayerControl, TimedPlayerControl};
 use std::cell::Cell;
 use std::error::Error;
@@ -517,7 +518,7 @@ fn increment(counter: &AtomicUsize) {
     counter.store(next, Ordering::Relaxed);
 }
 
-pub const TIMED_PLAYER_CONTROL_BYTES: usize = 68;
+pub const TIMED_PLAYER_CONTROL_BYTES: usize = 78;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TimedPlayerControlCodec;
@@ -574,6 +575,15 @@ impl SpscCodec<TimedPlayerControl, TIMED_PLAYER_CONTROL_BYTES> for TimedPlayerCo
         );
         destination[cursor] = u8::from(value.control.stylus_lowered);
         cursor += 1;
+        destination[cursor] = value.control.scratch_preset.id();
+        cursor += 1;
+        destination[cursor] = value.control.scratch_clicks;
+        cursor += 1;
+        write_f64(
+            destination,
+            &mut cursor,
+            value.control.manual_crossfader_gain,
+        );
         debug_assert_eq!(cursor, TIMED_PLAYER_CONTROL_BYTES);
     }
 
@@ -617,6 +627,11 @@ impl SpscCodec<TimedPlayerControl, TIMED_PLAYER_CONTROL_BYTES> for TimedPlayerCo
             _ => return None,
         };
         cursor += 1;
+        let scratch_preset = ScratchPreset::from_id(source[cursor])?;
+        cursor += 1;
+        let scratch_clicks = source[cursor];
+        cursor += 1;
+        let manual_crossfader_gain = read_f64(source, &mut cursor);
         debug_assert_eq!(cursor, TIMED_PLAYER_CONTROL_BYTES);
 
         Some(TimedPlayerControl::new(
@@ -634,7 +649,8 @@ impl SpscCodec<TimedPlayerControl, TIMED_PLAYER_CONTROL_BYTES> for TimedPlayerCo
                     stylus_torque_nm,
                 },
                 stylus_lowered,
-            ),
+            )
+            .with_scratch(scratch_preset, scratch_clicks, manual_crossfader_gain),
         ))
     }
 }
@@ -999,7 +1015,8 @@ mod tests {
                         stylus_torque_nm: -0.000_012,
                     },
                     false,
-                ),
+                )
+                .with_scratch(ScratchPreset::Baby, 1, 0.25),
             ),
             TimedPlayerControl::new(
                 44_101,
@@ -1016,7 +1033,8 @@ mod tests {
                         stylus_torque_nm: 0.000_1,
                     },
                     true,
-                ),
+                )
+                .with_scratch(ScratchPreset::Crab, 8, 0.75),
             ),
             TimedPlayerControl::new(
                 44_102,
@@ -1033,7 +1051,8 @@ mod tests {
                         stylus_torque_nm: 0.0,
                     },
                     false,
-                ),
+                )
+                .with_scratch(ScratchPreset::Drum, 1, 0.0),
             ),
         ];
 
@@ -1099,6 +1118,18 @@ mod tests {
             assert_eq!(
                 actual.control.deck.stylus_torque_nm.to_bits(),
                 expected.control.deck.stylus_torque_nm.to_bits()
+            );
+            assert_eq!(
+                actual.control.scratch_preset,
+                expected.control.scratch_preset
+            );
+            assert_eq!(
+                actual.control.scratch_clicks,
+                expected.control.scratch_clicks
+            );
+            assert_eq!(
+                actual.control.manual_crossfader_gain.to_bits(),
+                expected.control.manual_crossfader_gain.to_bits()
             );
         }
     }

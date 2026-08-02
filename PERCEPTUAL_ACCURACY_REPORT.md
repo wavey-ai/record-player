@@ -4,8 +4,8 @@
 
 - **Report date**: 2026-08-02.
 - **Repository**: `record-player`.
-- **Reviewed checkpoint**: `1c78352`.
-- **Scope**: Changes from `9cdfe80` through `1c78352`.
+- **Reviewed checkpoint**: Current production integration worktree.
+- **Scope**: Physical engine, scratch behavior, C ABI, and native Swift integration.
 - **Purpose**: Identify work that can improve audible accuracy.
 - **Limit**: This report does not claim a completed listening result.
 
@@ -46,7 +46,7 @@ Therefore, this work does not yet improve production failure handling or rendere
 | Has the reduced rapid-scratch candidate converged to its high-rate reference? | No |
 | Has an A/B render shown a clear full-output improvement? | No |
 | Has a controlled listening test shown a perceptual improvement? | No |
-| Are the Rust scratch presets active in iOS? | No |
+| Are the Rust scratch presets active in native Swift? | Yes |
 | Can the product claim the most accurate recreation? | No |
 
 ## Production Changes With Perceptual Potential
@@ -222,9 +222,36 @@ The gesture mapper preserves branch cuts, signed travel, pressure, and late-even
 
 This work can improve timing and repeatability.
 
-End-to-end event delivery is not proved for every iOS and browser path.
+Native Swift event delivery is proved through the canonical C ABI.
+
+Browser event delivery remains open.
 
 It does not add missing contact bandwidth or material hysteresis.
+
+### Sample-Timed Rust Scratch Gain
+
+- **Output-changing**: Yes during manual or preset crossfader use.
+- **Default active**: Yes in the physical player and native Swift path.
+- **Expected relevance**: High for scratch timing and attack shape.
+- **Listening evidence**: None.
+
+The physical player now processes the Rust scratch helper for each physical sample.
+
+It applies the result directly to phono output volts before host conversion.
+
+At `20x`, the former `0.004`-second onset delay buffered `0.080` source seconds.
+
+That travel was `36.4` percent of the initial Stab span.
+
+The delay could remove the first Stab attack.
+
+Same-sample physical confirmation now preserves that attack and the early click events.
+
+Player, C ABI, and native Swift tests prove that scratch gain changes rendered samples.
+
+This result is a real production waveform change.
+
+The current technique timing and crossfader envelope remain unmeasured.
 
 ### Deterministic Branch Continuation
 
@@ -331,11 +358,15 @@ This gap affects stop, catch, release, and zero-speed scratch behavior.
 
 ### Sloped Sticking
 
-Production rejects positive-friction sticking on a sloped groove wall and rolls back the sample.
+Production now selects zero traction when relative speed is at most `1.0e-9` meters per second.
 
-This missing state can cause a resilient-output failure near zero relative speed.
+This fallback prevents an ordinary stopped, modulated groove from aborting playback.
 
-It can change the onset and release of reversal transients.
+The threshold is a numerical regularization value.
+
+The model still lacks identified static traction for sloped multi-wall contact.
+
+This gap can change reversal onset and release.
 
 ### Contact Compliance
 
@@ -389,7 +420,7 @@ It does not yet support measured elliptical or line-contact tip profiles.
 
 Tip shape can change tracing, contact pressure, phase, and high-frequency response.
 
-### iOS Scratch-Preset Activation
+### Native Scratch-Preset Calibration
 
 Rust owns the preset catalog and its learned-span gate behavior.
 
@@ -399,11 +430,23 @@ The model cannot predict the first unseen endpoint.
 
 It does not model a measured crossfader curve, cut-in, latency, bleed, bounce, or noise.
 
-`ScratchPerformance` has no production `PhysicalRecordPlayer`, renderer, C ABI, or iOS call site.
+`ScratchPerformance` now has physical-player, renderer, C ABI, and native Swift call sites.
 
-The physical iOS player does not yet use this complete Rust path.
+Swift contains adapter code and no technique equation.
 
-Therefore, the preset work has not produced an iOS perceptual win.
+The integration changes actual phono output samples.
+
+It is a plausible perceptual improvement, but no listening test proves it.
+
+Stab, Chirp, Flare, Crab, and Drum still have documented semantic or calibration gaps.
+
+The Skipproof paper strengthens this limitation.
+
+Its authors preserved expert record and crossfader recordings as paired lookup tables.
+
+They report that precise coordination is necessary to preserve each technique.
+
+Our current fixed stroke fractions do not provide equivalent calibration evidence.
 
 ### Browser Canonical Activation
 
@@ -420,11 +463,11 @@ The next pass must prioritize measured output changes.
 1. Extend the reference through the coupled deck, pickup, cartridge, phono stage, and host output.
 2. Add bounded, event-aware swept contact for high signed travel.
 3. Compare force, torque, contact, and voltage against converged microsteps.
-4. Add tangential reversal state and sloped sticking.
-5. Add contact compliance only with measured or passively fitted parameters.
-6. Render matched stop, `+20x`, `-20x`, and reversal audio fixtures.
-7. Run controlled, level-matched listening tests.
-8. Move the proven Rust scratch behavior into iOS.
+4. Correct Stab and Chirp topology at physical direction crossings.
+5. Add direction-specific span prediction with error-aware confidence.
+6. Add tangential reversal state and identified sloped sticking.
+7. Render matched stop, `+20x`, `-20x`, and reversal audio fixtures.
+8. Run controlled, level-matched listening tests.
 
 Freeze unrelated proof work during this focused pass.
 

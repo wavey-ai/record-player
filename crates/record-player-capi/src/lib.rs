@@ -29,10 +29,10 @@ use record_player::timed_control::{ControlTimelinePushError, PlayerControl, Time
 use record_player::{
     ContactMode, DeckMechanicalControl, MotorMode, ScheduledScratchHandControl,
     ScratchGestureConfig, ScratchGestureError, ScratchGestureMapper, ScratchPointerSample,
-    ScratchPressureCalibration,
+    ScratchPreset, ScratchPressureCalibration,
 };
 
-pub const RECORD_PLAYER_CAPI_ABI_VERSION: u32 = 4;
+pub const RECORD_PLAYER_CAPI_ABI_VERSION: u32 = 5;
 
 pub type RecordPlayerStatus = i32;
 
@@ -72,6 +72,18 @@ pub const RECORD_PLAYER_CONTACT_STICKING: u32 = 1;
 pub const RECORD_PLAYER_CONTACT_SLIDING_POSITIVE: u32 = 2;
 pub const RECORD_PLAYER_CONTACT_SLIDING_NEGATIVE: u32 = 3;
 
+pub const RECORD_PLAYER_SCRATCH_PRESET_BABY: u32 = 0;
+pub const RECORD_PLAYER_SCRATCH_PRESET_STAB: u32 = 1;
+pub const RECORD_PLAYER_SCRATCH_PRESET_CHIRP: u32 = 2;
+pub const RECORD_PLAYER_SCRATCH_PRESET_TRANSFORM: u32 = 3;
+pub const RECORD_PLAYER_SCRATCH_PRESET_FLARE: u32 = 4;
+pub const RECORD_PLAYER_SCRATCH_PRESET_CRAB: u32 = 5;
+pub const RECORD_PLAYER_SCRATCH_PRESET_ORBIT: u32 = 6;
+pub const RECORD_PLAYER_SCRATCH_PRESET_DRUM: u32 = 7;
+
+pub const RECORD_PLAYER_SCRATCH_CROSSFADER_MANUAL: u32 = 0;
+pub const RECORD_PLAYER_SCRATCH_CROSSFADER_AUTOMATIC_PRESET: u32 = 1;
+
 pub const RECORD_PLAYER_PICKUP_CONTACT_NONE: u32 = 0;
 pub const RECORD_PLAYER_PICKUP_CONTACT_GROOVE_WALLS: u32 = 1;
 pub const RECORD_PLAYER_PICKUP_CONTACT_RECORD_LAND: u32 = 2;
@@ -103,6 +115,11 @@ pub struct RecordPlayerControl {
     pub hand_target_angular_velocity_rad_s: f64,
     pub hand_normal_force_n: f64,
     pub hand_contact_radius_m: f64,
+    pub manual_crossfader_gain: f64,
+    pub scratch_preset: u32,
+    /// Zero selects the preset's default click count.
+    pub scratch_clicks: u8,
+    pub scratch_reserved: [u8; 3],
 }
 
 #[repr(C)]
@@ -303,6 +320,23 @@ pub struct RecordPlayerRadialTrackingTelemetry {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RecordPlayerScratchTelemetry {
+    pub preset: u32,
+    pub crossfader_owner: u32,
+    pub clicks: u8,
+    pub direction: i8,
+    pub moving: u8,
+    pub reserved: [u8; 5],
+    pub audible_gain: f64,
+    pub automatic_gate_gain: f64,
+    pub automatic_gate_target: f64,
+    pub phase: f64,
+    pub stroke_progress: f64,
+    pub span_prediction_confidence: f64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RecordPlayerTelemetry {
     pub abi_version: u32,
     pub output_sample_rate_hz: u32,
@@ -325,6 +359,7 @@ pub struct RecordPlayerTelemetry {
     pub deck: RecordPlayerDeckTelemetry,
     pub pickup: RecordPlayerPickupTelemetry,
     pub cartridge: RecordPlayerCartridgeTelemetry,
+    pub scratch: RecordPlayerScratchTelemetry,
 }
 
 struct RenderSide {
@@ -562,10 +597,15 @@ fn boolean(value: u8) -> Result<bool, RecordPlayerStatus> {
     }
 }
 
+fn scratch_preset(value: u32) -> Result<ScratchPreset, RecordPlayerStatus> {
+    let id = u8::try_from(value).map_err(|_| RECORD_PLAYER_STATUS_CONTROL_INVALID)?;
+    ScratchPreset::from_id(id).ok_or(RECORD_PLAYER_STATUS_CONTROL_INVALID)
+}
+
 fn timed_control(
     value: RecordPlayerTimedControl,
 ) -> Result<TimedPlayerControl, RecordPlayerStatus> {
-    if value.control.reserved != 0 {
+    if value.control.reserved != 0 || value.control.scratch_reserved != [0; 3] {
         return Err(RECORD_PLAYER_STATUS_CONTROL_INVALID);
     }
     let target_angle_present = boolean(value.control.hand_target_angle_present)?;
@@ -580,10 +620,26 @@ fn timed_control(
         // The physical player owns stylus reaction torque. Hosts cannot inject it.
         stylus_torque_nm: 0.0,
     };
+    let preset = scratch_preset(value.control.scratch_preset)?;
+    let clicks = if value.control.scratch_clicks == 0 {
+        preset.default_clicks()
+    } else {
+        value.control.scratch_clicks
+    };
+    if !(record_player::MIN_SCRATCH_CLICKS..=record_player::MAX_SCRATCH_CLICKS).contains(&clicks)
+        || !value.control.manual_crossfader_gain.is_finite()
+        || !(0.0..=1.0).contains(&value.control.manual_crossfader_gain)
+    {
+        return Err(RECORD_PLAYER_STATUS_CONTROL_INVALID);
+    }
     Ok(TimedPlayerControl::new(
         value.absolute_frame,
         value.sequence,
-        PlayerControl::new(deck, boolean(value.control.stylus_lowered)?),
+        PlayerControl::new(deck, boolean(value.control.stylus_lowered)?).with_scratch(
+            preset,
+            clicks,
+            value.control.manual_crossfader_gain,
+        ),
     ))
 }
 
@@ -607,6 +663,10 @@ fn record_control(value: PlayerControl) -> RecordPlayerControl {
         hand_target_angular_velocity_rad_s: value.deck.hand_target_angular_velocity_rad_s,
         hand_normal_force_n: value.deck.hand_normal_force_n,
         hand_contact_radius_m: value.deck.hand_contact_radius_m,
+        manual_crossfader_gain: value.manual_crossfader_gain,
+        scratch_preset: u32::from(value.scratch_preset.id()),
+        scratch_clicks: value.scratch_clicks,
+        scratch_reserved: [0; 3],
     }
 }
 
@@ -705,6 +765,15 @@ fn radial_contact_region(value: RadialContactRegion) -> u32 {
     }
 }
 
+fn scratch_crossfader_owner(value: record_player::ScratchCrossfaderOwner) -> u32 {
+    match value {
+        record_player::ScratchCrossfaderOwner::Manual => RECORD_PLAYER_SCRATCH_CROSSFADER_MANUAL,
+        record_player::ScratchCrossfaderOwner::AutomaticPreset => {
+            RECORD_PLAYER_SCRATCH_CROSSFADER_AUTOMATIC_PRESET
+        }
+    }
+}
+
 fn player_error_status(error: &PhysicalRecordPlayerError) -> RecordPlayerStatus {
     match error {
         PhysicalRecordPlayerError::TimelinePush(source) => match source {
@@ -798,6 +867,7 @@ fn telemetry(
     let mechanics = value.mechanics;
     let pickup = value.pickup;
     let cartridge = value.cartridge;
+    let scratch = value.scratch;
     let radial_tracking = value.radial_tracking;
     let (captured_groove_radius_m, captured_groove_radius_present) = radial_tracking
         .captured_groove_radius_m
@@ -901,6 +971,20 @@ fn telemetry(
             load_power_w: cartridge.load_power_w,
             stored_electrical_energy_j: cartridge.stored_electrical_energy_j,
             completed_steps: cartridge.completed_steps,
+        },
+        scratch: RecordPlayerScratchTelemetry {
+            preset: u32::from(scratch.preset.id()),
+            crossfader_owner: scratch_crossfader_owner(scratch.owner),
+            clicks: scratch.clicks,
+            direction: scratch.direction,
+            moving: u8::from(scratch.moving),
+            reserved: [0; 5],
+            audible_gain: scratch.audible_gain,
+            automatic_gate_gain: scratch.automatic_gate_gain,
+            automatic_gate_target: scratch.automatic_gate_target,
+            phase: scratch.phase,
+            stroke_progress: scratch.stroke_progress,
+            span_prediction_confidence: scratch.span_prediction_confidence,
         },
     }
 }
@@ -1641,6 +1725,10 @@ mod tests {
                 hand_target_angular_velocity_rad_s: 0.0,
                 hand_normal_force_n: 0.0,
                 hand_contact_radius_m: 0.12,
+                manual_crossfader_gain: 1.0,
+                scratch_preset: RECORD_PLAYER_SCRATCH_PRESET_BABY,
+                scratch_clicks: 0,
+                scratch_reserved: [0; 3],
             },
         }
     }
@@ -1696,24 +1784,24 @@ mod tests {
             offset_of!(RecordPlayerCreateOptions, volts_per_full_scale),
             16
         );
-        assert_eq!(size_of::<RecordPlayerControl>(), 48);
+        assert_eq!(size_of::<RecordPlayerControl>(), 64);
         assert_eq!(align_of::<RecordPlayerControl>(), 8);
         assert_eq!(
             offset_of!(RecordPlayerControl, motor_target_angular_velocity_rad_s),
             8
         );
-        assert_eq!(size_of::<RecordPlayerTimedControl>(), 64);
+        assert_eq!(size_of::<RecordPlayerTimedControl>(), 80);
         assert_eq!(offset_of!(RecordPlayerTimedControl, control), 16);
         assert_eq!(size_of::<RecordPlayerScratchGestureOptions>(), 40);
         assert_eq!(size_of::<RecordPlayerScratchPointerSample>(), 48);
-        assert_eq!(size_of::<RecordPlayerScratchControlResult>(), 96);
+        assert_eq!(size_of::<RecordPlayerScratchControlResult>(), 112);
         assert_eq!(offset_of!(RecordPlayerScratchControlResult, event), 0);
         assert_eq!(
             offset_of!(
                 RecordPlayerScratchControlResult,
                 raw_pointer_angular_velocity_rad_s
             ),
-            64
+            80
         );
         assert_eq!(size_of::<RecordPlayerInfo>(), 88);
         assert_eq!(offset_of!(RecordPlayerInfo, volts_per_full_scale), 40);
@@ -1742,13 +1830,16 @@ mod tests {
             offset_of!(RecordPlayerRadialTrackingTelemetry, captured_turn_index),
             96
         );
-        assert_eq!(size_of::<RecordPlayerTelemetry>(), 704);
+        assert_eq!(size_of::<RecordPlayerScratchTelemetry>(), 64);
+        assert_eq!(offset_of!(RecordPlayerScratchTelemetry, audible_gain), 16);
+        assert_eq!(size_of::<RecordPlayerTelemetry>(), 768);
         assert_eq!(offset_of!(RecordPlayerTelemetry, spiral_frame_position), 32);
         assert_eq!(offset_of!(RecordPlayerTelemetry, groove_frame_position), 40);
         assert_eq!(offset_of!(RecordPlayerTelemetry, radial_tracking), 96);
         assert_eq!(offset_of!(RecordPlayerTelemetry, deck), 224);
         assert_eq!(offset_of!(RecordPlayerTelemetry, pickup), 320);
         assert_eq!(offset_of!(RecordPlayerTelemetry, cartridge), 584);
+        assert_eq!(offset_of!(RecordPlayerTelemetry, scratch), 704);
     }
 
     #[test]
@@ -1757,7 +1848,7 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../include/record_player.h"
         ));
-        assert!(header.contains("RECORD_PLAYER_CAPI_ABI_VERSION 4u"));
+        assert!(header.contains("RECORD_PLAYER_CAPI_ABI_VERSION 5u"));
         assert!(header.contains("double volts_per_full_scale;"));
         assert!(header.contains("RECORD_PLAYER_STATUS_BUSY 8"));
         assert!(header.contains("RECORD_PLAYER_PICKUP_CONTACT_RECORD_LAND 2u"));
@@ -1767,8 +1858,9 @@ mod tests {
         assert!(header.contains("record_player_schedule_point_after_host_frames"));
         assert!(header.contains("record_player_render_interleaved"));
         assert!(header.contains("record_player_scratch_gesture_begin"));
-        assert!(header.contains("sizeof(RecordPlayerScratchControlResult) == 96"));
-        assert!(header.contains("sizeof(RecordPlayerTelemetry) == 704"));
+        assert!(header.contains("sizeof(RecordPlayerScratchControlResult) == 112"));
+        assert!(header.contains("sizeof(RecordPlayerScratchTelemetry) == 64"));
+        assert!(header.contains("sizeof(RecordPlayerTelemetry) == 768"));
     }
 
     #[test]
@@ -1787,6 +1879,9 @@ mod tests {
         let mut base = stopped_control(0, 0).control;
         base.motor_mode = RECORD_PLAYER_MOTOR_BRAKE;
         base.motor_target_angular_velocity_rad_s = -2.0;
+        base.manual_crossfader_gain = 0.37;
+        base.scratch_preset = RECORD_PLAYER_SCRATCH_PRESET_CRAB;
+        base.scratch_clicks = 4;
         let mut result = MaybeUninit::<RecordPlayerScratchControlResult>::uninit();
         assert_eq!(
             unsafe {
@@ -1811,6 +1906,12 @@ mod tests {
         );
         assert_eq!(begin.event.control.hand_contact, 1);
         assert_eq!(begin.event.control.hand_target_angle_rad, -4.0);
+        assert_eq!(begin.event.control.manual_crossfader_gain, 0.37);
+        assert_eq!(
+            begin.event.control.scratch_preset,
+            RECORD_PLAYER_SCRATCH_PRESET_CRAB
+        );
+        assert_eq!(begin.event.control.scratch_clicks, 4);
 
         let mut previous_frame = begin.event.absolute_frame;
         for index in 1..=128_u64 {
@@ -2065,9 +2166,18 @@ mod tests {
     #[test]
     fn lifecycle_load_control_render_and_telemetry() {
         let handle = create();
-        let pcm = vec![0.0f32; 64 * 2];
+        let mut pcm = vec![0.0f32; 64 * 2];
+        for frame in 0..64 {
+            let sample = ((frame as f64) * 0.17).sin() as f32 * 0.05;
+            pcm[frame * 2] = sample;
+            pcm[frame * 2 + 1] = -sample;
+        }
         assert_eq!(
             unsafe { record_player_load_interleaved_pcm(handle, pcm.as_ptr(), 64, 2, 48_000.0) },
+            RECORD_PLAYER_STATUS_OK
+        );
+        assert_eq!(
+            unsafe { record_player_set_groove_frame_position(handle, 12.0) },
             RECORD_PLAYER_STATUS_OK
         );
 
@@ -2134,6 +2244,15 @@ mod tests {
         assert_eq!(telemetry.groove_loaded, 1);
         assert_eq!(telemetry.output_sample_rate_hz, 48_000);
         assert_eq!(telemetry.rendered_host_frames, 64);
+        assert_eq!(telemetry.scratch.preset, RECORD_PLAYER_SCRATCH_PRESET_BABY);
+        assert_eq!(telemetry.scratch.clicks, 1);
+        assert_eq!(
+            telemetry.scratch.crossfader_owner,
+            RECORD_PLAYER_SCRATCH_CROSSFADER_MANUAL
+        );
+        assert!((0.0..=1.0).contains(&telemetry.scratch.audible_gain));
+        assert!((0.0..=1.0).contains(&telemetry.scratch.automatic_gate_gain));
+        assert!((0.0..=1.0).contains(&telemetry.scratch.automatic_gate_target));
         assert_eq!(telemetry.pickup.stylus_lowered, 1);
         assert_eq!(
             telemetry.pickup.contact_surface,
@@ -2175,6 +2294,34 @@ mod tests {
             unsafe { record_player_submit_timed_control(handle, &invalid) },
             RECORD_PLAYER_STATUS_CONTROL_INVALID
         );
+
+        for invalid_control in [
+            {
+                let mut value = stopped_control(0, 1);
+                value.control.scratch_preset = RECORD_PLAYER_SCRATCH_PRESET_DRUM + 1;
+                value
+            },
+            {
+                let mut value = stopped_control(0, 1);
+                value.control.scratch_clicks = 9;
+                value
+            },
+            {
+                let mut value = stopped_control(0, 1);
+                value.control.manual_crossfader_gain = f64::NAN;
+                value
+            },
+            {
+                let mut value = stopped_control(0, 1);
+                value.control.manual_crossfader_gain = -0.01;
+                value
+            },
+        ] {
+            assert_eq!(
+                unsafe { record_player_submit_timed_control(handle, &invalid_control) },
+                RECORD_PLAYER_STATUS_CONTROL_INVALID
+            );
+        }
 
         let mut output = vec![0.0; 2];
         assert_eq!(

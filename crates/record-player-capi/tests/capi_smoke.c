@@ -18,6 +18,7 @@ int main(void) {
     base_control.motor_mode = RECORD_PLAYER_MOTOR_OFF;
     base_control.stylus_lowered = 1u;
     base_control.hand_contact_radius_m = 0.12;
+    base_control.manual_crossfader_gain = 1.0;
     RecordPlayerScratchPointerSample pointer = {
         7u,
         0u,
@@ -79,6 +80,7 @@ int main(void) {
     event.absolute_frame = point.absolute_internal_frame;
     event.sequence = 1u;
     event.control.motor_mode = RECORD_PLAYER_MOTOR_OFF;
+    event.control.manual_crossfader_gain = 1.0;
     if (record_player_submit_timed_control(handle, &event)
         != RECORD_PLAYER_STATUS_OK) {
         return 10;
@@ -99,7 +101,13 @@ int main(void) {
         != RECORD_PLAYER_STATUS_OK) {
         return 13;
     }
-    if (telemetry.rendered_host_frames != 64u) {
+    if (telemetry.rendered_host_frames != 64u
+        || telemetry.scratch.preset != RECORD_PLAYER_SCRATCH_PRESET_BABY
+        || telemetry.scratch.crossfader_owner
+            != RECORD_PLAYER_SCRATCH_CROSSFADER_MANUAL
+        || telemetry.scratch.clicks != 1u
+        || telemetry.scratch.audible_gain < 0.0
+        || telemetry.scratch.audible_gain > 1.0) {
         return 14;
     }
 

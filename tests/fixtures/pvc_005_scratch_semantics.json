@@ -1,11 +1,11 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "caseId": "PVC-005",
   "sampleRateHz": 48000.0,
-  "algorithmVersion": 6,
+  "algorithmVersion": 7,
   "snapshotVersions": {
-    "gate": 1,
-    "performance": 1
+    "gate": 2,
+    "performance": 2
   },
   "limits": {
     "minimumClicks": 1,
@@ -20,8 +20,9 @@
     "restRate": 0.018,
     "intentReversalRate": 0.055,
     "maximumPredictedReversalOutgoingRate": 0.35,
-    "onsetConfirmSeconds": 0.004,
-    "reversalConfirmSeconds": 0.006,
+    "physicalDirectionConfirmationRate": 0.035,
+    "intentOnsetConfirmSeconds": 0.004,
+    "intentReversalConfirmSeconds": 0.006,
     "restConfirmSeconds": 0.012,
     "predictionObservationWeights": [1.0, 0.7, 0.55, 0.4],
     "observationsForFullConfidence": 4
@@ -169,6 +170,18 @@
       "framesPerStroke": 300,
       "expectedGainBounds": [0.0, 1.0]
     },
+    "physicalMaximumRateConfirmation": {
+      "recordRate": 20.0,
+      "formerIntentOnsetDelaySeconds": 0.004,
+      "formerOnsetBufferedSourceSeconds": 0.08,
+      "formerIntentReversalDelaySeconds": 0.006,
+      "formerReversalBufferedSourceSeconds": 0.12,
+      "stabSeedSpanSourceSeconds": 0.22,
+      "formerOnsetSeedSpanFraction": 0.36363636363636365,
+      "formerReversalSeedSpanFraction": 0.5454545454545454,
+      "expectedFirstStabAttack": "preserved",
+      "expectedEarlyClickRunCountRule": "selected click count"
+    },
     "snapshotReplay": {
       "preset": "crab",
       "clicks": 5,
@@ -187,6 +200,7 @@
     "This case does not validate the timing against measured DJ crossfader traces.",
     "The technique fractions and Drum thresholds are provisional calibration values.",
     "The first-stroke seed is not a measured endpoint prediction.",
-    "This case does not prove integration with the physical player, C ABI, or WASM."
+    "Physical-player, C ABI, and native Swift tests verify the production gain path.",
+    "This case does not prove WASM or browser integration."
   ]
 }

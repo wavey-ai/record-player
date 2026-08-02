@@ -19,7 +19,7 @@ use super::{
 use crate::spsc::TimedPlayerControlConsumer;
 use crate::timed_control::TimedPlayerControl;
 
-pub const PHYSICAL_HOST_RENDERER_SNAPSHOT_VERSION: u32 = 4;
+pub const PHYSICAL_HOST_RENDERER_SNAPSHOT_VERSION: u32 = 5;
 pub const MAXIMUM_HOST_VOLTS_PER_FULL_SCALE: f64 = 1_000.0;
 
 /// Defines the explicit boundary between phono volts and host full scale.
@@ -838,7 +838,7 @@ mod tests {
         prepare_moving_player(&mut original, Arc::clone(&groove));
         render_blocks(&mut original, &[337]);
         let snapshot = original.snapshot();
-        assert_eq!(snapshot.version, 4);
+        assert_eq!(snapshot.version, 5);
         let expected = render_blocks(&mut original, &[29, 701, 3]);
 
         let mut restored = PhysicalHostRenderer::new(profile, 88_200, TEST_HOST_OUTPUT).unwrap();
@@ -905,6 +905,14 @@ mod tests {
         assert!(matches!(
             renderer.restore(&wrong_version),
             Err(PhysicalHostRendererError::UnsupportedSnapshotVersion { .. })
+        ));
+        assert_eq!(renderer.snapshot(), before);
+
+        let mut previous_version = before.clone();
+        previous_version.version = PHYSICAL_HOST_RENDERER_SNAPSHOT_VERSION - 1;
+        assert!(matches!(
+            renderer.restore(&previous_version),
+            Err(PhysicalHostRendererError::UnsupportedSnapshotVersion { version: 4 })
         ));
         assert_eq!(renderer.snapshot(), before);
 

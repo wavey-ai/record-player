@@ -16,6 +16,7 @@ const MAX_MOVING_MASS_KG: f64 = 1.0e-2;
 const CONTACT_TOLERANCE_M: f64 = 1.0e-11;
 const BEARING_VELOCITY_TOLERANCE_M_S: f64 = 1.0e-10;
 const TANGENTIAL_VELOCITY_TOLERANCE_M_S: f64 = 1.0e-12;
+const ZERO_SLIP_REGULARIZATION_VELOCITY_M_S: f64 = 1.0e-9;
 const TANGENTIAL_FORCE_TOLERANCE_N: f64 = 1.0e-10;
 const FRICTION_GEOMETRY_PRODUCT_MARGIN: f64 = 1.0e-6;
 const INVERSE_SQRT_2: f64 = std::f64::consts::FRAC_1_SQRT_2;
@@ -2672,6 +2673,25 @@ pub(crate) fn solve_coupled_deck_pickup_midpoint(
                 }
             }
         }
+    }
+    if rejected_unsupported_groove_wall_sticking
+        && predicted_relative_velocity_m_s.abs() <= ZERO_SLIP_REGULARIZATION_VELOCITY_M_S
+    {
+        // Ideal Coulomb friction does not select one force at zero slip.
+        // Use the zero-traction member for this sample. The next signed-slip
+        // sample returns to the complete kinetic wall-friction solve.
+        let original_contact = pickup.contact;
+        let mut regularized_pickup = pickup;
+        regularized_pickup.contact.groove_friction_coefficient = 0.0;
+        let mut step = solve_coupled_deck_pickup_midpoint(
+            deck,
+            regularized_pickup,
+            geometry,
+            relation,
+            StylusTangentialMode::Separated,
+        )?;
+        step.pickup.contact = original_contact;
+        return Ok(step);
     }
     if rejected_unsupported_groove_wall_sticking {
         return Err(CoupledDeckPickupError::Pickup(
@@ -7580,18 +7600,20 @@ mod tests {
     }
 
     #[test]
-    fn midpoint_nonzero_slope_sticking_is_a_typed_transactional_failure() {
+    fn midpoint_nonzero_slope_zero_speed_uses_bounded_zero_traction() {
         for previous_mode in [
             StylusTangentialMode::Separated,
             StylusTangentialMode::Sticking,
             StylusTangentialMode::SlidingPositive,
             StylusTangentialMode::SlidingNegative,
         ] {
+            let step = try_coupled_midpoint_step(0.0, [0.5, -0.5], previous_mode).unwrap();
+            assert_eq!(step.tangential_mode, StylusTangentialMode::Sticking);
+            assert_eq!(step.pickup_telemetry.coulomb_friction_force_n, 0.0);
+            assert_eq!(step.pickup_telemetry.tangential_friction_power_w, 0.0);
             assert_eq!(
-                try_coupled_midpoint_step(0.0, [0.5, -0.5], previous_mode).unwrap_err(),
-                CoupledDeckPickupError::Pickup(
-                    PickupMechanicalError::UnsupportedGrooveWallSticking,
-                ),
+                step.pickup.contact.groove_friction_coefficient,
+                StylusContactConfig::default().groove_friction_coefficient,
             );
         }
     }

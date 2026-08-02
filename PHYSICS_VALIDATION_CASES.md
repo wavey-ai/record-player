@@ -32,9 +32,9 @@ Each case must contain these items:
 | `PVC-002` | `RP-012`, `RP-016`, `RP-028`, `RP-030` | Finalized-page publication exceeds the fixed cache | Confirmed; worker correction implemented |
 | `PVC-003` | `RP-008`, `RP-013`, `RP-028` | Midpoint active-mode solve misses a rapid-reversal callback deadline | Confirmed; core tail improved, complete path still fails |
 | `PVC-004` | `RP-009`, `RP-013`, `RP-023`, `RP-033` | One wall has two separated near-equal envelope maxima | Confirmed; tracer rejects unresolved height order |
-| `PVC-005` | `RP-003`, `RP-005`, `RP-034` | Named scratch presets do not match their intended technique topology | Replacement topology passes; human timing calibration remains open |
+| `PVC-005` | `RP-003`, `RP-005`, `RP-034` | Named scratch presets need canonical timing and production integration | Rust gain integration passes; technique calibration remains open |
 | `PVC-006` | `RP-008`, `RP-020`, `RP-024` | Passive cartridge magnetic-loss invariants | Implemented and green; cartridge measurement remains open |
-| `PVC-007` | `RP-008`, `RP-013`, `RP-026`, `RP-033`, `RP-035`, `RP-036`, `RP-038`, `RP-039` | Passive groove compliance, coupled patches, and vector friction | Certified coordinates pass; continuous state, sloped sticking, compliance, and measurements remain open |
+| `PVC-007` | `RP-008`, `RP-013`, `RP-026`, `RP-033`, `RP-035`, `RP-036`, `RP-038`, `RP-039` | Passive groove compliance, coupled patches, and vector friction | Zero-speed regularization passes; identified tangential state and compliance remain open |
 
 ## PVC-001: Spherical Envelope Global-Maximum Failure
 
@@ -576,7 +576,7 @@ The existing predictor also remains stable during coalesced input and rapid reve
 
 ### Replacement Technique Fixture
 
-- **Algorithm version**: 6.
+- **Algorithm version**: 7.
 - **Sample rate**: 48,000 hertz.
 - **Supported record-rate range**: -20 through 20.
 - **Supported click count**: 1 through 8.
@@ -630,6 +630,23 @@ Therefore, this case does not claim first-stroke endpoint accuracy.
 
 The maximum-rate fixture also covers plus and minus 20 record rate.
 
+### Maximum-Rate Confirmation Counterexample
+
+- **Record rate**: `20x`.
+- **Former onset delay**: `0.004` seconds.
+- **Former onset travel**: `0.080` source seconds.
+- **Former reversal delay**: `0.006` seconds.
+- **Former reversal travel**: `0.120` source seconds.
+- **Stab seed span**: `0.22` source seconds.
+- **Former onset ratio**: `36.4` percent of the Stab seed span.
+- **Former reversal ratio**: `54.5` percent of the Stab seed span.
+- **Failure**: Former onset confirmation could skip the complete first Stab pulse.
+- **Failure**: Former reversal confirmation could skip early click events.
+- **Correction**: Same-sample physical motion confirms its current direction immediately.
+- **Intent rule**: Opposite intent cannot reverse the gate during outgoing physical motion.
+- **Accepted result**: The first Stab pulse remains present at `20x`.
+- **Accepted result**: Transform, Flare, Crab, and Orbit retain the selected event count at `20x`.
+
 ### Physical Travel Fixture
 
 - Technique phase uses exact signed record-angle travel.
@@ -653,12 +670,15 @@ The maximum-rate fixture also covers plus and minus 20 record rate.
 - `performance_render_path_does_not_allocate`
 - `rapid_physical_reversals_remain_bounded_and_hide_each_endpoint`
 - `maximum_rate_reversals_remain_finite_and_bounded`
+- `physical_maximum_rate_onset_preserves_the_first_stab_attack`
+- `physical_maximum_rate_onset_preserves_every_early_click_event`
+- `outgoing_physical_motion_rejects_predicted_reversal_until_the_crossing_sample`
 - `performance_timing_is_sample_rate_invariant`
 - `pvc_005_fixture_matches_canonical_constants_and_claim_limits`
 
 ### Result and Claim Limit
 
-The focused suite passes 53 tests.
+The focused suite passes 58 tests.
 
 The tests validate topology, ownership, deterministic state, packetization behavior, sample-rate behavior, and numeric bounds.
 
@@ -668,15 +688,49 @@ The tests do not model a specific crossfader's curve, cut-in, latency, bleed, bo
 
 The tests do not prove blinded expert acceptance.
 
-The tests do not prove physical-player, C ABI, WASM, iOS, or browser integration.
+Physical-player tests verify sample-timed gain on phono voltage.
+
+C ABI tests verify controls, telemetry, validation, and native layout.
+
+Native Swift tests verify that Rust gain changes rendered audio.
+
+The tests do not prove WASM or browser integration.
+
+The presets do not generate record motion.
+
+The technique fractions and crossfader envelope values remain unmeasured.
 
 ### Integration Decision
 
-Complete the remaining physical-engine blockers before consumer integration.
+Keep the physical player and native Swift on the canonical Rust implementation.
 
-Integrate iOS first. Integrate the browser after iOS verification.
+Correct the remaining technique semantics before browser integration.
 
 Do not retain browser technique equations after the Rust API becomes active.
+
+### Skipproof Research Disposition
+
+- **Source**: Hansen and Bresin, [*The Skipproof Virtual Turntable for High-Level Control of Scratching*](https://doi.org/10.1162/comj.2010.34.2.39), 2010.
+- **Applicable result**: One record-motion control can generate a coordinated crossfader target.
+- **Applicable result**: Precise coordination is necessary to preserve the technique character.
+- **Applicable method**: Use expert-recorded trajectories as resampled lookup tables.
+- **Rejected behavior**: Do not permit preset motion beyond current hardware limits.
+- **Missing artifact**: The paper does not include the complete source trajectory tables.
+- **Next evidence**: Find the original GPL tables or record new expert performances.
+- **Catalog candidates**: Rolltear, Forward, Uzi, and Twiddle.
+- **Existing coverage**: Baby supplies the open-fader behavior for Tear and Scribble.
+- **Internal motion candidate**: Silent Back.
+- **Catalog review**: Compare Chop with Stab before adding a second overlapping preset.
+- **Implementation rule**: A preset must not replace or reshape user record motion.
+- **Physics rule**: The crossfader must follow rendered physical motion.
+- **Research rule**: Recorded motion can identify crossfader landmarks only.
+- **Manual rule**: Direct record and crossfader control must remain available.
+
+The paper supports the high-level controller design.
+
+It does not calibrate the current preset fractions.
+
+It does not validate current hardware timing or crossfader response.
 
 ### Reproduction
 
@@ -687,8 +741,8 @@ cargo test --lib scratch_gate::tests --no-fail-fast -- --test-threads=1
 ### Artifact
 
 - `tests/fixtures/pvc_005_scratch_semantics.json`
-- SHA-256: `a9f27b64d6c4524e91f4926f9155f8b546f77176abcb380a1bc43f6262c3de99`
-- `src/scratch_gate.rs` SHA-256: `5c4d6aa92344f533f0d861e50f281cb0d017a73eefb7119cadfd271a354cef0c`
+- SHA-256: `24e771d3894f0038b910dc4a8532f5eeb2b0f0000198945442c21969a5f01dc3`
+- `src/scratch_gate.rs` SHA-256: `9d749e16db452dfa2890501558865ec9ab083f62fec0d3008e8568ce3b7d704f`
 
 ## PVC-002: Finalized-Page Publication Exceeds the Fixed Cache
 
@@ -2365,11 +2419,18 @@ This result concerns the reduced rigid sliding model.
 
 It does not resolve sloped sticking or measured material behavior.
 
-### Exact-Zero Sloped Sticking Blocker
+### Exact-Zero Sloped Sticking Regularization
 
-- **Status**: Confirmed model gap.
-- **Production behavior**: The current implementation returns `UnsupportedGrooveWallSticking`.
-- **Transaction result**: The failed step does not change state or allocate memory.
+- **Status**: Bounded production fallback implemented.
+- **Former behavior**: A stopped, modulated groove could return `UnsupportedGrooveWallSticking`.
+- **Former effect**: The player could abort the first audio frame after a seek.
+- **Threshold**: Relative speed must not exceed `1.0e-9` meters per second.
+- **Fallback**: The solver selects zero longitudinal traction for that sample.
+- **Normal-contact rule**: The coupled normal contact solve remains active.
+- **State rule**: The successor restores the configured friction coefficient.
+- **Exit rule**: The next signed-slip sample uses complete kinetic friction.
+- **Physical basis**: Ideal Coulomb friction includes zero traction at zero slip.
+- **Calibration limit**: The threshold is not a measured PVC or stylus value.
 - **Physical reason**: Static friction has one unknown traction for each loaded wall.
 - **Constraint count**: The reduced model has only one global along-groove sticking constraint.
 - **Consequence**: The static wall-traction distribution is not unique.
@@ -2383,6 +2444,13 @@ It does not resolve sloped sticking or measured material behavior.
 - **Requirement**: Reconcile contact identities when the traced contact set changes.
 - **Requirement**: Keep stored-energy, loss, snapshot, rollback, and fixed-work accounting exact.
 - **Calibration requirement**: Fit stiffness, loss, and static yield from vector reversal measurements.
+
+### Zero-Speed Regularization Artifact
+
+- **Source**: `src/physical/contact.rs`.
+- **SHA-256**: `1c58d18aa61f43d732bce02df1dd2e5e983d8152dca849a74aa815fa9e7d93e4`.
+- **Permanent test**: `midpoint_nonzero_slope_zero_speed_uses_bounded_zero_traction`.
+- **Native regression**: A short stereo groove starts from frame 12 without a render failure.
 - **Claim limit**: Rapid scratch fidelity remains open until exact-zero reversals pass this model.
 
 ### Unique-Contact Tangential-State Hypothesis

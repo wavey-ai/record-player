@@ -1,10 +1,11 @@
 use crate::mechanics::DeckMechanicalControl;
+use crate::scratch_gate::{ScratchPreset, MAX_SCRATCH_CLICKS, MIN_SCRATCH_CLICKS};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-const SNAPSHOT_VERSION: u32 = 2;
+const SNAPSHOT_VERSION: u32 = 3;
 static NEXT_TIMELINE_ID: AtomicUsize = AtomicUsize::new(1);
 
 /// The timeline rejects an incoming event when all slots are in use.
@@ -59,6 +60,12 @@ impl Default for ControlTimelinePolicy {
 pub struct PlayerControl {
     pub deck: DeckMechanicalControl,
     pub stylus_lowered: bool,
+    #[serde(default)]
+    pub scratch_preset: ScratchPreset,
+    #[serde(default = "default_scratch_clicks")]
+    pub scratch_clicks: u8,
+    #[serde(default = "default_manual_crossfader_gain")]
+    pub manual_crossfader_gain: f64,
 }
 
 impl PlayerControl {
@@ -66,8 +73,32 @@ impl PlayerControl {
         Self {
             deck,
             stylus_lowered,
+            scratch_preset: ScratchPreset::Baby,
+            scratch_clicks: ScratchPreset::Baby.default_clicks(),
+            manual_crossfader_gain: 1.0,
         }
     }
+
+    /// Sets the complete scratch helper control for this sample-timed state.
+    pub const fn with_scratch(
+        mut self,
+        preset: ScratchPreset,
+        clicks: u8,
+        manual_crossfader_gain: f64,
+    ) -> Self {
+        self.scratch_preset = preset;
+        self.scratch_clicks = clicks;
+        self.manual_crossfader_gain = manual_crossfader_gain;
+        self
+    }
+}
+
+const fn default_scratch_clicks() -> u8 {
+    ScratchPreset::Baby.default_clicks()
+}
+
+const fn default_manual_crossfader_gain() -> f64 {
+    1.0
 }
 
 impl Default for PlayerControl {
@@ -210,8 +241,7 @@ impl PlayerControlTimeline {
         if capacity == 0 {
             return Err(ControlTimelineCreateError::ZeroCapacity);
         }
-        validate_control(initial_control.deck)
-            .map_err(ControlTimelineCreateError::InvalidControl)?;
+        validate_control(initial_control).map_err(ControlTimelineCreateError::InvalidControl)?;
 
         Ok(Self {
             slots: vec![None; capacity].into_boxed_slice(),
@@ -306,7 +336,7 @@ impl PlayerControlTimeline {
 
     /// Adds one event without allocating or changing an accepted event.
     pub fn enqueue(&mut self, event: TimedPlayerControl) -> Result<(), ControlTimelinePushError> {
-        validate_control(event.control.deck).map_err(ControlTimelinePushError::InvalidControl)?;
+        validate_control(event.control).map_err(ControlTimelinePushError::InvalidControl)?;
 
         let key = event.key();
         if self.last_submitted == Some(key) {
@@ -476,6 +506,8 @@ impl PlayerControlTimeline {
 pub enum ControlValueRequirement {
     Finite,
     Nonnegative,
+    UnitInterval,
+    ScratchClickCount,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -630,6 +662,8 @@ fn write_invalid_control(
     let requirement = match value.requirement {
         ControlValueRequirement::Finite => "finite",
         ControlValueRequirement::Nonnegative => "nonnegative",
+        ControlValueRequirement::UnitInterval => "between zero and one inclusive",
+        ControlValueRequirement::ScratchClickCount => "a supported scratch click count",
     };
     write!(
         formatter,
@@ -638,21 +672,29 @@ fn write_invalid_control(
     )
 }
 
-fn validate_control(control: DeckMechanicalControl) -> Result<(), InvalidControlValue> {
+fn validate_control(control: PlayerControl) -> Result<(), InvalidControlValue> {
+    let deck = control.deck;
     validate_finite(
         "motorTargetAngularVelocityRadS",
-        control.motor_target_angular_velocity_rad_s,
+        deck.motor_target_angular_velocity_rad_s,
     )?;
-    if let Some(angle) = control.hand_target_angle_rad {
+    if let Some(angle) = deck.hand_target_angle_rad {
         validate_finite("handTargetAngleRad", angle)?;
     }
     validate_finite(
         "handTargetAngularVelocityRadS",
-        control.hand_target_angular_velocity_rad_s,
+        deck.hand_target_angular_velocity_rad_s,
     )?;
-    validate_nonnegative("handNormalForceN", control.hand_normal_force_n)?;
-    validate_nonnegative("handContactRadiusM", control.hand_contact_radius_m)?;
-    validate_finite("stylusTorqueNm", control.stylus_torque_nm)?;
+    validate_nonnegative("handNormalForceN", deck.hand_normal_force_n)?;
+    validate_nonnegative("handContactRadiusM", deck.hand_contact_radius_m)?;
+    validate_finite("stylusTorqueNm", deck.stylus_torque_nm)?;
+    if !(MIN_SCRATCH_CLICKS..=MAX_SCRATCH_CLICKS).contains(&control.scratch_clicks) {
+        return Err(InvalidControlValue {
+            field: "scratchClicks",
+            requirement: ControlValueRequirement::ScratchClickCount,
+        });
+    }
+    validate_unit_interval("manualCrossfaderGain", control.manual_crossfader_gain)?;
     Ok(())
 }
 
@@ -679,6 +721,18 @@ fn validate_nonnegative(field: &'static str, value: f64) -> Result<(), InvalidCo
     }
 }
 
+fn validate_unit_interval(field: &'static str, value: f64) -> Result<(), InvalidControlValue> {
+    validate_finite(field, value)?;
+    if (0.0..=1.0).contains(&value) {
+        Ok(())
+    } else {
+        Err(InvalidControlValue {
+            field,
+            requirement: ControlValueRequirement::UnitInterval,
+        })
+    }
+}
+
 fn validate_snapshot(
     snapshot: &ControlTimelineSnapshot,
     expected_capacity: usize,
@@ -697,14 +751,13 @@ fn validate_snapshot(
     if snapshot.capacity == 0 || snapshot.pending_events.len() > snapshot.capacity {
         return Err(ControlTimelineRestoreError::InvalidSnapshot);
     }
-    if validate_control(snapshot.current_control.deck).is_err() {
+    if validate_control(snapshot.current_control).is_err() {
         return Err(ControlTimelineRestoreError::InvalidSnapshot);
     }
 
     let mut previous: Option<TimedControlKey> = None;
     for event in snapshot.pending_events.iter().copied() {
-        if validate_control(event.control.deck).is_err()
-            || event.absolute_frame < snapshot.render_frame
+        if validate_control(event.control).is_err() || event.absolute_frame < snapshot.render_frame
         {
             return Err(ControlTimelineRestoreError::InvalidSnapshot);
         }
@@ -1001,6 +1054,39 @@ mod tests {
                 }
             ))
         ));
+
+        for clicks in [0, MAX_SCRATCH_CLICKS.saturating_add(1)] {
+            invalid = control(1.0);
+            invalid.scratch_clicks = clicks;
+            assert_eq!(
+                timeline
+                    .enqueue(TimedPlayerControl::new(0, 1, invalid))
+                    .unwrap_err(),
+                ControlTimelinePushError::InvalidControl(InvalidControlValue {
+                    field: "scratchClicks",
+                    requirement: ControlValueRequirement::ScratchClickCount,
+                })
+            );
+        }
+
+        for gain in [f64::NAN, -0.1, 1.1] {
+            invalid = control(1.0);
+            invalid.manual_crossfader_gain = gain;
+            let expected_requirement = if gain.is_nan() {
+                ControlValueRequirement::Finite
+            } else {
+                ControlValueRequirement::UnitInterval
+            };
+            assert_eq!(
+                timeline
+                    .enqueue(TimedPlayerControl::new(0, 1, invalid))
+                    .unwrap_err(),
+                ControlTimelinePushError::InvalidControl(InvalidControlValue {
+                    field: "manualCrossfaderGain",
+                    requirement: expected_requirement,
+                })
+            );
+        }
     }
 
     #[test]
@@ -1024,6 +1110,7 @@ mod tests {
             .unwrap();
 
         let snapshot = timeline.snapshot();
+        assert_eq!(snapshot.version, 3);
         let mut restored = PlayerControlTimeline::from_snapshot(&snapshot).unwrap();
         assert_eq!(restored.snapshot(), snapshot);
 
@@ -1037,6 +1124,20 @@ mod tests {
             .unwrap();
         assert_eq!(restored_items, original_items);
         assert_eq!(restored.snapshot(), timeline.snapshot());
+    }
+
+    #[test]
+    fn restore_rejects_the_previous_control_snapshot_schema() {
+        let mut timeline = PlayerControlTimeline::new(2, 0, control(0.0)).unwrap();
+        let before = timeline.snapshot();
+        let mut previous = before.clone();
+        previous.version = SNAPSHOT_VERSION - 1;
+
+        assert_eq!(
+            timeline.restore(&previous),
+            Err(ControlTimelineRestoreError::UnsupportedVersion { version: 2 })
+        );
+        assert_eq!(timeline.snapshot(), before);
     }
 
     #[test]

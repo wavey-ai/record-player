@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define RECORD_PLAYER_CAPI_ABI_VERSION 4u
+#define RECORD_PLAYER_CAPI_ABI_VERSION 5u
 
 typedef int32_t RecordPlayerStatus;
 
@@ -50,6 +50,20 @@ typedef uint32_t RecordPlayerContactMode;
 #define RECORD_PLAYER_CONTACT_SLIDING_POSITIVE 2u
 #define RECORD_PLAYER_CONTACT_SLIDING_NEGATIVE 3u
 
+typedef uint32_t RecordPlayerScratchPreset;
+#define RECORD_PLAYER_SCRATCH_PRESET_BABY 0u
+#define RECORD_PLAYER_SCRATCH_PRESET_STAB 1u
+#define RECORD_PLAYER_SCRATCH_PRESET_CHIRP 2u
+#define RECORD_PLAYER_SCRATCH_PRESET_TRANSFORM 3u
+#define RECORD_PLAYER_SCRATCH_PRESET_FLARE 4u
+#define RECORD_PLAYER_SCRATCH_PRESET_CRAB 5u
+#define RECORD_PLAYER_SCRATCH_PRESET_ORBIT 6u
+#define RECORD_PLAYER_SCRATCH_PRESET_DRUM 7u
+
+typedef uint32_t RecordPlayerScratchCrossfaderOwner;
+#define RECORD_PLAYER_SCRATCH_CROSSFADER_MANUAL 0u
+#define RECORD_PLAYER_SCRATCH_CROSSFADER_AUTOMATIC_PRESET 1u
+
 typedef uint32_t RecordPlayerPickupContactSurface;
 #define RECORD_PLAYER_PICKUP_CONTACT_NONE 0u
 #define RECORD_PLAYER_PICKUP_CONTACT_GROOVE_WALLS 1u
@@ -85,6 +99,11 @@ typedef struct RecordPlayerControl {
     double hand_target_angular_velocity_rad_s;
     double hand_normal_force_n;
     double hand_contact_radius_m;
+    double manual_crossfader_gain;
+    RecordPlayerScratchPreset scratch_preset;
+    /* Zero selects the preset's default click count. */
+    uint8_t scratch_clicks;
+    uint8_t scratch_reserved[3];
 } RecordPlayerControl;
 
 typedef struct RecordPlayerTimedControl {
@@ -259,6 +278,21 @@ typedef struct RecordPlayerRadialTrackingTelemetry {
     uint64_t completed_steps;
 } RecordPlayerRadialTrackingTelemetry;
 
+typedef struct RecordPlayerScratchTelemetry {
+    RecordPlayerScratchPreset preset;
+    RecordPlayerScratchCrossfaderOwner crossfader_owner;
+    uint8_t clicks;
+    int8_t direction;
+    uint8_t moving;
+    uint8_t reserved[5];
+    double audible_gain;
+    double automatic_gate_gain;
+    double automatic_gate_target;
+    double phase;
+    double stroke_progress;
+    double span_prediction_confidence;
+} RecordPlayerScratchTelemetry;
+
 typedef struct RecordPlayerTelemetry {
     uint32_t abi_version;
     uint32_t output_sample_rate_hz;
@@ -281,6 +315,7 @@ typedef struct RecordPlayerTelemetry {
     RecordPlayerDeckTelemetry deck;
     RecordPlayerPickupTelemetry pickup;
     RecordPlayerCartridgeTelemetry cartridge;
+    RecordPlayerScratchTelemetry scratch;
 } RecordPlayerTelemetry;
 
 uint32_t record_player_capi_abi_version(void);
@@ -394,12 +429,12 @@ RecordPlayerStatus record_player_get_telemetry(
 #if defined(__cplusplus)
 static_assert(sizeof(RecordPlayerCreateOptions) == 24, "RecordPlayerCreateOptions layout changed");
 static_assert(offsetof(RecordPlayerCreateOptions, volts_per_full_scale) == 16, "RecordPlayerCreateOptions volts-per-full-scale offset changed");
-static_assert(sizeof(RecordPlayerControl) == 48, "RecordPlayerControl layout changed");
-static_assert(sizeof(RecordPlayerTimedControl) == 64, "RecordPlayerTimedControl layout changed");
+static_assert(sizeof(RecordPlayerControl) == 64, "RecordPlayerControl layout changed");
+static_assert(sizeof(RecordPlayerTimedControl) == 80, "RecordPlayerTimedControl layout changed");
 static_assert(sizeof(RecordPlayerScratchGestureOptions) == 40, "RecordPlayerScratchGestureOptions layout changed");
 static_assert(sizeof(RecordPlayerScratchPointerSample) == 48, "RecordPlayerScratchPointerSample layout changed");
-static_assert(sizeof(RecordPlayerScratchControlResult) == 96, "RecordPlayerScratchControlResult layout changed");
-static_assert(offsetof(RecordPlayerScratchControlResult, raw_pointer_angular_velocity_rad_s) == 64, "RecordPlayerScratchControlResult raw velocity offset changed");
+static_assert(sizeof(RecordPlayerScratchControlResult) == 112, "RecordPlayerScratchControlResult layout changed");
+static_assert(offsetof(RecordPlayerScratchControlResult, raw_pointer_angular_velocity_rad_s) == 80, "RecordPlayerScratchControlResult raw velocity offset changed");
 static_assert(sizeof(RecordPlayerInfo) == 88, "RecordPlayerInfo layout changed");
 static_assert(offsetof(RecordPlayerInfo, volts_per_full_scale) == 40, "RecordPlayerInfo volts-per-full-scale offset changed");
 static_assert(sizeof(RecordPlayerSchedulePoint) == 32, "RecordPlayerSchedulePoint layout changed");
@@ -415,22 +450,25 @@ static_assert(sizeof(RecordPlayerPickupTelemetry) == 264, "RecordPlayerPickupTel
 static_assert(sizeof(RecordPlayerCartridgeTelemetry) == 120, "RecordPlayerCartridgeTelemetry layout changed");
 static_assert(sizeof(RecordPlayerRadialTrackingTelemetry) == 128, "RecordPlayerRadialTrackingTelemetry layout changed");
 static_assert(offsetof(RecordPlayerRadialTrackingTelemetry, captured_turn_index) == 96, "RecordPlayerRadialTrackingTelemetry captured_turn_index offset changed");
-static_assert(sizeof(RecordPlayerTelemetry) == 704, "RecordPlayerTelemetry layout changed");
+static_assert(sizeof(RecordPlayerScratchTelemetry) == 64, "RecordPlayerScratchTelemetry layout changed");
+static_assert(offsetof(RecordPlayerScratchTelemetry, audible_gain) == 16, "RecordPlayerScratchTelemetry audible gain offset changed");
+static_assert(sizeof(RecordPlayerTelemetry) == 768, "RecordPlayerTelemetry layout changed");
 static_assert(offsetof(RecordPlayerTelemetry, spiral_frame_position) == 32, "RecordPlayerTelemetry spiral_frame_position offset changed");
 static_assert(offsetof(RecordPlayerTelemetry, groove_frame_position) == 40, "RecordPlayerTelemetry groove_frame_position offset changed");
 static_assert(offsetof(RecordPlayerTelemetry, radial_tracking) == 96, "RecordPlayerTelemetry radial_tracking offset changed");
 static_assert(offsetof(RecordPlayerTelemetry, deck) == 224, "RecordPlayerTelemetry deck offset changed");
 static_assert(offsetof(RecordPlayerTelemetry, pickup) == 320, "RecordPlayerTelemetry pickup offset changed");
 static_assert(offsetof(RecordPlayerTelemetry, cartridge) == 584, "RecordPlayerTelemetry cartridge offset changed");
+static_assert(offsetof(RecordPlayerTelemetry, scratch) == 704, "RecordPlayerTelemetry scratch offset changed");
 #else
 _Static_assert(sizeof(RecordPlayerCreateOptions) == 24, "RecordPlayerCreateOptions layout changed");
 _Static_assert(offsetof(RecordPlayerCreateOptions, volts_per_full_scale) == 16, "RecordPlayerCreateOptions volts-per-full-scale offset changed");
-_Static_assert(sizeof(RecordPlayerControl) == 48, "RecordPlayerControl layout changed");
-_Static_assert(sizeof(RecordPlayerTimedControl) == 64, "RecordPlayerTimedControl layout changed");
+_Static_assert(sizeof(RecordPlayerControl) == 64, "RecordPlayerControl layout changed");
+_Static_assert(sizeof(RecordPlayerTimedControl) == 80, "RecordPlayerTimedControl layout changed");
 _Static_assert(sizeof(RecordPlayerScratchGestureOptions) == 40, "RecordPlayerScratchGestureOptions layout changed");
 _Static_assert(sizeof(RecordPlayerScratchPointerSample) == 48, "RecordPlayerScratchPointerSample layout changed");
-_Static_assert(sizeof(RecordPlayerScratchControlResult) == 96, "RecordPlayerScratchControlResult layout changed");
-_Static_assert(offsetof(RecordPlayerScratchControlResult, raw_pointer_angular_velocity_rad_s) == 64, "RecordPlayerScratchControlResult raw velocity offset changed");
+_Static_assert(sizeof(RecordPlayerScratchControlResult) == 112, "RecordPlayerScratchControlResult layout changed");
+_Static_assert(offsetof(RecordPlayerScratchControlResult, raw_pointer_angular_velocity_rad_s) == 80, "RecordPlayerScratchControlResult raw velocity offset changed");
 _Static_assert(sizeof(RecordPlayerInfo) == 88, "RecordPlayerInfo layout changed");
 _Static_assert(offsetof(RecordPlayerInfo, volts_per_full_scale) == 40, "RecordPlayerInfo volts-per-full-scale offset changed");
 _Static_assert(sizeof(RecordPlayerSchedulePoint) == 32, "RecordPlayerSchedulePoint layout changed");
@@ -446,13 +484,16 @@ _Static_assert(sizeof(RecordPlayerPickupTelemetry) == 264, "RecordPlayerPickupTe
 _Static_assert(sizeof(RecordPlayerCartridgeTelemetry) == 120, "RecordPlayerCartridgeTelemetry layout changed");
 _Static_assert(sizeof(RecordPlayerRadialTrackingTelemetry) == 128, "RecordPlayerRadialTrackingTelemetry layout changed");
 _Static_assert(offsetof(RecordPlayerRadialTrackingTelemetry, captured_turn_index) == 96, "RecordPlayerRadialTrackingTelemetry captured_turn_index offset changed");
-_Static_assert(sizeof(RecordPlayerTelemetry) == 704, "RecordPlayerTelemetry layout changed");
+_Static_assert(sizeof(RecordPlayerScratchTelemetry) == 64, "RecordPlayerScratchTelemetry layout changed");
+_Static_assert(offsetof(RecordPlayerScratchTelemetry, audible_gain) == 16, "RecordPlayerScratchTelemetry audible gain offset changed");
+_Static_assert(sizeof(RecordPlayerTelemetry) == 768, "RecordPlayerTelemetry layout changed");
 _Static_assert(offsetof(RecordPlayerTelemetry, spiral_frame_position) == 32, "RecordPlayerTelemetry spiral_frame_position offset changed");
 _Static_assert(offsetof(RecordPlayerTelemetry, groove_frame_position) == 40, "RecordPlayerTelemetry groove_frame_position offset changed");
 _Static_assert(offsetof(RecordPlayerTelemetry, radial_tracking) == 96, "RecordPlayerTelemetry radial_tracking offset changed");
 _Static_assert(offsetof(RecordPlayerTelemetry, deck) == 224, "RecordPlayerTelemetry deck offset changed");
 _Static_assert(offsetof(RecordPlayerTelemetry, pickup) == 320, "RecordPlayerTelemetry pickup offset changed");
 _Static_assert(offsetof(RecordPlayerTelemetry, cartridge) == 584, "RecordPlayerTelemetry cartridge offset changed");
+_Static_assert(offsetof(RecordPlayerTelemetry, scratch) == 704, "RecordPlayerTelemetry scratch offset changed");
 #endif
 
 #endif
