@@ -630,6 +630,20 @@ Implement proof that the audible change requires in the same pass.
 
 Return to formal solver certification before a public physical-leadership claim.
 
+### Callback Proof-Validation Correction
+
+The callback no longer recalculates immutable trace-certificate SHA-256 identities.
+
+Normal mean render time decreases by approximately 27.7 percent in the measured fixture.
+
+Rapid-reversal mean render time decreases by approximately 34.1 percent.
+
+This correction does not change the rendered sound.
+
+It is an activation and scratch-resilience improvement only.
+
+The complete physical path still misses every measured callback deadline.
+
 ## Required Perceptual Evidence
 
 Each before-and-after render must use the same source, controls, gain, and output conversion.

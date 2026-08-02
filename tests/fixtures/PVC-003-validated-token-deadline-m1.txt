@@ -1,0 +1,48 @@
+PVC-003 validated trace-token callback checkpoint
+Date: 2026-08-02
+Computer: Apple M1
+Operating system: macOS 26.5 (25F71)
+Rust: rustc 1.96.0 (ac68faa20 2026-05-25)
+Profile: release
+Physical sample rate: 192000 Hz
+Block size: 128 frames
+Deadline: 666666 ns
+Blocks per fixture: 512
+Warm-up: 1024 frames
+
+Command:
+cargo test --release -p record-player midpoint_player_release_block_benchmark -- --ignored --nocapture
+
+Immediate baseline before the correction:
+normal min/p50/p95/p99/max/mean ns = 2119917/2327333/2940250/3016666/3178625/2506968
+normal deadline misses = 512 of 512
+reversal min/p50/p95/p99/max/mean ns = 7229333/7363667/11289167/11397458/11737000/7901920
+reversal deadline misses = 512 of 512
+
+Corrected run 1:
+normal min/p50/p95/p99/max/mean ns = 1464500/1645542/2161875/2199500/2277000/1813844
+normal deadline misses = 512 of 512
+reversal min/p50/p95/p99/max/mean ns = 4635208/4686208/8585375/8723541/8826250/5212201
+reversal deadline misses = 512 of 512
+
+Corrected run 2:
+normal min/p50/p95/p99/max/mean ns = 1466041/1639292/2158958/2209459/2252708/1812518
+normal deadline misses = 512 of 512
+reversal min/p50/p95/p99/max/mean ns = 4631000/4685292/8603000/8700625/8889417/5208811
+reversal deadline misses = 512 of 512
+
+Corrected run 3:
+normal min/p50/p95/p99/max/mean ns = 1464916/1629709/2158042/2214500/2368708/1813426
+normal deadline misses = 512 of 512
+reversal min/p50/p95/p99/max/mean ns = 4635375/4686209/8603000/8710625/8864541/5217831
+reversal deadline misses = 512 of 512
+
+Correction:
+The validated certificate token no longer recalculates its immutable SHA-256 identity during rendering.
+Asset admission still recomputes and validates the complete certificate.
+Runtime tracing still validates the supplied stylus geometry.
+
+Result:
+The middle normal mean decreases by approximately 27.7 percent.
+The middle reversal mean decreases by approximately 34.1 percent.
+Both corrected fixtures still miss every deadline.

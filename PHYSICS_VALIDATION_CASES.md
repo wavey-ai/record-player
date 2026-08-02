@@ -36,6 +36,7 @@ Each case must contain these items:
 | `PVC-006` | `RP-008`, `RP-020`, `RP-024` | Passive cartridge magnetic-loss invariants | Implemented and green; cartridge measurement remains open |
 | `PVC-007` | `RP-008`, `RP-013`, `RP-026`, `RP-033`, `RP-035`, `RP-036`, `RP-038`, `RP-039` | Passive groove compliance, coupled patches, and vector friction | Zero-speed regularization passes; identified tangential state and compliance remain open |
 | `PVC-008` | `RP-008`, `RP-013`, `RP-028`, `RP-033` | One contact solve skips rapid groove events | Bounded sweep improves the reduced phono reference; callback deadline fails |
+| `PVC-009` | `RP-003`, `RP-013`, `RP-040` | Real picture record for complete player validation | Structural decode passes; PCM and physical-player tests remain open |
 
 ## PVC-001: Spherical Envelope Global-Maximum Failure
 
@@ -1137,6 +1138,39 @@ Shared contact edits and operating-system noise can move later measurements.
 
 Retain this exact distribution as one identified source-state checkpoint.
 
+### Validated-Token Callback Checkpoint
+
+This checkpoint removes repeated immutable certificate hashing from active tracing.
+
+Asset admission still recomputes and validates the complete certificate.
+
+The validated token checks only the supplied stylus geometry during rendering.
+
+The table contains the middle result from three consecutive release runs.
+
+| Player fixture | p50 ns | p95 ns | p99 ns | Maximum ns | Mean ns | Deadline misses |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Normal | 1,639,292 | 2,158,958 | 2,209,459 | 2,252,708 | 1,812,518 | 512 of 512 |
+| Reversal | 4,685,292 | 8,603,000 | 8,700,625 | 8,889,417 | 5,208,811 | 512 of 512 |
+
+The immediate baseline used the same source and release command.
+
+Its normal mean was 2,506,968 nanoseconds.
+
+Its reversal mean was 7,901,920 nanoseconds.
+
+The normal mean decreases by approximately 27.7 percent.
+
+The reversal mean decreases by approximately 34.1 percent.
+
+The physical output equations and proof limits do not change.
+
+Both fixtures still miss every 666,666-nanosecond deadline.
+
+The remaining profile is dominated by certified root isolation and the coupled contact solve.
+
+This checkpoint does not authorize product activation.
+
 ### Reference Method
 
 `std::time::Instant` measures each core step and each complete player block.
@@ -1185,6 +1219,9 @@ cargo test --release --lib physical::player::tests::midpoint_player_release_bloc
 
 - **Measured result record**: `tests/fixtures/PVC-003-midpoint-deadline-m1.txt`.
 - **Measured result SHA-256**: `8955beb7e63f1250ba50fa28453a7ba156e7a1ef079e73c29c7deb74d623a4e8`.
+- **Validated-token result record**: `tests/fixtures/PVC-003-validated-token-deadline-m1.txt`.
+- **Validated-token result SHA-256**: `f40775453ac7d7fbe7588ea4af6591d2c9f47c4fa203142994e1231c41d23fb8`.
+- **Validated-token source SHA-256**: `fa8b9ce0298f7b57559e8dc241b17431d7733c7386d763f393cccd07032bee69`.
 - **Core fixture**: `src/physical/contact.rs`.
 - **Core fixture SHA-256 at this checkpoint**: `dce3ab59d2b32a64d6c922fca2a91f41364d32df3b61723df55e1b7cac652bb6`.
 - **Player fixture**: `src/physical/player.rs`.
@@ -3062,6 +3099,16 @@ The current certified runtime trace is not real-time safe.
 
 Precompute certified contact-envelope data before product activation.
 
+Repeated SHA-256 certificate validation was also present in each active trace.
+
+The validated-token correction removes that immutable proof work from rendering.
+
+Normal mean time decreases from 2.507 milliseconds to 1.813 milliseconds.
+
+Rapid-reversal mean time decreases from 7.902 milliseconds to 5.209 milliseconds.
+
+Both corrected fixtures still miss 512 of 512 deadlines.
+
 ### Numerical Boundary Result
 
 An exact `20x` render can derive `20.00000000000632383` from record-angle travel.
@@ -3090,3 +3137,67 @@ The bounded sweep is a material improvement against the reduced reference.
 It does not prove complete coupled-player accuracy.
 
 It does not pass the current callback deadline.
+
+## PVC-009: Real Picture Record Player Fixture
+
+### Source
+
+- **Observation date**: 2026-08-02.
+- **File name**: `0a7ee1f9-3a66-45e1-80a2-c1f3dd7ea0f6.png`.
+- **File size**: 1,246,200 bytes.
+- **Image size**: 576 by 576 pixels.
+- **SHA-256**: `4238fd1b96c6f69eb0f63f28f524e6c3baa5b22840f8df4d73dab4ea38e4c35d`.
+- **Title**: `Never`.
+- **Artist**: `Lori Asha`.
+- **Record profile**: `single45`.
+- **Payload encoding**: `toned-v1`.
+
+The file is an external test artifact in the user's Downloads directory.
+
+Do not copy the file into this repository without a separate asset decision.
+
+### Structural Decode Result
+
+The current Bitneedle `record-test` binary accepts the image.
+
+The command returns exit status zero.
+
+All 171 format checks pass.
+
+The decoded stream contains one track and 164 ECDC payload entries.
+
+The programme contains 10,496,000 samples at 48 kilohertz.
+
+The programme duration is approximately 218.667 seconds.
+
+The record has no signed release reference or YL issuance markers.
+
+This signing state does not prevent local player validation.
+
+### Scope Limit
+
+`record-test` decodes the picture-record structure and validates each ECDC packet map.
+
+This run does not prove that all ECDC packets decode to PCM.
+
+Run the native programme decoder before the physical-player test uses this fixture.
+
+### Reproduction Command
+
+```sh
+cd /Users/jamie/wavey.ai/bitneedle
+cargo build -p test-spin
+target/debug/record-test \
+  /Users/jamie/Downloads/0a7ee1f9-3a66-45e1-80a2-c1f3dd7ea0f6.png
+```
+
+### Planned Player Use
+
+1. Verify the exact ECDC-to-PCM decode.
+2. Cut the decoded stereo PCM into the canonical virtual groove.
+3. Render normal forward playback through the complete physical chain.
+4. Render stops, reverse travel, and rapid signed motion.
+5. Render each Rust scratch preset with user-controlled record motion.
+6. Record output, telemetry, callback time, and failure counts.
+
+The player test must bind its results to the file SHA-256 value.

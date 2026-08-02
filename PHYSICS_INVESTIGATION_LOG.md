@@ -2129,6 +2129,25 @@ It is not a measured product calibration value.
 - **Decision**: Keep the callback deadline open.
 - **Validation case**: See the identified checkpoint in `PVC-003`.
 
+### Validated trace-token deadline checkpoint
+
+- **Date**: 2026-08-02.
+- **Former defect**: Active tracing recalculated the immutable certificate SHA-256 identity.
+- **Former frequency**: The callback repeated this work for each physical sample and wall.
+- **Correction**: Recompute and validate the certificate only during asset admission.
+- **Runtime check**: Validate only the supplied stylus geometry against the admitted token.
+- **Normal mean before**: 2,506,968 nanoseconds for each 128-frame block.
+- **Normal mean after**: 1,812,518 nanoseconds for each 128-frame block.
+- **Reversal mean before**: 7,901,920 nanoseconds for each 128-frame block.
+- **Reversal mean after**: 5,208,811 nanoseconds for each 128-frame block.
+- **Normal improvement**: Approximately 27.7 percent.
+- **Reversal improvement**: Approximately 34.1 percent.
+- **Deadline result**: Both fixtures still miss all 512 callback deadlines.
+- **Output effect**: The correction does not change the physical equations or expected samples.
+- **Profile result**: Certified root isolation and the coupled contact solve now dominate.
+- **Decision**: Keep full physical consumer activation blocked.
+- **Validation case**: `PVC-003` contains the complete measured checkpoint.
+
 ### Host torque boundary
 
 - **Finding**: The first C control structure exposes `stylus_torque_nm` to hosts.

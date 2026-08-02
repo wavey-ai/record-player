@@ -405,29 +405,6 @@ impl GrooveTraceAdmissionCertificate {
         self.edge_coverage
     }
 
-    fn supports_geometry(self, geometry: StylusGeometry) -> Result<(), GrooveTraceAdmissionError> {
-        let geometry = geometry
-            .validate()
-            .map_err(|_| GrooveTraceAdmissionError::InvalidGeometry)?;
-        self.validate_static()?;
-        if geometry.tracing_radius_m > self.maximum_tracing_radius_m {
-            return Err(GrooveTraceAdmissionError::GeometryOutsideCertificate);
-        }
-        Ok(())
-    }
-
-    fn validate_for_active_tracing(
-        self,
-        geometry: StylusGeometry,
-    ) -> Result<(), GrooveTraceAdmissionError> {
-        self.supports_geometry(geometry)?;
-        if let Some(error) = self.admission_class.rejection_error() {
-            Err(error)
-        } else {
-            Ok(())
-        }
-    }
-
     pub(crate) fn validate_static(self) -> Result<(), GrooveTraceAdmissionError> {
         self.source_content_identity
             .validate_current()
@@ -668,7 +645,27 @@ impl ValidatedGrooveTraceAdmissionCertificate {
         self,
         geometry: StylusGeometry,
     ) -> Result<(), GrooveTraceAdmissionError> {
-        self.0.validate_for_active_tracing(geometry)
+        self.supports_geometry(geometry)?;
+        if let Some(error) = self.0.admission_class.rejection_error() {
+            Err(error)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Checks only the geometry that can change after certificate admission.
+    ///
+    /// `validate_recomputed` already checked the complete certificate and its
+    /// representation. Repeating its SHA-256 identity check for each wall and
+    /// physical sample made immutable proof validation part of render work.
+    fn supports_geometry(self, geometry: StylusGeometry) -> Result<(), GrooveTraceAdmissionError> {
+        let geometry = geometry
+            .validate()
+            .map_err(|_| GrooveTraceAdmissionError::InvalidGeometry)?;
+        if geometry.tracing_radius_m > self.0.maximum_tracing_radius_m {
+            return Err(GrooveTraceAdmissionError::GeometryOutsideCertificate);
+        }
+        Ok(())
     }
 
     /// Returns the proof contract for the crate-private certified tracer.
@@ -676,7 +673,7 @@ impl ValidatedGrooveTraceAdmissionCertificate {
         self,
         geometry: StylusGeometry,
     ) -> Result<CertifiedConcaveTraceBounds, GrooveTraceAdmissionError> {
-        self.0.supports_geometry(geometry)?;
+        self.supports_geometry(geometry)?;
         if self.0.admission_class != GrooveTraceAdmissionClass::StrictConcavity {
             return Err(GrooveTraceAdmissionError::NotCertifiedConcave);
         }
@@ -707,7 +704,7 @@ impl ValidatedGrooveTraceAdmissionCertificate {
         self,
         geometry: StylusGeometry,
     ) -> Result<CertifiedPiecewiseTraceBounds, GrooveTraceAdmissionError> {
-        self.0.supports_geometry(geometry)?;
+        self.supports_geometry(geometry)?;
         if self.0.admission_class != GrooveTraceAdmissionClass::FixedCapPiecewise
             || !self.0.runtime_height_order_required
         {
@@ -2483,7 +2480,10 @@ mod tests {
             GrooveTraceAdmissionClass::RejectedRepresentationJoin
         );
         assert_eq!(
-            material.validate_for_active_tracing(StylusGeometry::default()),
+            material
+                .validate_recomputed(material)
+                .unwrap()
+                .validate_for_active_tracing(StylusGeometry::default()),
             Err(GrooveTraceAdmissionError::RepresentationJoinNotAdmitted)
         );
     }
@@ -2608,7 +2608,10 @@ mod tests {
             GrooveTraceAdmissionClass::RejectedWallSlope
         );
         assert_eq!(
-            wall_slope.validate_for_active_tracing(StylusGeometry::default()),
+            wall_slope
+                .validate_recomputed(wall_slope)
+                .unwrap()
+                .validate_for_active_tracing(StylusGeometry::default()),
             Err(GrooveTraceAdmissionError::WallSlopeLimitExceeded)
         );
 
@@ -2631,7 +2634,10 @@ mod tests {
             GrooveTraceAdmissionClass::RejectedFixedWorkSupport
         );
         assert_eq!(
-            fixed_work.validate_for_active_tracing(StylusGeometry::default()),
+            fixed_work
+                .validate_recomputed(fixed_work)
+                .unwrap()
+                .validate_for_active_tracing(StylusGeometry::default()),
             Err(GrooveTraceAdmissionError::FixedWorkNotProved)
         );
     }
