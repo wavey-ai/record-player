@@ -84,6 +84,21 @@ Use this ledger to track requirements across the chronological findings.
   **Status**: Implemented with automated vocal-like waveform tests.
 - **RP-044 — Interaction cues**: Keep bounded wow, flutter, and needle texture when they respond to physical motion.
   **Status**: Implemented as an optional estimated profile. Hardware calibration remains open.
+- **RP-045 — Callback panic containment**: Do not unwind after a dynamic mechanical rejection. Preserve the last valid sample state.
+  **Status**: Implemented in `ScratchAcousticDsp`. Native verification remains open.
+
+## 2026-08-02: TestFlight Audio Callback Crash
+
+### Claim: Build 22 aborted inside the native Rust renderer
+
+- **Status**: Confirmed.
+- **Confidence**: High.
+- **Evidence**: TestFlight incident `B693B01D-48AC-435E-A1BC-A3137A7352EF` reports `SIGABRT` on the audio thread.
+- **Evidence**: The archive and crash image have the same UUID.
+- **Evidence**: Symbolication reaches `bitneedle_native_record_player_render_stereo_planar` from the 128-frame source-node callback.
+- **Unknown**: The report does not contain the first Rust panic message.
+- **Decision**: Dynamic deck rejection keeps the last valid state and increments a recovery count.
+- **Detail**: See `PRODUCTION_CRASH_INVESTIGATION.md`.
 
 ## 2026-08-01: Repository and History Investigation
 

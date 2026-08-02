@@ -386,6 +386,7 @@ pub struct ScratchAcousticDsp {
     source_sample_rate: f64,
     native_rpm: f64,
     deck_state: DeckMechanicalState,
+    deck_recovery_count: u64,
     channels: Arc<Vec<Vec<f32>>>,
     total_frames: usize,
     window_start: usize,
@@ -476,6 +477,7 @@ impl ScratchAcousticDsp {
             source_sample_rate: 48_000.0,
             native_rpm,
             deck_state,
+            deck_recovery_count: 0,
             channels: Arc::new(Vec::new()),
             total_frames: 0,
             window_start: 0,
@@ -635,10 +637,7 @@ impl ScratchAcousticDsp {
         self.rate_velocity = 0.0;
         self.target_rate = 0.0;
         self.last_effective_rate = 0.0;
-        let turns = self.platter_rotation_turns;
-        self.deck_state
-            .reset(0.0, 0.0, turns, turns)
-            .expect("zero deck reset must be valid");
+        self.reset_deck_to_rest_at_current_turns();
         self.frames_since_motion = 0;
         self.contact_impulse = 0.0;
         self.last_output_samples.clear();
@@ -1088,6 +1087,12 @@ impl ScratchAcousticDsp {
     #[wasm_bindgen(getter, js_name = platterRotationTurns)]
     pub fn platter_rotation_turns(&self) -> f64 {
         self.platter_rotation_turns
+    }
+
+    /// Counts rejected deck steps that used the last valid motion state.
+    #[wasm_bindgen(getter, js_name = deckRecoveryCount)]
+    pub fn deck_recovery_count(&self) -> u64 {
+        self.deck_recovery_count
     }
 
     #[wasm_bindgen(js_name = setMotion)]
@@ -2134,6 +2139,21 @@ impl ScratchAcousticDsp {
         }
     }
 
+    fn reset_deck_to_rest_at_current_turns(&mut self) {
+        let turns = if self.platter_rotation_turns.is_finite() {
+            self.platter_rotation_turns
+        } else {
+            self.deck_recovery_count = self.deck_recovery_count.saturating_add(1);
+            self.platter_rotation_turns = 0.0;
+            0.0
+        };
+        if self.deck_state.reset(0.0, 0.0, turns, turns).is_err() {
+            self.deck_recovery_count = self.deck_recovery_count.saturating_add(1);
+            self.platter_rotation_turns = 0.0;
+            let _ = self.deck_state.reset(0.0, 0.0, 0.0, 0.0);
+        }
+    }
+
     fn reset_position(&mut self, position: f64) {
         self.position = self.clamp_source_position(position);
         self.target_position = self.position;
@@ -2143,10 +2163,7 @@ impl ScratchAcousticDsp {
         self.motor_delivered_rate = 0.0;
         self.unpowered_throw_rate = 0.0;
         self.last_effective_rate = 0.0;
-        let turns = self.platter_rotation_turns;
-        self.deck_state
-            .reset(0.0, 0.0, turns, turns)
-            .expect("zero deck reset must be valid");
+        self.reset_deck_to_rest_at_current_turns();
         self.frames_since_motion = 0;
         self.last_output_samples.clear();
         self.high_frequency_acceleration_limiter.reset();
@@ -2265,19 +2282,23 @@ impl ScratchAcousticDsp {
             && before.record_rate == self.motor_rate
         {
             let turn_step = self.motor_rate * self.native_rpm / (60.0 * self.output_sample_rate);
-            self.deck_state
+            if self
+                .deck_state
                 .reset(
                     self.motor_rate,
                     self.motor_rate,
                     before.platter_angle_turns + turn_step,
                     before.record_angle_turns + turn_step,
                 )
-                .expect("locked servo deck step must be valid");
-            self.rate_velocity = 0.0;
-            self.rate = self.motor_rate;
-            self.motor_delivered_rate = self.motor_rate;
-            self.platter_rotation_turns = before.record_angle_turns + turn_step;
-            return self.motor_rate;
+                .is_ok()
+            {
+                self.rate_velocity = 0.0;
+                self.rate = self.motor_rate;
+                self.motor_delivered_rate = self.motor_rate;
+                self.platter_rotation_turns = before.record_angle_turns + turn_step;
+                return self.motor_rate;
+            }
+            self.deck_recovery_count = self.deck_recovery_count.saturating_add(1);
         }
         let hand_target_angle_turns = if self.hand_contact && self.grip > 0.0 {
             let frames_per_turn =
@@ -2306,25 +2327,40 @@ impl ScratchAcousticDsp {
             stylus_torque_nm: 0.0,
         };
         let control = DeckMechanicalControl::from_normalized(self.deck_state.config(), normalized);
-        let mut telemetry = self
+        let Ok(mut telemetry) = self
             .deck_state
             .advance(1.0 / self.output_sample_rate, control)
-            .expect("validated production deck controls must advance");
+        else {
+            // The mechanical step is transactional. Keep its last valid state
+            // for this sample, then retry the current control on the next one.
+            // A rejected step must not unwind through a real-time callback.
+            self.deck_recovery_count = self.deck_recovery_count.saturating_add(1);
+            self.rate_velocity = 0.0;
+            self.rate = before.record_rate;
+            self.motor_delivered_rate = before.platter_rate;
+            self.platter_rotation_turns = before.record_angle_turns;
+            return before.record_rate;
+        };
         let servo_capture_error = 1.0e-5;
         if !self.hand_contact
             && self.motor_rate.abs() >= DEADZONE_RATE
             && (telemetry.platter_rate - self.motor_rate).abs() < servo_capture_error
             && (telemetry.record_rate - self.motor_rate).abs() < servo_capture_error
         {
-            self.deck_state
+            if self
+                .deck_state
                 .reset(
                     self.motor_rate,
                     self.motor_rate,
                     telemetry.platter_angle_turns,
                     telemetry.record_angle_turns,
                 )
-                .expect("captured servo deck reset must be valid");
-            telemetry = self.deck_state.telemetry();
+                .is_ok()
+            {
+                telemetry = self.deck_state.telemetry();
+            } else {
+                self.deck_recovery_count = self.deck_recovery_count.saturating_add(1);
+            }
         }
         self.rate_velocity = (telemetry.record_rate - self.rate) * self.output_sample_rate;
         self.rate = telemetry.record_rate;
@@ -2547,6 +2583,39 @@ mod tests {
         dsp.window_end = 4_800_000;
         dsp.total_frames = 4_800_000;
         dsp
+    }
+
+    #[test]
+    fn rejected_deck_step_keeps_last_valid_motion_without_panicking() {
+        let mut dsp = simulation_dsp();
+        seed_deck_rates(&mut dsp, 0.42, 0.37, 12.0);
+        dsp.hand_contact = true;
+        dsp.grip = 1.0;
+        dsp.motor_rate = 1.0;
+        dsp.output_sample_rate = f64::NAN;
+
+        let rate = dsp.advance_deck_mechanics(-1.0);
+
+        assert!((rate - 0.37).abs() < 1.0e-12);
+        assert!((dsp.rate - 0.37).abs() < 1.0e-12);
+        assert!((dsp.motor_delivered_rate - 0.42).abs() < 1.0e-12);
+        assert!((dsp.platter_rotation_turns - 12.0).abs() < 1.0e-12);
+        assert_eq!(dsp.deck_recovery_count(), 1);
+    }
+
+    #[test]
+    fn nominal_playback_remains_valid_after_many_record_turns() {
+        let mut dsp = simulation_dsp();
+        seed_deck_rates(&mut dsp, 1.0, 1.0, 2_000.0);
+        dsp.hand_contact = false;
+        dsp.motor_rate = 1.0;
+
+        for _ in 0..48_000 {
+            assert_eq!(dsp.advance_deck_mechanics(0.0), 1.0);
+        }
+
+        assert_eq!(dsp.deck_recovery_count(), 0);
+        assert!(dsp.platter_rotation_turns > 2_000.5);
     }
 
     fn scratch_signal_dsp(preset: ScratchPreset, rate: f64) -> ScratchAcousticDsp {
