@@ -85,11 +85,11 @@ Use this ledger to track requirements across the chronological findings.
 - **RP-044 — Interaction cues**: Keep bounded wow, flutter, and needle texture when they respond to physical motion.
   **Status**: Implemented as an optional estimated profile. Hardware calibration remains open.
 - **RP-045 — Callback panic containment**: Do not unwind after a dynamic mechanical rejection. Preserve the last valid sample state.
-  **Status**: Implemented in `ScratchAcousticDsp`. Native verification remains open.
+  **Status**: Implemented in `ScratchAcousticDsp` and the native render bridge.
 - **RP-046 — Continuous technique clicks**: Repeat the selected click density while record motion continues beyond one predicted phrase.
-  **Status**: Implemented in gate algorithm version 10. iOS control feedback remains open.
+  **Status**: Implemented in gate algorithm version 10. iOS displays the final audible gate state.
 - **RP-047 — Momentary fader authority**: A held host fader control overrides each manual or automatic technique.
-  **Status**: Implemented in `ScratchAcousticDsp`. Native and iOS integration remain open.
+  **Status**: Implemented in `ScratchAcousticDsp`, the native bridge, and iOS.
 - **RP-048 — Released-flick intent**: Continue the selected technique after a deliberate record throw until physical motion or intent ends.
   **Status**: Open. The current gate releases immediately when hand contact ends.
 
@@ -123,6 +123,8 @@ Use this ledger to track requirements across the chronological findings.
 - **Requirement**: Releasing the control returns authority to the selected technique.
 - **Requirement**: The displayed state shows the final audible gain.
 - **Implementation**: Rust blends into and out of the override over `0.45` milliseconds.
+- **Implementation**: The iOS control shows `OPEN` or `CLOSED` from the final Rust gate.
+- **Implementation**: iOS stores the selected push-to-open or push-to-close behavior.
 - **Reason**: The transition prevents a discontinuity at the override boundary.
 - **Limit**: Listening tests must confirm that this transition does not soften intended fast cuts.
 
@@ -149,6 +151,9 @@ Use this ledger to track requirements across the chronological findings.
 - **Evidence**: Symbolication reaches `bitneedle_native_record_player_render_stereo_planar` from the 128-frame source-node callback.
 - **Unknown**: The report does not contain the first Rust panic message.
 - **Decision**: Dynamic deck rejection keeps the last valid state and increments a recovery count.
+- **Test**: A native test changes from 45 RPM to LP speed during the powered brake tail.
+- **Result**: The test completes 512 stereo callback blocks with zero panics and zero deck recoveries.
+- **Decision**: iOS saves the first native diagnostic before it terminates away from the audio callback.
 - **Detail**: See `PRODUCTION_CRASH_INVESTIGATION.md`.
 
 ## 2026-08-01: Repository and History Investigation
