@@ -411,6 +411,52 @@ The rapid-scratch reference fixture now completes without a trace error.
 
 Its passing result does not prove the callback deadline.
 
+### Open-Loop Electrical Observer Evidence
+
+- **Observation date**: 2026-08-02.
+- **Rate sweep**: Signed integer rates from `1x` through `20x`.
+- **Candidate step**: One mechanical contact solve at 192000 hertz.
+- **Reference step**: At most 0.125 source frames.
+- **Electrical model**: Concorde MkII Scratch seed cartridge and phono configuration.
+- **Observer rule**: Identical electrical models process candidate and reference motion.
+- **Coupling limit**: Cartridge reaction force does not return to either mechanical solve.
+- **Claim limit**: These values are not complete coupled-player errors.
+
+The rate sweep gives these normalized RMS errors:
+
+| Quantity | Left | Right |
+| --- | ---: | ---: |
+| Cartridge load voltage | `0.5863220800818523` | `0.584662684658089` |
+| Phono output voltage | `0.7743228579914596` | `0.7494342423073957` |
+
+The second fixture ramps between stop, `20x` forward, and `20x` reverse motion.
+
+It returns to its initial source position.
+
+It gives these results:
+
+| Quantity | Left | Right |
+| --- | ---: | ---: |
+| Cartridge-voltage normalized RMS error | `0.8760014176990278` | `0.8761559698355349` |
+| Phono-voltage normalized RMS error | `0.9778097746445279` | `0.979299352824134` |
+| Cartridge absolute-integral error | `36.1840212852331%` | `36.100696516125497%` |
+| Phono absolute-integral error | `47.997181164469366%` | `48.155275767809436%` |
+
+The electrical result confirms a perceptual risk from the contact-bandwidth defect.
+
+The test does not identify the audible difference on physical hardware.
+
+Permanent tests are:
+
+- `rapid_scratch_reference_covers_signed_rates_impulse_loss_and_retracking`.
+- `rapid_stop_and_reversal_fixture_reaches_cartridge_and_phono_outputs`.
+
+Run the report with this command:
+
+```sh
+cargo test --release --lib physical::rapid_scratch_reference::report_rapid_scratch_reference_metrics -- --ignored --exact --nocapture
+```
+
 The certificate rejects unsupported work, slope, joins, geometry, and stale representation data.
 
 The correction applies at each current production trace boundary.

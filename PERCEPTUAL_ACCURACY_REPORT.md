@@ -335,28 +335,40 @@ The reduced one-step trace and contact candidate has these reported differences:
 
 | Quantity | Reduced candidate error |
 |---|---:|
-| Wall-height normalized RMS error | `1.3655775345324883` |
-| Signed wall-height integral error | `93.98129343476366%` |
-| Wall-force normalized RMS error | `1.034338433310777` |
-| Wall-force impulse error | `16.672264726920533%` |
-| Reaction-torque normalized RMS error | `1.0034541959889511` |
-| Signed torque-impulse error | `72.38062132681622%` |
-| Absolute torque-impulse error | `60.03927910396862%` |
-| Contact-occupancy mean absolute error | `0.21032718713637744` |
+| Wall-height normalized RMS error | `1.3655193973757973` |
+| Signed wall-height integral error | `93.98733854738484%` |
+| Wall-force normalized RMS error | `1.0158164015715798` |
+| Wall-force impulse error | `26.03553334882623%` |
+| Reaction-torque normalized RMS error | `1.0024104080839553` |
+| Signed torque-impulse error | `76.41911593334955%` |
+| Absolute torque-impulse error | `64.18499271665087%` |
+| Contact-occupancy mean absolute error | `0.21010711785380817` |
+| Left cartridge-voltage normalized RMS error | `0.5863220800818523` |
+| Right cartridge-voltage normalized RMS error | `0.584662684658089` |
+| Left phono-voltage normalized RMS error | `0.7743228579914596` |
+| Right phono-voltage normalized RMS error | `0.7494342423073957` |
 
 The candidate produced 265 macro contact transitions.
 
-The reference produced 281 macro contact transitions.
+The reference produced 269 macro contact transitions.
 
 The reference transition count is not fully converged.
 
 The force and impulse differences remain materially larger than the reference convergence changes.
 
-These metrics exclude the coupled deck, cartridge, phono stage, and host output.
+The mechanical reference excludes a coupled deck and reciprocal cartridge force.
 
 They show a structural contact-bandwidth defect.
 
-They are not measurements of complete output-voltage error.
+Identical cartridge and phono observers process both mechanical trajectories.
+
+These observers show that the mechanical difference reaches voltage output.
+
+The observers do not model a complete coupled player.
+
+A ramped stop and reversal fixture gives phono-voltage normalized RMS errors near `0.98`.
+
+That fixture loses approximately `48%` of reference absolute phono output.
 
 This evidence prevents a physically faithful rapid-scratch claim.
 

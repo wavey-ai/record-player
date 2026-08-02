@@ -2513,3 +2513,63 @@ The gain envelope is an idealized automatic crossfader.
 It does not model a specific fader curve, cut-in distance, latency, bleed, bounce, or electrical noise.
 
 Add those effects only from identified device measurements.
+
+## 2026-08-02: Rapid Contact Reaches Electrical Output
+
+### Question
+
+The reduced rapid-contact reference showed large mechanical differences.
+
+It did not show whether those differences reached voltage output.
+
+### Test Addition
+
+- Use identical moving-magnet cartridge observers for both mechanical trajectories.
+- Use identical phono-stage observers for both cartridge outputs.
+- Run the observers at 192000 hertz.
+- Use the Concorde MkII Scratch seed configuration.
+- Keep cartridge reaction force outside the reduced mechanical comparison.
+- Cover the signed `1x` through `20x` rate sweep.
+- Add a ramped stop, forward, reversal, reverse, and stop fixture.
+
+The observer construction occurs outside the allocation-free reference loop.
+
+The reference loop remains allocation-free.
+
+### Result
+
+The rate sweep gives cartridge-voltage normalized RMS errors near `0.59`.
+
+It gives phono-voltage normalized RMS errors from `0.75` through `0.77`.
+
+The stop and reversal fixture gives phono-voltage normalized RMS errors near `0.98`.
+
+Its absolute phono-output error is approximately `48%`.
+
+### Interpretation
+
+The contact-bandwidth difference is not only an internal mechanical metric.
+
+It reaches cartridge and phono output in identical open-loop observers.
+
+This result makes swept contact a perceptual priority.
+
+The test is not a complete coupled-player reference.
+
+It omits cartridge-force feedback into the reduced mechanical solve.
+
+It also omits host output conversion and hardware listening tests.
+
+### Decision
+
+Implement a bounded swept-contact correction before more certificate-only work.
+
+Keep the certified global tracer at every evaluated contact position.
+
+Do not use an endpoint average that can hide contact loss or recapture.
+
+Require finite work and a fixed upper bound for each output sample.
+
+Compare the correction against the converged reduced reference.
+
+Then measure complete production phono output and callback time.

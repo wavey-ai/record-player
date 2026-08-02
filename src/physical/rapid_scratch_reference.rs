@@ -18,6 +18,7 @@ use super::stylus::{
 };
 use super::tonearm::{SuspensionAxisConfig, TonearmConfig};
 use super::trace_admission::GrooveTraceAdmissionClass;
+use super::{MovingMagnetCartridge, PhysicalPhonoStage, PhysicalProfile};
 
 const OUTPUT_SAMPLE_RATE_HZ: f64 = 192_000.0;
 const OUTPUT_DT_SECONDS: f64 = 1.0 / OUTPUT_SAMPLE_RATE_HZ;
@@ -1072,6 +1073,8 @@ struct RapidScratchMetrics {
     wall_height: ErrorAccumulator,
     wall_normal_force: ErrorAccumulator,
     reaction_torque: ErrorAccumulator,
+    open_loop_cartridge_voltage: [ErrorAccumulator; 2],
+    open_loop_phono_voltage: [ErrorAccumulator; 2],
     contact_occupancy_absolute_error: f64,
     maximum_contact_occupancy_error: f64,
     candidate_contact_transitions: u64,
@@ -1132,11 +1135,58 @@ impl RapidScratchFixture {
     }
 }
 
+#[derive(Debug)]
+struct OpenLoopElectricalObservers {
+    candidate_cartridge: MovingMagnetCartridge,
+    reference_cartridge: MovingMagnetCartridge,
+    candidate_phono: PhysicalPhonoStage,
+    reference_phono: PhysicalPhonoStage,
+}
+
+impl OpenLoopElectricalObservers {
+    fn scratch_seed() -> Self {
+        let profile = PhysicalProfile::sl_1200mk7_concorde_mkii_scratch_seed();
+        Self {
+            candidate_cartridge: MovingMagnetCartridge::new(profile.config.cartridge).unwrap(),
+            reference_cartridge: MovingMagnetCartridge::new(profile.config.cartridge).unwrap(),
+            candidate_phono: PhysicalPhonoStage::new(
+                profile.config.phono,
+                OUTPUT_SAMPLE_RATE_HZ,
+                profile.config.record_cut.cutter_bandwidth_hz,
+            )
+            .unwrap(),
+            reference_phono: PhysicalPhonoStage::new(
+                profile.config.phono,
+                OUTPUT_SAMPLE_RATE_HZ,
+                profile.config.record_cut.cutter_bandwidth_hz,
+            )
+            .unwrap(),
+        }
+    }
+}
+
 fn run_rapid_scratch_case(
     fixture: &RapidScratchFixture,
     advances_source_frames: &[f64],
     initial_position_source_frames: f64,
     reference_step_frames: f64,
+) -> Result<RapidScratchMetrics, RapidScratchCaseError> {
+    let mut electrical_observers = OpenLoopElectricalObservers::scratch_seed();
+    run_rapid_scratch_case_with_observers(
+        fixture,
+        advances_source_frames,
+        initial_position_source_frames,
+        reference_step_frames,
+        &mut electrical_observers,
+    )
+}
+
+fn run_rapid_scratch_case_with_observers(
+    fixture: &RapidScratchFixture,
+    advances_source_frames: &[f64],
+    initial_position_source_frames: f64,
+    reference_step_frames: f64,
+    electrical_observers: &mut OpenLoopElectricalObservers,
 ) -> Result<RapidScratchMetrics, RapidScratchCaseError> {
     let contact = StylusContactConfig::default();
     let tonearm = TonearmConfig::default();
@@ -1212,6 +1262,7 @@ fn run_rapid_scratch_case(
         let mut reference_torque_sum = 0.0;
         let mut reference_height_sum = 0.0;
         let mut reference_contact_count = 0_usize;
+        let mut reference_cartridge_voltage_sum = [0.0; 2];
         for substep in 0..substeps {
             let fraction = (substep + 1) as f64 / substeps as f64;
             let substep_position = position + advance * fraction;
@@ -1253,6 +1304,18 @@ fn run_rapid_scratch_case(
                 metrics.reference_contact_transitions += 1;
                 previous_reference_contact = reference_output.contact;
             }
+            let reference_magnet_velocity = coil_velocity_from_lateral_vertical([
+                0.0,
+                reference.tip_velocity_m_s - reference.body_velocity_m_s,
+            ]);
+            let reference_cartridge_output = electrical_observers
+                .reference_cartridge
+                .advance(substep_dt, reference_magnet_velocity)
+                .unwrap();
+            for channel in 0..2 {
+                reference_cartridge_voltage_sum[channel] +=
+                    reference_cartridge_output.interval_average_load_output_voltage_v[channel];
+            }
         }
         let inverse_substeps = 1.0 / substeps as f64;
         let reference_force = reference_force_sum * inverse_substeps;
@@ -1284,10 +1347,52 @@ fn run_rapid_scratch_case(
             reference_torque,
             OUTPUT_DT_SECONDS,
         );
+
+        // These identical electrical observers isolate the voltage effect of
+        // the two mechanical trajectories. They do not feed cartridge force
+        // back into either mechanical solve.
+        let candidate_magnet_velocity =
+            coil_velocity_from_lateral_vertical(candidate_output.relative_velocity_m_s);
+        let candidate_cartridge_output = electrical_observers
+            .candidate_cartridge
+            .advance(OUTPUT_DT_SECONDS, candidate_magnet_velocity)
+            .unwrap();
+        let candidate_cartridge_voltage =
+            candidate_cartridge_output.interval_average_load_output_voltage_v;
+        let reference_cartridge_voltage =
+            reference_cartridge_voltage_sum.map(|sum| sum * inverse_substeps);
+        let candidate_phono_output = electrical_observers
+            .candidate_phono
+            .process_frame(candidate_cartridge_voltage)
+            .unwrap();
+        let reference_phono_output = electrical_observers
+            .reference_phono
+            .process_frame(reference_cartridge_voltage)
+            .unwrap();
+        for channel in 0..2 {
+            metrics.open_loop_cartridge_voltage[channel].observe(
+                candidate_cartridge_voltage[channel],
+                reference_cartridge_voltage[channel],
+                OUTPUT_DT_SECONDS,
+            );
+            metrics.open_loop_phono_voltage[channel].observe(
+                candidate_phono_output.output_v[channel],
+                reference_phono_output.output_v[channel],
+                OUTPUT_DT_SECONDS,
+            );
+        }
         position = next_position;
     }
     metrics.contact_occupancy_absolute_error /= advances_source_frames.len() as f64;
     Ok(metrics)
+}
+
+fn coil_velocity_from_lateral_vertical(velocity_m_s: [f64; 2]) -> [f64; 2] {
+    let [lateral, vertical] = velocity_m_s;
+    [
+        (lateral + vertical) * WALL_SCALE,
+        (lateral - vertical) * WALL_SCALE,
+    ]
 }
 
 fn programme_fixture(frame_count: usize) -> RapidScratchFixture {
@@ -1315,6 +1420,19 @@ fn rate_sweep_advances() -> Vec<f64> {
         advances.extend(std::iter::repeat_n(-(rate as f64), 18));
         advances.extend(std::iter::repeat_n(rate as f64, 9));
     }
+    advances
+}
+
+fn rapid_stop_reversal_advances() -> Vec<f64> {
+    let mut advances = Vec::with_capacity(120);
+    advances.extend((1..=20).map(f64::from));
+    advances.extend([20.0; 12]);
+    advances.extend((1..=20).rev().map(f64::from));
+    advances.extend([0.0; 8]);
+    advances.extend((1..=20).map(|rate| -f64::from(rate)));
+    advances.extend([-20.0; 12]);
+    advances.extend((1..=20).rev().map(|rate| -f64::from(rate)));
+    advances.extend([0.0; 8]);
     advances
 }
 
@@ -2138,12 +2256,14 @@ fn vertical_reference_reduces_the_symmetric_two_wall_contact_equations() {
 fn rapid_scratch_reference_covers_signed_rates_impulse_loss_and_retracking() {
     let fixture = programme_fixture(16_384);
     let advances = rate_sweep_advances();
+    let mut electrical_observers = OpenLoopElectricalObservers::scratch_seed();
     let metrics = assert_no_alloc::assert_no_alloc(|| {
-        run_rapid_scratch_case(
+        run_rapid_scratch_case_with_observers(
             &fixture,
             &advances,
             8_192.0 - advances.iter().sum::<f64>() * 0.5,
             MAX_REFERENCE_SWEEP_STEP_FRAMES,
+            &mut electrical_observers,
         )
     })
     .unwrap();
@@ -2164,6 +2284,39 @@ fn rapid_scratch_reference_covers_signed_rates_impulse_loss_and_retracking() {
         .reaction_torque
         .relative_integral_error()
         .is_finite());
+    for channel in 0..2 {
+        let cartridge = metrics.open_loop_cartridge_voltage[channel];
+        let phono = metrics.open_loop_phono_voltage[channel];
+        assert!(cartridge.reference_absolute_integral > 0.0);
+        assert!(phono.reference_absolute_integral > 0.0);
+        assert!(cartridge.normalized_rms_error().is_finite());
+        assert!(phono.normalized_rms_error().is_finite());
+    }
+}
+
+#[test]
+fn rapid_stop_and_reversal_fixture_reaches_cartridge_and_phono_outputs() {
+    let fixture = programme_fixture(8_192);
+    let advances = rapid_stop_reversal_advances();
+    assert_eq!(advances.iter().sum::<f64>(), 0.0);
+    let metrics = run_rapid_scratch_case(
+        &fixture,
+        &advances,
+        4_096.0,
+        MAX_REFERENCE_SWEEP_STEP_FRAMES,
+    )
+    .unwrap();
+
+    for channel in 0..2 {
+        let cartridge = metrics.open_loop_cartridge_voltage[channel];
+        let phono = metrics.open_loop_phono_voltage[channel];
+        assert_eq!(cartridge.count, advances.len() as u64);
+        assert_eq!(phono.count, advances.len() as u64);
+        assert!(cartridge.reference_absolute_integral > 0.0);
+        assert!(phono.reference_absolute_integral > 0.0);
+        assert!(cartridge.normalized_rms_error().is_finite());
+        assert!(phono.normalized_rms_error().is_finite());
+    }
 }
 
 #[test]
@@ -2233,7 +2386,7 @@ fn report_rapid_scratch_reference_metrics() {
     let fine_elapsed = fine_start.elapsed();
     eprintln!("rapid_metrics={metrics:#?}");
     eprintln!(
-        "height_nrmse={} height_integral_error={} force_nrmse={} force_integral_error={} torque_nrmse={} torque_integral_error={} torque_absolute_impulse_error={} elapsed={elapsed:?}",
+        "height_nrmse={} height_integral_error={} force_nrmse={} force_integral_error={} torque_nrmse={} torque_integral_error={} torque_absolute_impulse_error={} cartridge_nrmse={:?} phono_nrmse={:?} elapsed={elapsed:?}",
         metrics.wall_height.normalized_rms_error(),
         metrics.wall_height.relative_integral_error(),
         metrics.wall_normal_force.normalized_rms_error(),
@@ -2241,6 +2394,12 @@ fn report_rapid_scratch_reference_metrics() {
         metrics.reaction_torque.normalized_rms_error(),
         metrics.reaction_torque.relative_integral_error(),
         metrics.reaction_torque.relative_absolute_integral_error(),
+        metrics
+            .open_loop_cartridge_voltage
+            .map(ErrorAccumulator::normalized_rms_error),
+        metrics
+            .open_loop_phono_voltage
+            .map(ErrorAccumulator::normalized_rms_error),
     );
     eprintln!(
         "fine_reference force_integral={} torque_integral={} height_integral={} contact_transitions={} trace_calls={} contact_steps={} elapsed={fine_elapsed:?}",
@@ -2250,6 +2409,31 @@ fn report_rapid_scratch_reference_metrics() {
         fine.reference_contact_transitions,
         fine.reference_trace_calls,
         fine.reference_contact_steps,
+    );
+
+    let stop_reversal_fixture = programme_fixture(8_192);
+    let stop_reversal_advances = rapid_stop_reversal_advances();
+    let stop_reversal = run_rapid_scratch_case(
+        &stop_reversal_fixture,
+        &stop_reversal_advances,
+        4_096.0,
+        MAX_REFERENCE_SWEEP_STEP_FRAMES,
+    )
+    .unwrap();
+    eprintln!(
+        "rapid_stop_reversal cartridge_nrmse={:?} phono_nrmse={:?} cartridge_absolute_integral_error={:?} phono_absolute_integral_error={:?}",
+        stop_reversal
+            .open_loop_cartridge_voltage
+            .map(ErrorAccumulator::normalized_rms_error),
+        stop_reversal
+            .open_loop_phono_voltage
+            .map(ErrorAccumulator::normalized_rms_error),
+        stop_reversal
+            .open_loop_cartridge_voltage
+            .map(ErrorAccumulator::relative_absolute_integral_error),
+        stop_reversal
+            .open_loop_phono_voltage
+            .map(ErrorAccumulator::relative_absolute_integral_error),
     );
 }
 
