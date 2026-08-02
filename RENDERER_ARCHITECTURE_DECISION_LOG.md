@@ -64,6 +64,58 @@ Do not use manual listening as a release gate.
 
 Use captured hardware signals only when automated tests can measure their applicable features.
 
+## Required Signal Model
+
+Treat decoded PCM as the nominal program signal.
+
+The user-controlled record position selects the source position.
+
+Signed record velocity controls time direction, pitch, and motion-dependent output level.
+
+Record acceleration affects output only through a measured tracking, contact, or transport response.
+
+High-speed playback requires direction-symmetric anti-alias filtering.
+
+Stops and reversals must preserve source position and transport continuity.
+
+The crossfader gates the result after the record-motion renderer.
+
+Do not simulate an internal voltage only because physical hardware contains that voltage.
+
+Use a cheaper transfer model when it reproduces the same audible output within the declared error limit.
+
+Use detailed cartridge or contact simulation only to generate references for that transfer model.
+
+Off-speed RIAA behavior can be audible during scratching.
+
+Model that behavior with a measured speed-dependent filter when automated tests show a material error.
+
+Do not require a complete virtual cut and cartridge solve in the audio callback.
+
+Ideal linear 45/45 decoding does not require runtime wall geometry.
+
+Add stereo wall interaction only when measured nonlinear behavior justifies it.
+
+## Wow and Flutter Policy
+
+Wow and flutter are record-speed errors.
+
+They existed in `ScratchAcousticDsp` before this investigation.
+
+The current implementation uses fixed oscillators and a heuristic depth.
+
+Do not enable that implementation during clean 1× playback.
+
+Manual record motion already contains user speed changes.
+
+The transport model also adds platter, slipmat, and release behavior.
+
+An added oscillator can count the same variation twice during scratching.
+
+Keep wow and flutter only as an optional measured hardware profile.
+
+Apply that profile only when its input motion does not already contain the measured variation.
+
 ## Why the Full Physical Renderer Is a No-Go
 
 The current physical renderer fails the rapid-reversal callback deadline.
@@ -262,6 +314,42 @@ They must remain inactive during clean nominal playback by default.
 9. Use the external Bitneedle record for long-form native and web stress tests.
 10. Activate the same `record-player` renderer in iOS and web hosts.
 11. Remove `PhysicalHostRenderer` from production host APIs after validated parts are extracted.
+
+## August 2 Production Checkpoint
+
+The default `AcousticConfig` now disables acoustic coloration and surface effects.
+
+The default stylus tracing and high-frequency acceleration strengths are zero.
+
+The nominal movement gain is now exactly one.
+
+An automated stereo test starts on aligned 48-kilohertz PCM.
+
+It renders 256 frames at stable positive 1× speed.
+
+Every rendered `f32` sample equals its decoded source sample.
+
+The test also proves exact source-position advance and an exact effective rate of one.
+
+The WebAssembly host now uses the same transparent defaults.
+
+The iOS capture metadata now records the transparent limiter defaults.
+
+The optional effect controls remain available for explicit experiments.
+
+They do not define the production reference sound.
+
+The release WebAssembly benchmark used stereo 128-frame blocks at 48 kilohertz.
+
+Normal playback measured p95 at 0.0367 milliseconds.
+
+That value used 1.38 percent of the callback period.
+
+Reversing positive and negative 8× motion measured p95 at 0.1815 milliseconds.
+
+That value used 6.80 percent of the callback period.
+
+The largest measured callback used 13.04 percent of the period.
 
 ## Claim Limit
 

@@ -281,9 +281,9 @@ pub struct AcousticConfig {
     pub wow_rev_seconds: f64,
     #[serde(default = "default_flutter_hz")]
     pub flutter_hz: f64,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub acoustic_enabled: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub surface_enabled: bool,
     /// Soft cartridge tracing limit derived from source curvature and travel
     /// velocity. This preserves the existing speed-dependent stylus model.
@@ -304,14 +304,11 @@ fn default_wow_rev_seconds() -> f64 {
 fn default_flutter_hz() -> f64 {
     FLUTTER_HZ
 }
-fn default_true() -> bool {
-    true
-}
 fn default_stylus_tracing_limit() -> f64 {
-    0.72
+    0.0
 }
 fn default_high_frequency_acceleration_limit() -> f64 {
-    0.35
+    0.0
 }
 
 impl Default for AcousticConfig {
@@ -320,8 +317,8 @@ impl Default for AcousticConfig {
             max_rate: default_max_rate(),
             wow_rev_seconds: default_wow_rev_seconds(),
             flutter_hz: default_flutter_hz(),
-            acoustic_enabled: true,
-            surface_enabled: true,
+            acoustic_enabled: false,
+            surface_enabled: false,
             stylus_tracing_limit: default_stylus_tracing_limit(),
             high_frequency_acceleration_limit: default_high_frequency_acceleration_limit(),
         }
@@ -2390,7 +2387,6 @@ fn compute_movement_gain(abs_rate: f64) -> f64 {
         return 0.0;
     }
     let normalized = abs_rate.clamp(0.0, 10.0);
-    let realtime_presence = (-((normalized - 1.0) / 0.38).powi(2)).exp();
     let underspeed = 0.78 + 0.22 * normalized.max(DEADZONE_RATE).powf(0.1);
     let overspeed = 1.0 + (normalized - 1.0).max(0.0) * 0.014;
     let acoustic = if normalized <= 1.0 {
@@ -2398,7 +2394,7 @@ fn compute_movement_gain(abs_rate: f64) -> f64 {
     } else {
         overspeed
     };
-    (acoustic + realtime_presence * 0.025).clamp(0.68, 1.08)
+    acoustic.clamp(0.68, 1.08)
 }
 
 /// Approximate the finite acceleration a cartridge can trace. Curvature is the
@@ -2456,7 +2452,12 @@ mod tests {
     use super::*;
 
     fn simulation_dsp() -> ScratchAcousticDsp {
-        let mut dsp = ScratchAcousticDsp::new_internal(48_000.0, AcousticConfig::default());
+        let mut config = AcousticConfig::default();
+        config.acoustic_enabled = true;
+        config.surface_enabled = true;
+        config.stylus_tracing_limit = 0.72;
+        config.high_frequency_acceleration_limit = 0.35;
+        let mut dsp = ScratchAcousticDsp::new_internal(48_000.0, config);
         dsp.source_sample_rate = 48_000.0;
         dsp.channels = Arc::new(vec![vec![0.0_f32; 4_800_000]]);
         dsp.window_start = 0;
@@ -2950,6 +2951,7 @@ mod tests {
             let gain = compute_movement_gain(rate);
             assert!((0.0..=1.08).contains(&gain));
         }
+        assert_eq!(compute_movement_gain(1.0), 1.0);
     }
 
     #[test]
@@ -2966,8 +2968,10 @@ mod tests {
     #[test]
     fn limiter_defaults_serde_names_and_strengths_are_distinct_and_validated() {
         let defaults = AcousticConfig::default();
-        assert_eq!(defaults.stylus_tracing_limit, 0.72);
-        assert_eq!(defaults.high_frequency_acceleration_limit, 0.35);
+        assert!(!defaults.acoustic_enabled);
+        assert!(!defaults.surface_enabled);
+        assert_eq!(defaults.stylus_tracing_limit, 0.0);
+        assert_eq!(defaults.high_frequency_acceleration_limit, 0.0);
 
         let decoded: AcousticConfig = serde_json::from_value(serde_json::json!({
             "stylusTracingLimit": 0.44,
@@ -2987,6 +2991,43 @@ mod tests {
         assert!(!valid_unit_interval(-0.01));
         assert!(!valid_unit_interval(f64::NAN));
         assert!(!valid_unit_interval(1.1));
+    }
+
+    #[test]
+    fn default_nominal_playback_preserves_aligned_pcm_samples_exactly() {
+        const START: usize = 64;
+        const FRAMES: usize = 256;
+        let left = (0..1_024)
+            .map(|frame| ((frame as i32 % 97) - 48) as f32 / 64.0)
+            .collect::<Vec<_>>();
+        let right = (0..1_024)
+            .map(|frame| ((frame as i32 % 83) - 41) as f32 / 64.0)
+            .collect::<Vec<_>>();
+        let mut dsp = ScratchAcousticDsp::new_internal(48_000.0, AcousticConfig::default());
+        dsp.replace_window_owned_native(
+            vec![left.clone(), right.clone()],
+            48_000.0,
+            Some(START as f64),
+        )
+        .unwrap();
+        dsp.active = true;
+        dsp.hand_contact = false;
+        dsp.grip = 0.0;
+        dsp.grip_target = 0.0;
+        dsp.motor_rate = 1.0;
+        dsp.motor_delivered_rate = 1.0;
+        dsp.rate = 1.0;
+        dsp.rate_velocity = 0.0;
+        dsp.last_effective_rate = 1.0;
+
+        assert_eq!(dsp.render(FRAMES as u32, 2), FRAMES as u32);
+
+        let expected = (START..START + FRAMES)
+            .flat_map(|frame| [left[frame], right[frame]])
+            .collect::<Vec<_>>();
+        assert_eq!(dsp.rendered_samples(), expected);
+        assert_eq!(dsp.position(), (START + FRAMES) as f64);
+        assert_eq!(dsp.effective_rate(), 1.0);
     }
 
     #[test]
