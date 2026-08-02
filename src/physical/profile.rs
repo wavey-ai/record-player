@@ -506,6 +506,54 @@ const PARAMETER_SCHEMA: &[ParameterSchema] = &[
     schema("cartridge.coilResistanceOhm", "ohm", FLOAT, MEASURE),
     schema("cartridge.coilInductanceH", "H", FLOAT, MEASURE),
     schema("cartridge.coilMutualInductanceH", "H", FLOAT, MEASURE),
+    schema(
+        "cartridge.magneticLossBranches.0.relaxationInductanceH",
+        "H",
+        FLOAT,
+        MEASURE,
+    ),
+    schema(
+        "cartridge.magneticLossBranches.0.lossResistanceOhm",
+        "ohm",
+        FLOAT,
+        MEASURE,
+    ),
+    schema(
+        "cartridge.magneticLossBranches.1.relaxationInductanceH",
+        "H",
+        FLOAT,
+        MEASURE,
+    ),
+    schema(
+        "cartridge.magneticLossBranches.1.lossResistanceOhm",
+        "ohm",
+        FLOAT,
+        MEASURE,
+    ),
+    schema(
+        "cartridge.magneticLossBranches.2.relaxationInductanceH",
+        "H",
+        FLOAT,
+        MEASURE,
+    ),
+    schema(
+        "cartridge.magneticLossBranches.2.lossResistanceOhm",
+        "ohm",
+        FLOAT,
+        MEASURE,
+    ),
+    schema(
+        "cartridge.magneticLossBranches.3.relaxationInductanceH",
+        "H",
+        FLOAT,
+        MEASURE,
+    ),
+    schema(
+        "cartridge.magneticLossBranches.3.lossResistanceOhm",
+        "ohm",
+        FLOAT,
+        MEASURE,
+    ),
     schema("cartridge.loadResistanceOhm", "ohm", FLOAT, MEASURE),
     schema("cartridge.loadCapacitanceF", "F", FLOAT, MEASURE),
     schema("cartridge.channelBalanceDb", "dB", FLOAT, MEASURE),
@@ -615,6 +663,17 @@ fn collect_scalar_leaves(
             }
             Ok(())
         }
+        serde_json::Value::Array(array) => {
+            for (index, value) in array.iter().enumerate() {
+                let path = if prefix.is_empty() {
+                    index.to_string()
+                } else {
+                    format!("{prefix}.{index}")
+                };
+                collect_scalar_leaves(&path, value, leaves)?;
+            }
+            Ok(())
+        }
         serde_json::Value::Number(_) | serde_json::Value::String(_) => {
             if prefix.is_empty() || leaves.insert(prefix.to_owned(), value.clone()).is_some() {
                 Err(PhysicalProfileError::ConfigurationManifestMismatch)
@@ -649,6 +708,8 @@ fn required_test_for_parameter(parameter: &str) -> Option<CalibrationTest> {
         Some(CalibrationTest::TonearmGeometryAndResonance)
     } else if parameter.starts_with("radialTracking.") {
         Some(CalibrationTest::RapidScratchTrackingAndRecovery)
+    } else if parameter.starts_with("cartridge.magneticLossBranches.") {
+        Some(CalibrationTest::CartridgeMagneticLossLevelAndTemperature)
     } else if matches!(
         parameter,
         "cartridge.coilResistanceOhm"
@@ -1266,7 +1327,7 @@ mod tests {
     fn seed_manifest_covers_every_serialized_configuration_leaf() {
         let profile = PhysicalProfile::sl_1200mk7_concorde_mkii_scratch_seed();
         let manifest = profile.parameter_manifest().unwrap();
-        assert_eq!(manifest.len(), 76);
+        assert_eq!(manifest.len(), 84);
         assert_eq!(profile.evidence.len(), manifest.len());
         assert!(profile.validate().is_ok());
         assert_eq!(profile.status, CalibrationStatus::Seed);
@@ -1288,6 +1349,28 @@ mod tests {
             Some(CalibrationTest::CartridgeImpedanceSweep)
         );
         assert!(evidence.source.is_none());
+    }
+
+    #[test]
+    fn magnetic_loss_seed_slots_are_zero_estimates_with_the_required_test() {
+        let profile = PhysicalProfile::sl_1200mk7_concorde_mkii_scratch_seed();
+        for branch in 0..4 {
+            for field in ["relaxationInductanceH", "lossResistanceOhm"] {
+                let parameter = format!("cartridge.magneticLossBranches.{branch}.{field}");
+                let evidence = profile
+                    .evidence
+                    .iter()
+                    .find(|entry| entry.parameter == parameter)
+                    .unwrap();
+                assert_eq!(evidence.value, ParameterValue::Float(0.0));
+                assert_eq!(evidence.kind, EvidenceKind::Estimated);
+                assert_eq!(
+                    evidence.calibration_test,
+                    Some(CalibrationTest::CartridgeMagneticLossLevelAndTemperature)
+                );
+                assert!(evidence.source.is_none());
+            }
+        }
     }
 
     #[test]

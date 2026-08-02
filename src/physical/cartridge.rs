@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const SNAPSHOT_VERSION: u32 = 3;
+const SNAPSHOT_VERSION: u32 = 4;
 const MAX_ADVANCE_SECONDS: f64 = 10.0;
 const MAX_GENERATOR_COEFFICIENT_V_S_PER_M: f64 = 1.0e6;
 const MIN_RESISTANCE_OHM: f64 = 1.0e-6;
@@ -13,6 +13,9 @@ const MAX_CAPACITANCE_F: f64 = 1.0;
 const MAX_CHANNEL_SEPARATION_DB: f64 = 200.0;
 const MAX_ABS_CHANNEL_BALANCE_DB: f64 = 24.0;
 const INVERSE_SQRT_2: f64 = std::f64::consts::FRAC_1_SQRT_2;
+
+/// Sets the fixed storage limit for passive magnetic-loss relaxation branches.
+pub const MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES: usize = 4;
 
 /// Identifies the source of the generator coefficient.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +34,40 @@ pub struct CartridgeComplexVoltageRatio {
     pub imaginary: f64,
 }
 
+/// Contains one complex cartridge-coil impedance.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CartridgeComplexImpedanceOhm {
+    pub resistance_ohm: f64,
+    pub reactance_ohm: f64,
+}
+
+impl CartridgeComplexImpedanceOhm {
+    pub fn magnitude_ohm(self) -> f64 {
+        self.resistance_ohm.hypot(self.reactance_ohm)
+    }
+
+    pub fn phase_radians(self) -> f64 {
+        self.reactance_ohm.atan2(self.resistance_ohm)
+    }
+}
+
+/// Defines one passive series relaxation term as a parallel resistor and inductor.
+///
+/// Set both values to zero to disable the slot. Active slots must be contiguous.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MagneticLossRelaxationBranchConfig {
+    pub relaxation_inductance_h: f64,
+    pub loss_resistance_ohm: f64,
+}
+
+impl MagneticLossRelaxationBranchConfig {
+    const fn is_inactive(self) -> bool {
+        self.relaxation_inductance_h == 0.0 && self.loss_resistance_ohm == 0.0
+    }
+}
+
 impl CartridgeComplexVoltageRatio {
     pub fn magnitude(self) -> f64 {
         self.real.hypot(self.imaginary)
@@ -45,6 +82,8 @@ impl CartridgeComplexVoltageRatio {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MovingMagnetCartridgeCircuitFrequencyResponse {
+    /// Rows select coil voltage outputs. Columns select coil currents.
+    pub coil_impedance_ohm: [[CartridgeComplexImpedanceOhm; 2]; 2],
     /// Rows select load outputs. Columns select generator voltage sources.
     pub loaded_voltage_per_generator_voltage: [[CartridgeComplexVoltageRatio; 2]; 2],
     /// Rows select load outputs. Columns select magnet-velocity axes.
@@ -67,6 +106,13 @@ pub struct MovingMagnetCartridgeConfig {
     /// A total-separation measurement cannot identify this value separately from generator leakage.
     #[serde(default)]
     pub coil_mutual_inductance_h: f64,
+    /// Adds passive, frequency-dependent magnetic loss to both coil circuits.
+    ///
+    /// Each active slot is a series `R || L` term. Slots use increasing
+    /// relaxation time so that one physical network has one representation.
+    #[serde(default)]
+    pub magnetic_loss_branches:
+        [MagneticLossRelaxationBranchConfig; MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES],
     pub load_resistance_ohm: f64,
     pub load_capacitance_f: f64,
     /// Sets the magnitude difference between the two direct channel gains.
@@ -111,6 +157,9 @@ impl MovingMagnetCartridgeConfig {
             coil_inductance_h,
             // Ortofon does not publish this value. Keep the seed uncoupled.
             coil_mutual_inductance_h: 0.0,
+            // No source publishes magnetic-loss branch values for this cartridge.
+            magnetic_loss_branches: [MagneticLossRelaxationBranchConfig::default();
+                MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES],
             load_resistance_ohm,
             load_capacitance_f,
             channel_balance_db: 1.0,
@@ -137,7 +186,57 @@ impl MovingMagnetCartridgeConfig {
             MIN_INDUCTANCE_H,
             MAX_INDUCTANCE_H,
         )?;
-        let maximum_mutual_inductance_h = self.coil_inductance_h - MIN_INDUCTANCE_H;
+        let mut relaxation_inductance_sum_h = 0.0;
+        let mut found_inactive_branch = false;
+        let mut previous_relaxation_time_seconds = None;
+        for (branch, parameters) in self.magnetic_loss_branches.into_iter().enumerate() {
+            if parameters.is_inactive() {
+                found_inactive_branch = true;
+                continue;
+            }
+            if parameters.relaxation_inductance_h == 0.0 || parameters.loss_resistance_ohm == 0.0 {
+                return Err(
+                    MovingMagnetCartridgeConfigError::IncompleteMagneticLossBranch { branch },
+                );
+            }
+            if found_inactive_branch {
+                return Err(
+                    MovingMagnetCartridgeConfigError::NonContiguousMagneticLossBranch { branch },
+                );
+            }
+            if !parameters.relaxation_inductance_h.is_finite()
+                || parameters.relaxation_inductance_h < MIN_INDUCTANCE_H
+                || parameters.relaxation_inductance_h > MAX_INDUCTANCE_H
+                || !parameters.loss_resistance_ohm.is_finite()
+                || parameters.loss_resistance_ohm < MIN_RESISTANCE_OHM
+                || parameters.loss_resistance_ohm > MAX_RESISTANCE_OHM
+            {
+                return Err(MovingMagnetCartridgeConfigError::InvalidMagneticLossBranch { branch });
+            }
+            let relaxation_time_seconds =
+                parameters.relaxation_inductance_h / parameters.loss_resistance_ohm;
+            if previous_relaxation_time_seconds
+                .is_some_and(|previous| relaxation_time_seconds <= previous)
+            {
+                return Err(
+                    MovingMagnetCartridgeConfigError::NonCanonicalMagneticLossBranchOrder {
+                        branch,
+                    },
+                );
+            }
+            previous_relaxation_time_seconds = Some(relaxation_time_seconds);
+            relaxation_inductance_sum_h += parameters.relaxation_inductance_h;
+        }
+        let residual_self_inductance_h = self.coil_inductance_h - relaxation_inductance_sum_h;
+        if !relaxation_inductance_sum_h.is_finite() || residual_self_inductance_h < MIN_INDUCTANCE_H
+        {
+            return Err(
+                MovingMagnetCartridgeConfigError::InvalidMagneticLossInductanceBudget {
+                    maximum_sum_h: (self.coil_inductance_h - MIN_INDUCTANCE_H).max(0.0),
+                },
+            );
+        }
+        let maximum_mutual_inductance_h = residual_self_inductance_h - MIN_INDUCTANCE_H;
         if !self.coil_mutual_inductance_h.is_finite()
             || self.coil_mutual_inductance_h.abs() > maximum_mutual_inductance_h
         {
@@ -210,14 +309,19 @@ impl MovingMagnetCartridgeConfig {
     {
         self.validate()?;
         validate_bounded("frequencyHz", frequency_hz, 0.0, f64::MAX)?;
-        let loaded_voltage_per_generator_voltage = coupled_loaded_voltage_transfer(
-            self.coil_resistance_ohm,
-            self.coil_inductance_h,
-            self.coil_mutual_inductance_h,
-            self.load_resistance_ohm,
-            self.load_capacitance_f,
-            frequency_hz,
-        );
+        let coil_impedance_ohm = coupled_coil_impedance(self, frequency_hz);
+        let loaded_voltage_per_generator_voltage = if magnetic_loss_branch_count(self) == 0 {
+            coupled_loaded_voltage_transfer(
+                self.coil_resistance_ohm,
+                self.coil_inductance_h,
+                self.coil_mutual_inductance_h,
+                self.load_resistance_ohm,
+                self.load_capacitance_f,
+                frequency_hz,
+            )
+        } else {
+            coupled_loaded_voltage_transfer_with_magnetic_loss(self, frequency_hz)
+        };
         let generator_voltage_per_velocity_v_s_per_m = self.channel_matrix().map(|row| {
             [
                 self.generator_coefficient_v_s_per_m * row[0],
@@ -228,15 +332,22 @@ impl MovingMagnetCartridgeConfig {
             loaded_voltage_per_generator_voltage,
             generator_voltage_per_velocity_v_s_per_m,
         );
-        if loaded_voltage_per_generator_voltage
+        if coil_impedance_ohm
             .into_iter()
             .flatten()
+            .flat_map(|impedance| [impedance.resistance_ohm, impedance.reactance_ohm])
+            .chain(
+                loaded_voltage_per_generator_voltage
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|ratio| [ratio.real, ratio.imaginary]),
+            )
             .chain(
                 loaded_voltage_per_magnet_velocity_v_s_per_m
                     .into_iter()
-                    .flatten(),
+                    .flatten()
+                    .flat_map(|ratio| [ratio.real, ratio.imaginary]),
             )
-            .flat_map(|ratio| [ratio.real, ratio.imaginary])
             .any(|value| !value.is_finite())
         {
             return Err(MovingMagnetCartridgeConfigError::InvalidDerivedValue {
@@ -244,6 +355,7 @@ impl MovingMagnetCartridgeConfig {
             });
         }
         Ok(MovingMagnetCartridgeCircuitFrequencyResponse {
+            coil_impedance_ohm,
             loaded_voltage_per_generator_voltage,
             loaded_voltage_per_magnet_velocity_v_s_per_m,
         })
@@ -263,14 +375,18 @@ pub struct MovingMagnetCartridgeTelemetry {
     pub magnet_velocity_m_s: [f64; 2],
     pub generator_voltage_v: [f64; 2],
     pub coil_current_a: [f64; 2],
+    pub magnetic_loss_inductor_current_a: [[f64; MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES]; 2],
     pub load_output_voltage_v: [f64; 2],
     /// These values are the trapezoidal port averages for the completed interval.
     pub interval_average_generator_voltage_v: [f64; 2],
     pub interval_average_coil_current_a: [f64; 2],
+    pub interval_average_magnetic_loss_inductor_current_a:
+        [[f64; MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES]; 2],
     pub interval_average_load_output_voltage_v: [f64; 2],
     pub electromagnetic_reaction_force_n: [f64; 2],
     pub generator_electrical_power_w: f64,
     pub coil_loss_power_w: f64,
+    pub magnetic_loss_power_w: f64,
     pub load_power_w: f64,
     pub stored_electrical_energy_j: f64,
     pub completed_steps: u64,
@@ -282,13 +398,18 @@ impl Default for MovingMagnetCartridgeTelemetry {
             magnet_velocity_m_s: [0.0; 2],
             generator_voltage_v: [0.0; 2],
             coil_current_a: [0.0; 2],
+            magnetic_loss_inductor_current_a: [[0.0; MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES]; 2],
             load_output_voltage_v: [0.0; 2],
             interval_average_generator_voltage_v: [0.0; 2],
             interval_average_coil_current_a: [0.0; 2],
+            interval_average_magnetic_loss_inductor_current_a: [[0.0;
+                MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES];
+                2],
             interval_average_load_output_voltage_v: [0.0; 2],
             electromagnetic_reaction_force_n: [0.0; 2],
             generator_electrical_power_w: 0.0,
             coil_loss_power_w: 0.0,
+            magnetic_loss_power_w: 0.0,
             load_power_w: 0.0,
             stored_electrical_energy_j: 0.0,
             completed_steps: 0,
@@ -303,11 +424,16 @@ pub struct MovingMagnetCartridgeSnapshot {
     pub version: u32,
     pub config: MovingMagnetCartridgeConfig,
     pub coil_current_a: [f64; 2],
+    #[serde(default)]
+    pub magnetic_loss_inductor_current_a: [[f64; MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES]; 2],
     pub load_output_voltage_v: [f64; 2],
     pub previous_generator_voltage_v: [f64; 2],
     pub last_magnet_velocity_m_s: [f64; 2],
     pub interval_average_generator_voltage_v: [f64; 2],
     pub interval_average_coil_current_a: [f64; 2],
+    #[serde(default)]
+    pub interval_average_magnetic_loss_inductor_current_a:
+        [[f64; MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES]; 2],
     pub interval_average_load_output_voltage_v: [f64; 2],
     pub completed_steps: u64,
 }
@@ -335,9 +461,12 @@ pub struct MovingMagnetCartridgeAffineOutput {
     pub magnet_velocity_m_s: [f64; 2],
     pub generator_voltage_v: [f64; 2],
     pub coil_current_a: [f64; 2],
+    pub magnetic_loss_inductor_current_a: [[f64; MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES]; 2],
     pub load_output_voltage_v: [f64; 2],
     pub interval_average_generator_voltage_v: [f64; 2],
     pub interval_average_coil_current_a: [f64; 2],
+    pub interval_average_magnetic_loss_inductor_current_a:
+        [[f64; MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES]; 2],
     pub interval_average_load_output_voltage_v: [f64; 2],
     pub electromagnetic_reaction_force_n: [f64; 2],
 }
@@ -374,6 +503,14 @@ impl MovingMagnetCartridgeAffineStep {
         let load_voltage_response_v =
             matrix_vector(self.load_voltage_per_generator_voltage, generator_voltage_v);
         let load_output_voltage_v = add(self.load_voltage_bias_v, load_voltage_response_v);
+        let (magnetic_loss_inductor_current_a, interval_average_magnetic_loss_inductor_current_a) =
+            advance_magnetic_loss_inductor_currents(
+                self.source.config,
+                self.duration_seconds,
+                self.source.coil_current_a,
+                coil_current_a,
+                self.source.magnetic_loss_inductor_current_a,
+            );
         let interval_average_generator_voltage_v = [
             0.5 * (self.source.previous_generator_voltage_v[0] + generator_voltage_v[0]),
             0.5 * (self.source.previous_generator_voltage_v[1] + generator_voltage_v[1]),
@@ -393,9 +530,15 @@ impl MovingMagnetCartridgeAffineStep {
         if generator_voltage_v
             .into_iter()
             .chain(coil_current_a)
+            .chain(magnetic_loss_inductor_current_a.into_iter().flatten())
             .chain(load_output_voltage_v)
             .chain(interval_average_generator_voltage_v)
             .chain(interval_average_coil_current_a)
+            .chain(
+                interval_average_magnetic_loss_inductor_current_a
+                    .into_iter()
+                    .flatten(),
+            )
             .chain(interval_average_load_output_voltage_v)
             .chain(electromagnetic_reaction_force_n)
             .any(|value| !value.is_finite())
@@ -406,9 +549,11 @@ impl MovingMagnetCartridgeAffineStep {
             magnet_velocity_m_s,
             generator_voltage_v,
             coil_current_a,
+            magnetic_loss_inductor_current_a,
             load_output_voltage_v,
             interval_average_generator_voltage_v,
             interval_average_coil_current_a,
+            interval_average_magnetic_loss_inductor_current_a,
             interval_average_load_output_voltage_v,
             electromagnetic_reaction_force_n,
         })
@@ -420,11 +565,14 @@ impl MovingMagnetCartridgeAffineStep {
 pub struct MovingMagnetCartridge {
     config: MovingMagnetCartridgeConfig,
     coil_current_a: [f64; 2],
+    magnetic_loss_inductor_current_a: [[f64; MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES]; 2],
     load_output_voltage_v: [f64; 2],
     previous_generator_voltage_v: [f64; 2],
     last_magnet_velocity_m_s: [f64; 2],
     interval_average_generator_voltage_v: [f64; 2],
     interval_average_coil_current_a: [f64; 2],
+    interval_average_magnetic_loss_inductor_current_a:
+        [[f64; MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES]; 2],
     interval_average_load_output_voltage_v: [f64; 2],
     completed_steps: u64,
 }
@@ -441,11 +589,15 @@ impl MovingMagnetCartridge {
         Self {
             config,
             coil_current_a: [0.0; 2],
+            magnetic_loss_inductor_current_a: [[0.0; MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES]; 2],
             load_output_voltage_v: [0.0; 2],
             previous_generator_voltage_v: [0.0; 2],
             last_magnet_velocity_m_s: [0.0; 2],
             interval_average_generator_voltage_v: [0.0; 2],
             interval_average_coil_current_a: [0.0; 2],
+            interval_average_magnetic_loss_inductor_current_a: [[0.0;
+                MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES];
+                2],
             interval_average_load_output_voltage_v: [0.0; 2],
             completed_steps: 0,
         }
@@ -467,6 +619,7 @@ impl MovingMagnetCartridge {
             self.coil_current_a,
             self.load_output_voltage_v,
             self.previous_generator_voltage_v,
+            self.magnetic_loss_inductor_current_a,
         )
         .ok_or(MovingMagnetCartridgeError::NumericalFailure)?;
         let current_bias_a = circuit.current_bias_a;
@@ -572,11 +725,14 @@ impl MovingMagnetCartridge {
             .ok_or(MovingMagnetCartridgeError::StepCounterOverflow)?;
         let output = step.evaluate(magnet_velocity_m_s)?;
         self.coil_current_a = output.coil_current_a;
+        self.magnetic_loss_inductor_current_a = output.magnetic_loss_inductor_current_a;
         self.load_output_voltage_v = output.load_output_voltage_v;
         self.previous_generator_voltage_v = output.generator_voltage_v;
         self.last_magnet_velocity_m_s = output.magnet_velocity_m_s;
         self.interval_average_generator_voltage_v = output.interval_average_generator_voltage_v;
         self.interval_average_coil_current_a = output.interval_average_coil_current_a;
+        self.interval_average_magnetic_loss_inductor_current_a =
+            output.interval_average_magnetic_loss_inductor_current_a;
         self.interval_average_load_output_voltage_v = output.interval_average_load_output_voltage_v;
         self.completed_steps = completed_steps;
         Ok(self.telemetry())
@@ -614,40 +770,45 @@ impl MovingMagnetCartridge {
                 .into_iter()
                 .map(|value| value * value)
                 .sum::<f64>();
+        let mut magnetic_loss = 0.0;
+        for channel in 0..2 {
+            for (branch, parameters) in self.config.magnetic_loss_branches.into_iter().enumerate() {
+                if parameters.is_inactive() {
+                    break;
+                }
+                let resistor_current_a = self.interval_average_coil_current_a[channel]
+                    - self.interval_average_magnetic_loss_inductor_current_a[channel][branch];
+                magnetic_loss +=
+                    parameters.loss_resistance_ohm * resistor_current_a * resistor_current_a;
+            }
+        }
         let load_power = self
             .interval_average_load_output_voltage_v
             .into_iter()
             .map(|value| value * value / self.config.load_resistance_ohm)
             .sum();
-        let stored_energy = 0.5
-            * self.config.coil_inductance_h
-            * self
-                .coil_current_a
-                .into_iter()
-                .map(|value| value * value)
-                .sum::<f64>()
-            + self.config.coil_mutual_inductance_h
-                * self.coil_current_a[0]
-                * self.coil_current_a[1]
-            + 0.5
-                * self.config.load_capacitance_f
-                * self
-                    .load_output_voltage_v
-                    .into_iter()
-                    .map(|value| value * value)
-                    .sum::<f64>();
+        let stored_energy = stored_electrical_energy_j(
+            self.config,
+            self.coil_current_a,
+            self.magnetic_loss_inductor_current_a,
+            self.load_output_voltage_v,
+        );
 
         MovingMagnetCartridgeTelemetry {
             magnet_velocity_m_s: self.last_magnet_velocity_m_s,
             generator_voltage_v: self.previous_generator_voltage_v,
             coil_current_a: self.coil_current_a,
+            magnetic_loss_inductor_current_a: self.magnetic_loss_inductor_current_a,
             load_output_voltage_v: self.load_output_voltage_v,
             interval_average_generator_voltage_v: self.interval_average_generator_voltage_v,
             interval_average_coil_current_a: self.interval_average_coil_current_a,
+            interval_average_magnetic_loss_inductor_current_a: self
+                .interval_average_magnetic_loss_inductor_current_a,
             interval_average_load_output_voltage_v: self.interval_average_load_output_voltage_v,
             electromagnetic_reaction_force_n: reaction_force,
             generator_electrical_power_w: generator_power,
             coil_loss_power_w: coil_loss,
+            magnetic_loss_power_w: magnetic_loss,
             load_power_w: load_power,
             stored_electrical_energy_j: stored_energy,
             completed_steps: self.completed_steps,
@@ -660,11 +821,14 @@ impl MovingMagnetCartridge {
 
     pub fn reset(&mut self) {
         self.coil_current_a = [0.0; 2];
+        self.magnetic_loss_inductor_current_a = [[0.0; MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES]; 2];
         self.load_output_voltage_v = [0.0; 2];
         self.previous_generator_voltage_v = [0.0; 2];
         self.last_magnet_velocity_m_s = [0.0; 2];
         self.interval_average_generator_voltage_v = [0.0; 2];
         self.interval_average_coil_current_a = [0.0; 2];
+        self.interval_average_magnetic_loss_inductor_current_a =
+            [[0.0; MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES]; 2];
         self.interval_average_load_output_voltage_v = [0.0; 2];
         self.completed_steps = 0;
     }
@@ -674,11 +838,14 @@ impl MovingMagnetCartridge {
             version: SNAPSHOT_VERSION,
             config: self.config,
             coil_current_a: self.coil_current_a,
+            magnetic_loss_inductor_current_a: self.magnetic_loss_inductor_current_a,
             load_output_voltage_v: self.load_output_voltage_v,
             previous_generator_voltage_v: self.previous_generator_voltage_v,
             last_magnet_velocity_m_s: self.last_magnet_velocity_m_s,
             interval_average_generator_voltage_v: self.interval_average_generator_voltage_v,
             interval_average_coil_current_a: self.interval_average_coil_current_a,
+            interval_average_magnetic_loss_inductor_current_a: self
+                .interval_average_magnetic_loss_inductor_current_a,
             interval_average_load_output_voltage_v: self.interval_average_load_output_voltage_v,
             completed_steps: self.completed_steps,
         }
@@ -707,6 +874,31 @@ impl MovingMagnetCartridge {
                 return Err(MovingMagnetCartridgeError::InvalidSnapshot);
             }
         }
+        if snapshot
+            .magnetic_loss_inductor_current_a
+            .into_iter()
+            .flatten()
+            .chain(
+                snapshot
+                    .interval_average_magnetic_loss_inductor_current_a
+                    .into_iter()
+                    .flatten(),
+            )
+            .any(|value| !value.is_finite())
+        {
+            return Err(MovingMagnetCartridgeError::InvalidSnapshot);
+        }
+        let active_branches = magnetic_loss_branch_count(config);
+        for channel in 0..2 {
+            for branch in active_branches..MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES {
+                if snapshot.magnetic_loss_inductor_current_a[channel][branch] != 0.0
+                    || snapshot.interval_average_magnetic_loss_inductor_current_a[channel][branch]
+                        != 0.0
+                {
+                    return Err(MovingMagnetCartridgeError::InvalidSnapshot);
+                }
+            }
+        }
         let voltage_matrix = config.channel_matrix().map(|row| {
             [
                 config.generator_coefficient_v_s_per_m * row[0],
@@ -721,23 +913,12 @@ impl MovingMagnetCartridge {
         ) {
             return Err(MovingMagnetCartridgeError::InvalidSnapshot);
         }
-        let stored_energy_j = 0.5
-            * config.coil_inductance_h
-            * snapshot
-                .coil_current_a
-                .into_iter()
-                .map(|value| value * value)
-                .sum::<f64>()
-            + config.coil_mutual_inductance_h
-                * snapshot.coil_current_a[0]
-                * snapshot.coil_current_a[1]
-            + 0.5
-                * config.load_capacitance_f
-                * snapshot
-                    .load_output_voltage_v
-                    .into_iter()
-                    .map(|value| value * value)
-                    .sum::<f64>();
+        let stored_energy_j = stored_electrical_energy_j(
+            config,
+            snapshot.coil_current_a,
+            snapshot.magnetic_loss_inductor_current_a,
+            snapshot.load_output_voltage_v,
+        );
         let generator_power_w = dot(
             snapshot.interval_average_generator_voltage_v,
             snapshot.interval_average_coil_current_a,
@@ -748,6 +929,16 @@ impl MovingMagnetCartridge {
                 .into_iter()
                 .map(|value| value * value)
                 .sum::<f64>();
+        let mut magnetic_loss_power_w = 0.0;
+        for channel in 0..2 {
+            for branch in 0..active_branches {
+                let resistor_current_a = snapshot.interval_average_coil_current_a[channel]
+                    - snapshot.interval_average_magnetic_loss_inductor_current_a[channel][branch];
+                magnetic_loss_power_w += config.magnetic_loss_branches[branch].loss_resistance_ohm
+                    * resistor_current_a
+                    * resistor_current_a;
+            }
+        }
         let load_power_w = snapshot
             .interval_average_load_output_voltage_v
             .into_iter()
@@ -757,6 +948,7 @@ impl MovingMagnetCartridge {
             stored_energy_j,
             generator_power_w,
             coil_loss_power_w,
+            magnetic_loss_power_w,
             load_power_w,
         ]
         .into_iter()
@@ -767,11 +959,14 @@ impl MovingMagnetCartridge {
 
         self.config = config;
         self.coil_current_a = snapshot.coil_current_a;
+        self.magnetic_loss_inductor_current_a = snapshot.magnetic_loss_inductor_current_a;
         self.load_output_voltage_v = snapshot.load_output_voltage_v;
         self.previous_generator_voltage_v = snapshot.previous_generator_voltage_v;
         self.last_magnet_velocity_m_s = snapshot.last_magnet_velocity_m_s;
         self.interval_average_generator_voltage_v = snapshot.interval_average_generator_voltage_v;
         self.interval_average_coil_current_a = snapshot.interval_average_coil_current_a;
+        self.interval_average_magnetic_loss_inductor_current_a =
+            snapshot.interval_average_magnetic_loss_inductor_current_a;
         self.interval_average_load_output_voltage_v =
             snapshot.interval_average_load_output_voltage_v;
         self.completed_steps = snapshot.completed_steps;
@@ -793,6 +988,16 @@ pub enum MovingMagnetCartridgeConfigError {
     AboveMaximum { field: &'static str, maximum: f64 },
     #[error("coil mutual inductance magnitude must be finite and at most {maximum_abs_h} H")]
     InvalidMutualInductance { maximum_abs_h: f64 },
+    #[error("magnetic-loss branch {branch} must set both inductance and resistance")]
+    IncompleteMagneticLossBranch { branch: usize },
+    #[error("magnetic-loss branch {branch} follows an inactive slot")]
+    NonContiguousMagneticLossBranch { branch: usize },
+    #[error("magnetic-loss branch {branch} has an invalid value")]
+    InvalidMagneticLossBranch { branch: usize },
+    #[error("magnetic-loss branch {branch} is not in increasing relaxation-time order")]
+    NonCanonicalMagneticLossBranchOrder { branch: usize },
+    #[error("magnetic-loss branch inductance sum must be at most {maximum_sum_h} H")]
+    InvalidMagneticLossInductanceBudget { maximum_sum_h: f64 },
     #[error("the derived {field} value is invalid")]
     InvalidDerivedValue { field: &'static str },
 }
@@ -839,7 +1044,18 @@ fn coupled_trapezoidal_circuit_affine_step(
     previous_current_a: [f64; 2],
     previous_load_voltage_v: [f64; 2],
     previous_generator_voltage_v: [f64; 2],
+    previous_magnetic_loss_inductor_current_a: [[f64; MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES]; 2],
 ) -> Option<CoupledTrapezoidalCircuitAffineStep> {
+    if magnetic_loss_branch_count(config) != 0 {
+        return coupled_trapezoidal_circuit_affine_step_with_magnetic_loss(
+            config,
+            duration_seconds,
+            previous_current_a,
+            previous_load_voltage_v,
+            previous_generator_voltage_v,
+            previous_magnetic_loss_inductor_current_a,
+        );
+    }
     if config.coil_mutual_inductance_h == 0.0 {
         let mut current_bias_a = [0.0; 2];
         let mut current_per_generator_voltage_a_per_v = [[0.0; 2]; 2];
@@ -902,6 +1118,167 @@ fn coupled_trapezoidal_circuit_affine_step(
             common.load_voltage_per_generator_voltage,
             differential.load_voltage_per_generator_voltage,
         ),
+    })
+}
+
+fn coupled_trapezoidal_circuit_affine_step_with_magnetic_loss(
+    config: MovingMagnetCartridgeConfig,
+    duration_seconds: f64,
+    previous_current_a: [f64; 2],
+    previous_load_voltage_v: [f64; 2],
+    previous_generator_voltage_v: [f64; 2],
+    previous_magnetic_loss_inductor_current_a: [[f64; MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES]; 2],
+) -> Option<CoupledTrapezoidalCircuitAffineStep> {
+    let residual_self_inductance_h = residual_self_inductance_h(config);
+    if config.coil_mutual_inductance_h == 0.0 {
+        let mut current_bias_a = [0.0; 2];
+        let mut current_per_generator_voltage_a_per_v = [[0.0; 2]; 2];
+        let mut load_voltage_bias_v = [0.0; 2];
+        let mut load_voltage_per_generator_voltage = [[0.0; 2]; 2];
+        for channel in 0..2 {
+            let coefficients = trapezoidal_circuit_affine_step_with_magnetic_loss(
+                config,
+                residual_self_inductance_h,
+                duration_seconds,
+                previous_current_a[channel],
+                previous_load_voltage_v[channel],
+                previous_generator_voltage_v[channel],
+                previous_magnetic_loss_inductor_current_a[channel],
+            )?;
+            current_bias_a[channel] = coefficients.current_bias_a;
+            current_per_generator_voltage_a_per_v[channel][channel] =
+                coefficients.current_per_generator_voltage_a_per_v;
+            load_voltage_bias_v[channel] = coefficients.load_voltage_bias_v;
+            load_voltage_per_generator_voltage[channel][channel] =
+                coefficients.load_voltage_per_generator_voltage;
+        }
+        return Some(CoupledTrapezoidalCircuitAffineStep {
+            current_bias_a,
+            current_per_generator_voltage_a_per_v,
+            load_voltage_bias_v,
+            load_voltage_per_generator_voltage,
+        });
+    }
+
+    let previous_current_modes_a = to_symmetric_modes(previous_current_a);
+    let previous_load_voltage_modes_v = to_symmetric_modes(previous_load_voltage_v);
+    let previous_generator_voltage_modes_v = to_symmetric_modes(previous_generator_voltage_v);
+    let mut previous_branch_current_modes_a = [[0.0; MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES]; 2];
+    for branch in 0..magnetic_loss_branch_count(config) {
+        let modes = to_symmetric_modes([
+            previous_magnetic_loss_inductor_current_a[0][branch],
+            previous_magnetic_loss_inductor_current_a[1][branch],
+        ]);
+        previous_branch_current_modes_a[0][branch] = modes[0];
+        previous_branch_current_modes_a[1][branch] = modes[1];
+    }
+    let common = trapezoidal_circuit_affine_step_with_magnetic_loss(
+        config,
+        residual_self_inductance_h + config.coil_mutual_inductance_h,
+        duration_seconds,
+        previous_current_modes_a[0],
+        previous_load_voltage_modes_v[0],
+        previous_generator_voltage_modes_v[0],
+        previous_branch_current_modes_a[0],
+    )?;
+    let differential = trapezoidal_circuit_affine_step_with_magnetic_loss(
+        config,
+        residual_self_inductance_h - config.coil_mutual_inductance_h,
+        duration_seconds,
+        previous_current_modes_a[1],
+        previous_load_voltage_modes_v[1],
+        previous_generator_voltage_modes_v[1],
+        previous_branch_current_modes_a[1],
+    )?;
+
+    Some(CoupledTrapezoidalCircuitAffineStep {
+        current_bias_a: from_symmetric_modes([common.current_bias_a, differential.current_bias_a]),
+        current_per_generator_voltage_a_per_v: symmetric_modal_matrix(
+            common.current_per_generator_voltage_a_per_v,
+            differential.current_per_generator_voltage_a_per_v,
+        ),
+        load_voltage_bias_v: from_symmetric_modes([
+            common.load_voltage_bias_v,
+            differential.load_voltage_bias_v,
+        ]),
+        load_voltage_per_generator_voltage: symmetric_modal_matrix(
+            common.load_voltage_per_generator_voltage,
+            differential.load_voltage_per_generator_voltage,
+        ),
+    })
+}
+
+fn trapezoidal_circuit_affine_step_with_magnetic_loss(
+    config: MovingMagnetCartridgeConfig,
+    residual_modal_inductance_h: f64,
+    duration_seconds: f64,
+    previous_current_a: f64,
+    previous_load_voltage_v: f64,
+    previous_generator_voltage_v: f64,
+    previous_magnetic_loss_inductor_current_a: [f64; MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES],
+) -> Option<TrapezoidalCircuitAffineStep> {
+    let half_step = 0.5 * duration_seconds;
+    let inverse_inductance = 1.0 / residual_modal_inductance_h;
+    let inverse_capacitance = 1.0 / config.load_capacitance_f;
+    let inverse_load_time_constant = 1.0 / (config.load_resistance_ohm * config.load_capacitance_f);
+
+    let mut left_00 = 1.0 + half_step * config.coil_resistance_ohm * inverse_inductance;
+    let left_01 = half_step * inverse_inductance;
+    let left_10 = -half_step * inverse_capacitance;
+    let left_11 = 1.0 + half_step * inverse_load_time_constant;
+    let mut right_0_bias = (1.0 - half_step * config.coil_resistance_ohm * inverse_inductance)
+        * previous_current_a
+        - half_step * inverse_inductance * previous_load_voltage_v
+        + half_step * inverse_inductance * previous_generator_voltage_v;
+    let right_0_per_generator_voltage = half_step * inverse_inductance;
+    let right_1 = half_step * inverse_capacitance * previous_current_a
+        + (1.0 - half_step * inverse_load_time_constant) * previous_load_voltage_v;
+
+    for (branch, parameters) in config.magnetic_loss_branches.into_iter().enumerate() {
+        if parameters.is_inactive() {
+            break;
+        }
+        let alpha = half_step * parameters.loss_resistance_ohm / parameters.relaxation_inductance_h;
+        let beta = alpha / (1.0 + alpha);
+        let previous_branch_current_a = previous_magnetic_loss_inductor_current_a[branch];
+        let branch_current_static_a =
+            (1.0 - 2.0 * beta) * previous_branch_current_a + beta * previous_current_a;
+        let previous_branch_voltage_v =
+            parameters.loss_resistance_ohm * (previous_current_a - previous_branch_current_a);
+        left_00 += half_step * inverse_inductance * parameters.loss_resistance_ohm * (1.0 - beta);
+        right_0_bias -= half_step
+            * inverse_inductance
+            * (previous_branch_voltage_v
+                - parameters.loss_resistance_ohm * branch_current_static_a);
+    }
+
+    let determinant = left_00 * left_11 - left_01 * left_10;
+    if !determinant.is_finite() || determinant <= 0.0 {
+        return None;
+    }
+    let current_bias_a = (right_0_bias * left_11 - left_01 * right_1) / determinant;
+    let current_per_generator_voltage_a_per_v =
+        right_0_per_generator_voltage * left_11 / determinant;
+    let load_voltage_bias_v = (left_00 * right_1 - left_10 * right_0_bias) / determinant;
+    let load_voltage_per_generator_voltage = -left_10 * right_0_per_generator_voltage / determinant;
+    if [
+        current_bias_a,
+        current_per_generator_voltage_a_per_v,
+        load_voltage_bias_v,
+        load_voltage_per_generator_voltage,
+    ]
+    .into_iter()
+    .any(|value| !value.is_finite())
+        || current_per_generator_voltage_a_per_v < 0.0
+        || load_voltage_per_generator_voltage < 0.0
+    {
+        return None;
+    }
+    Some(TrapezoidalCircuitAffineStep {
+        current_bias_a,
+        current_per_generator_voltage_a_per_v,
+        load_voltage_bias_v,
+        load_voltage_per_generator_voltage,
     })
 }
 
@@ -1050,6 +1427,229 @@ fn symmetric_modal_matrix(common: f64, differential: f64) -> [[f64; 2]; 2] {
     [[direct, coupled], [coupled, direct]]
 }
 
+fn magnetic_loss_branch_count(config: MovingMagnetCartridgeConfig) -> usize {
+    config
+        .magnetic_loss_branches
+        .into_iter()
+        .take_while(|branch| !branch.is_inactive())
+        .count()
+}
+
+fn relaxation_inductance_sum_h(config: MovingMagnetCartridgeConfig) -> f64 {
+    config
+        .magnetic_loss_branches
+        .into_iter()
+        .take_while(|branch| !branch.is_inactive())
+        .map(|branch| branch.relaxation_inductance_h)
+        .sum()
+}
+
+fn residual_self_inductance_h(config: MovingMagnetCartridgeConfig) -> f64 {
+    config.coil_inductance_h - relaxation_inductance_sum_h(config)
+}
+
+fn advance_magnetic_loss_inductor_currents(
+    config: MovingMagnetCartridgeConfig,
+    duration_seconds: f64,
+    previous_coil_current_a: [f64; 2],
+    coil_current_a: [f64; 2],
+    previous_branch_current_a: [[f64; MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES]; 2],
+) -> (
+    [[f64; MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES]; 2],
+    [[f64; MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES]; 2],
+) {
+    let mut branch_current_a = [[0.0; MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES]; 2];
+    let mut interval_average_branch_current_a = [[0.0; MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES]; 2];
+    let half_step = 0.5 * duration_seconds;
+    for channel in 0..2 {
+        for (branch, parameters) in config.magnetic_loss_branches.into_iter().enumerate() {
+            if parameters.is_inactive() {
+                break;
+            }
+            let alpha =
+                half_step * parameters.loss_resistance_ohm / parameters.relaxation_inductance_h;
+            let beta = alpha / (1.0 + alpha);
+            let next = (1.0 - 2.0 * beta) * previous_branch_current_a[channel][branch]
+                + beta * (previous_coil_current_a[channel] + coil_current_a[channel]);
+            branch_current_a[channel][branch] = next;
+            interval_average_branch_current_a[channel][branch] =
+                0.5 * (previous_branch_current_a[channel][branch] + next);
+        }
+    }
+    (branch_current_a, interval_average_branch_current_a)
+}
+
+fn stored_electrical_energy_j(
+    config: MovingMagnetCartridgeConfig,
+    coil_current_a: [f64; 2],
+    magnetic_loss_inductor_current_a: [[f64; MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES]; 2],
+    load_output_voltage_v: [f64; 2],
+) -> f64 {
+    if magnetic_loss_branch_count(config) == 0 {
+        return 0.5
+            * config.coil_inductance_h
+            * coil_current_a
+                .into_iter()
+                .map(|value| value * value)
+                .sum::<f64>()
+            + config.coil_mutual_inductance_h * coil_current_a[0] * coil_current_a[1]
+            + 0.5
+                * config.load_capacitance_f
+                * load_output_voltage_v
+                    .into_iter()
+                    .map(|value| value * value)
+                    .sum::<f64>();
+    }
+
+    let mut energy_j = 0.5
+        * residual_self_inductance_h(config)
+        * coil_current_a
+            .into_iter()
+            .map(|value| value * value)
+            .sum::<f64>()
+        + config.coil_mutual_inductance_h * coil_current_a[0] * coil_current_a[1]
+        + 0.5
+            * config.load_capacitance_f
+            * load_output_voltage_v
+                .into_iter()
+                .map(|value| value * value)
+                .sum::<f64>();
+    for channel in 0..2 {
+        for (branch, parameters) in config.magnetic_loss_branches.into_iter().enumerate() {
+            if parameters.is_inactive() {
+                break;
+            }
+            let current_a = magnetic_loss_inductor_current_a[channel][branch];
+            energy_j += 0.5 * parameters.relaxation_inductance_h * current_a * current_a;
+        }
+    }
+    energy_j
+}
+
+fn coupled_coil_impedance(
+    config: MovingMagnetCartridgeConfig,
+    frequency_hz: f64,
+) -> [[CartridgeComplexImpedanceOhm; 2]; 2] {
+    let angular_frequency = std::f64::consts::TAU * frequency_hz;
+    if magnetic_loss_branch_count(config) == 0 {
+        let direct = CartridgeComplexImpedanceOhm {
+            resistance_ohm: config.coil_resistance_ohm,
+            reactance_ohm: angular_frequency * config.coil_inductance_h,
+        };
+        let coupled = CartridgeComplexImpedanceOhm {
+            resistance_ohm: 0.0,
+            reactance_ohm: angular_frequency * config.coil_mutual_inductance_h,
+        };
+        return [[direct, coupled], [coupled, direct]];
+    }
+
+    let residual_self_inductance_h = residual_self_inductance_h(config);
+    let common = coil_modal_impedance(
+        config,
+        residual_self_inductance_h + config.coil_mutual_inductance_h,
+        angular_frequency,
+    );
+    let differential = coil_modal_impedance(
+        config,
+        residual_self_inductance_h - config.coil_mutual_inductance_h,
+        angular_frequency,
+    );
+    let direct = CartridgeComplexImpedanceOhm {
+        resistance_ohm: 0.5 * (common.resistance_ohm + differential.resistance_ohm),
+        reactance_ohm: 0.5 * (common.reactance_ohm + differential.reactance_ohm),
+    };
+    let coupled = CartridgeComplexImpedanceOhm {
+        resistance_ohm: 0.5 * (common.resistance_ohm - differential.resistance_ohm),
+        reactance_ohm: 0.5 * (common.reactance_ohm - differential.reactance_ohm),
+    };
+    [[direct, coupled], [coupled, direct]]
+}
+
+fn coil_modal_impedance(
+    config: MovingMagnetCartridgeConfig,
+    residual_modal_inductance_h: f64,
+    angular_frequency: f64,
+) -> CartridgeComplexImpedanceOhm {
+    let mut impedance = CartridgeComplexImpedanceOhm {
+        resistance_ohm: config.coil_resistance_ohm,
+        reactance_ohm: angular_frequency * residual_modal_inductance_h,
+    };
+    for parameters in config.magnetic_loss_branches {
+        if parameters.is_inactive() {
+            break;
+        }
+        let inductive_reactance_ohm = angular_frequency * parameters.relaxation_inductance_h;
+        let denominator = parameters.loss_resistance_ohm * parameters.loss_resistance_ohm
+            + inductive_reactance_ohm * inductive_reactance_ohm;
+        impedance.resistance_ohm +=
+            parameters.loss_resistance_ohm * inductive_reactance_ohm * inductive_reactance_ohm
+                / denominator;
+        impedance.reactance_ohm += parameters.loss_resistance_ohm
+            * parameters.loss_resistance_ohm
+            * inductive_reactance_ohm
+            / denominator;
+    }
+    impedance
+}
+
+fn coupled_loaded_voltage_transfer_with_magnetic_loss(
+    config: MovingMagnetCartridgeConfig,
+    frequency_hz: f64,
+) -> [[CartridgeComplexVoltageRatio; 2]; 2] {
+    let angular_frequency = std::f64::consts::TAU * frequency_hz;
+    let residual_self_inductance_h = residual_self_inductance_h(config);
+    let common = loaded_voltage_complex_ratio_from_coil_impedance(
+        coil_modal_impedance(
+            config,
+            residual_self_inductance_h + config.coil_mutual_inductance_h,
+            angular_frequency,
+        ),
+        config.load_resistance_ohm,
+        config.load_capacitance_f,
+        angular_frequency,
+    );
+    let differential = loaded_voltage_complex_ratio_from_coil_impedance(
+        coil_modal_impedance(
+            config,
+            residual_self_inductance_h - config.coil_mutual_inductance_h,
+            angular_frequency,
+        ),
+        config.load_resistance_ohm,
+        config.load_capacitance_f,
+        angular_frequency,
+    );
+    let direct = CartridgeComplexVoltageRatio {
+        real: 0.5 * (common.real + differential.real),
+        imaginary: 0.5 * (common.imaginary + differential.imaginary),
+    };
+    let coupled = CartridgeComplexVoltageRatio {
+        real: 0.5 * (common.real - differential.real),
+        imaginary: 0.5 * (common.imaginary - differential.imaginary),
+    };
+    [[direct, coupled], [coupled, direct]]
+}
+
+fn loaded_voltage_complex_ratio_from_coil_impedance(
+    coil: CartridgeComplexImpedanceOhm,
+    load_resistance_ohm: f64,
+    load_capacitance_f: f64,
+    angular_frequency: f64,
+) -> CartridgeComplexVoltageRatio {
+    let load_conductance = 1.0 / load_resistance_ohm;
+    let load_susceptance = angular_frequency * load_capacitance_f;
+    let admittance_magnitude_squared =
+        load_conductance * load_conductance + load_susceptance * load_susceptance;
+    let load_real = load_conductance / admittance_magnitude_squared;
+    let load_imaginary = -load_susceptance / admittance_magnitude_squared;
+    let total_real = coil.resistance_ohm + load_real;
+    let total_imaginary = coil.reactance_ohm + load_imaginary;
+    let denominator = total_real * total_real + total_imaginary * total_imaginary;
+    CartridgeComplexVoltageRatio {
+        real: (load_real * total_real + load_imaginary * total_imaginary) / denominator,
+        imaginary: (load_imaginary * total_real - load_real * total_imaginary) / denominator,
+    }
+}
+
 fn loaded_voltage_ratio(
     coil_resistance_ohm: f64,
     coil_inductance_h: f64,
@@ -1190,6 +1790,34 @@ mod tests {
         }
     }
 
+    fn magnetic_loss_config(coupling_ratio: f64) -> MovingMagnetCartridgeConfig {
+        let seed = MovingMagnetCartridgeConfig::default();
+        let magnetic_loss_branches = [
+            MagneticLossRelaxationBranchConfig {
+                relaxation_inductance_h: 0.020,
+                loss_resistance_ohm: 4_000.0,
+            },
+            MagneticLossRelaxationBranchConfig {
+                relaxation_inductance_h: 0.180,
+                loss_resistance_ohm: 1_800.0,
+            },
+            MagneticLossRelaxationBranchConfig::default(),
+            MagneticLossRelaxationBranchConfig::default(),
+        ];
+        let residual_inductance_h = seed.coil_inductance_h
+            - magnetic_loss_branches
+                .into_iter()
+                .map(|branch| branch.relaxation_inductance_h)
+                .sum::<f64>();
+        MovingMagnetCartridgeConfig {
+            coil_mutual_inductance_h: coupling_ratio * residual_inductance_h,
+            magnetic_loss_branches,
+            channel_balance_db: 0.0,
+            channel_separation_db: 200.0,
+            ..seed
+        }
+    }
+
     #[test]
     fn seed_uses_published_values_and_a_derived_generator_coefficient() {
         let config = MovingMagnetCartridgeConfig::concorde_mkii_scratch_seed();
@@ -1200,6 +1828,10 @@ mod tests {
         assert_eq!(config.coil_resistance_ohm, 1_200.0);
         assert_eq!(config.coil_inductance_h, 0.850);
         assert_eq!(config.coil_mutual_inductance_h, 0.0);
+        assert_eq!(
+            config.magnetic_loss_branches,
+            [MagneticLossRelaxationBranchConfig::default(); MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES]
+        );
         assert_eq!(config.load_resistance_ohm, 47_000.0);
         assert_eq!(config.load_capacitance_f, 300.0e-12);
         assert_eq!(config.channel_separation_db, 22.0);
@@ -1239,6 +1871,62 @@ mod tests {
                 actual.electromagnetic_reaction_force_n,
                 expected.electromagnetic_reaction_force_n,
             );
+        }
+    }
+
+    #[test]
+    fn zero_magnetic_loss_slots_are_bit_identical_to_the_legacy_coupled_solver() {
+        let config = mutual_config(0.63);
+        let dt = 1.0 / TEST_SAMPLE_RATE_HZ;
+        let mut previous_current_a = [0.0; 2];
+        let mut previous_load_voltage_v = [0.0; 2];
+        let mut previous_generator_voltage_v = [0.0; 2];
+        for sample in 0..10_000 {
+            let actual = coupled_trapezoidal_circuit_affine_step(
+                config,
+                dt,
+                previous_current_a,
+                previous_load_voltage_v,
+                previous_generator_voltage_v,
+                [[0.0; MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES]; 2],
+            )
+            .unwrap();
+            let expected = legacy_coupled_trapezoidal_circuit_affine_step(
+                config,
+                dt,
+                previous_current_a,
+                previous_load_voltage_v,
+                previous_generator_voltage_v,
+            )
+            .unwrap();
+            assert_array_bits_eq(actual.current_bias_a, expected.current_bias_a);
+            assert_matrix_bits_eq(
+                actual.current_per_generator_voltage_a_per_v,
+                expected.current_per_generator_voltage_a_per_v,
+            );
+            assert_array_bits_eq(actual.load_voltage_bias_v, expected.load_voltage_bias_v);
+            assert_matrix_bits_eq(
+                actual.load_voltage_per_generator_voltage,
+                expected.load_voltage_per_generator_voltage,
+            );
+
+            let phase = sample as f64 * 0.073;
+            let generator_voltage_v = [0.17 * phase.sin(), -0.11 * (phase * 1.31).cos()];
+            previous_current_a = add(
+                actual.current_bias_a,
+                matrix_vector(
+                    actual.current_per_generator_voltage_a_per_v,
+                    generator_voltage_v,
+                ),
+            );
+            previous_load_voltage_v = add(
+                actual.load_voltage_bias_v,
+                matrix_vector(
+                    actual.load_voltage_per_generator_voltage,
+                    generator_voltage_v,
+                ),
+            );
+            previous_generator_voltage_v = generator_voltage_v;
         }
     }
 
@@ -1452,6 +2140,40 @@ mod tests {
     }
 
     #[test]
+    fn magnetic_loss_network_closes_the_exact_discrete_energy_balance() {
+        let dt = 1.0 / TEST_SAMPLE_RATE_HZ;
+        for coupling_ratio in [-0.72, 0.0, 0.72] {
+            let mut cartridge =
+                MovingMagnetCartridge::new(magnetic_loss_config(coupling_ratio)).unwrap();
+            let mut previous_energy_j = cartridge.telemetry().stored_electrical_energy_j;
+            let mut observed_magnetic_loss = false;
+            for sample in 0..20_000 {
+                let polarity = if sample & 1 == 0 { 1.0 } else { -1.0 };
+                let phase = sample as f64 * 0.371;
+                let velocity = [
+                    polarity * (0.15 + 0.11 * phase.sin()),
+                    -polarity * (0.09 + 0.07 * (phase * 1.73).cos()),
+                ];
+                let telemetry = cartridge.advance(dt, velocity).unwrap();
+                observed_magnetic_loss |= telemetry.magnetic_loss_power_w > 0.0;
+                let energy_change_j = telemetry.stored_electrical_energy_j - previous_energy_j;
+                let port_energy_j = dt
+                    * (telemetry.generator_electrical_power_w
+                        - telemetry.coil_loss_power_w
+                        - telemetry.magnetic_loss_power_w
+                        - telemetry.load_power_w);
+                let scale = energy_change_j.abs().max(port_energy_j.abs()).max(1.0e-30);
+                assert!(
+                    (energy_change_j - port_energy_j).abs() <= 8.0e-11 * scale + 3.0e-27,
+                    "ratio {coupling_ratio}, sample {sample}: {energy_change_j} != {port_energy_j}"
+                );
+                previous_energy_j = telemetry.stored_electrical_energy_j;
+            }
+            assert!(observed_magnetic_loss);
+        }
+    }
+
+    #[test]
     fn stale_and_overflowing_affine_commits_are_transactional() {
         let dt = 1.0 / TEST_SAMPLE_RATE_HZ;
         let mut cartridge = MovingMagnetCartridge::default();
@@ -1615,6 +2337,117 @@ mod tests {
     }
 
     #[test]
+    fn passive_magnetic_loss_impedance_has_the_required_low_and_high_frequency_limits() {
+        let config = magnetic_loss_config(0.42).validate().unwrap();
+        let low_frequency_hz = 1.0e-3;
+        let low = config
+            .loaded_circuit_frequency_response_at_hz(low_frequency_hz)
+            .unwrap()
+            .coil_impedance_ohm;
+        let low_angular_frequency = std::f64::consts::TAU * low_frequency_hz;
+        assert_relative_eq!(
+            low[0][0].resistance_ohm,
+            config.coil_resistance_ohm,
+            max_relative = 1.0e-10
+        );
+        assert_relative_eq!(
+            low[0][0].reactance_ohm / low_angular_frequency,
+            config.coil_inductance_h,
+            max_relative = 1.0e-10
+        );
+        assert_relative_eq!(
+            low[0][1].reactance_ohm / low_angular_frequency,
+            config.coil_mutual_inductance_h,
+            max_relative = 1.0e-12
+        );
+
+        let high_frequency_hz = 1.0e10;
+        let high = config
+            .loaded_circuit_frequency_response_at_hz(high_frequency_hz)
+            .unwrap()
+            .coil_impedance_ohm;
+        let expected_high_resistance_ohm = config.coil_resistance_ohm
+            + config
+                .magnetic_loss_branches
+                .into_iter()
+                .map(|branch| branch.loss_resistance_ohm)
+                .sum::<f64>();
+        assert_relative_eq!(
+            high[0][0].resistance_ohm,
+            expected_high_resistance_ohm,
+            max_relative = 1.0e-10
+        );
+        assert_relative_eq!(
+            high[0][0].reactance_ohm / (std::f64::consts::TAU * high_frequency_hz),
+            residual_self_inductance_h(config),
+            max_relative = 1.0e-10
+        );
+
+        for frequency_hz in [0.0, 1.0, 20.0, 1_000.0, 20_000.0, 1.0e6] {
+            let impedance = config
+                .loaded_circuit_frequency_response_at_hz(frequency_hz)
+                .unwrap()
+                .coil_impedance_ohm;
+            for sign in [-1.0, 1.0] {
+                let modal_resistance_ohm =
+                    impedance[0][0].resistance_ohm + sign * impedance[0][1].resistance_ohm;
+                let modal_reactance_ohm =
+                    impedance[0][0].reactance_ohm + sign * impedance[0][1].reactance_ohm;
+                assert!(modal_resistance_ohm >= config.coil_resistance_ohm);
+                if frequency_hz > 0.0 {
+                    assert!(modal_reactance_ohm > 0.0);
+                }
+            }
+            assert_eq!(impedance[0][0], impedance[1][1]);
+            assert_eq!(impedance[0][1], impedance[1][0]);
+        }
+    }
+
+    #[test]
+    fn magnetic_loss_transfer_matrix_agrees_with_the_complex_circuit_equations() {
+        let config = magnetic_loss_config(-0.37);
+        for frequency_hz in [0.0, 20.0, 1_000.0, 12_000.0, 100_000.0] {
+            let response = config
+                .loaded_circuit_frequency_response_at_hz(frequency_hz)
+                .unwrap();
+            let direct = impedance_as_complex(response.coil_impedance_ohm[0][0]);
+            let coupled = impedance_as_complex(response.coil_impedance_ohm[0][1]);
+            let load = load_impedance_as_complex(config, frequency_hz);
+            let diagonal = complex_add(direct, load);
+            let determinant = complex_subtract(
+                complex_multiply(diagonal, diagonal),
+                complex_multiply(coupled, coupled),
+            );
+            let expected_direct = complex_multiply(load, complex_divide(diagonal, determinant));
+            let expected_coupled = complex_multiply(
+                load,
+                complex_divide(
+                    CartridgeComplexVoltageRatio {
+                        real: -coupled.real,
+                        imaginary: -coupled.imaginary,
+                    },
+                    determinant,
+                ),
+            );
+            let actual = response.loaded_voltage_per_generator_voltage;
+            assert_relative_eq!(actual[0][0].real, expected_direct.real, epsilon = 2.0e-15);
+            assert_relative_eq!(
+                actual[0][0].imaginary,
+                expected_direct.imaginary,
+                epsilon = 2.0e-15
+            );
+            assert_relative_eq!(actual[1][0].real, expected_coupled.real, epsilon = 2.0e-15);
+            assert_relative_eq!(
+                actual[1][0].imaginary,
+                expected_coupled.imaginary,
+                epsilon = 2.0e-15
+            );
+            assert_eq!(actual[0][0], actual[1][1]);
+            assert_eq!(actual[0][1], actual[1][0]);
+        }
+    }
+
+    #[test]
     fn time_domain_coupled_coil_response_matches_the_complex_transfer() {
         let config = mutual_config(0.42);
         for frequency_hz in [1_000.0, 12_000.0] {
@@ -1632,6 +2465,23 @@ mod tests {
                 measured,
                 measure_cross_to_direct_response(config, frequency_hz)
             );
+        }
+    }
+
+    #[test]
+    fn time_domain_magnetic_loss_response_matches_the_warped_complex_transfer() {
+        let config = magnetic_loss_config(0.42);
+        for frequency_hz in [1_000.0, 12_000.0] {
+            let measured = measure_cross_to_direct_response(config, frequency_hz);
+            let effective_frequency_hz = TEST_SAMPLE_RATE_HZ / std::f64::consts::PI
+                * (std::f64::consts::PI * frequency_hz / TEST_SAMPLE_RATE_HZ).tan();
+            let total = config
+                .loaded_circuit_frequency_response_at_hz(effective_frequency_hz)
+                .unwrap()
+                .loaded_voltage_per_magnet_velocity_v_s_per_m;
+            let expected = complex_divide(total[1][0], total[0][0]);
+            assert_relative_eq!(measured.real, expected.real, epsilon = 2.0e-10);
+            assert_relative_eq!(measured.imaginary, expected.imaginary, epsilon = 2.0e-10);
         }
     }
 
@@ -1752,8 +2602,75 @@ mod tests {
     }
 
     #[test]
+    fn magnetic_loss_json_snapshot_and_rollback_preserve_all_branch_state() {
+        let dt = 1.0 / TEST_SAMPLE_RATE_HZ;
+        let mut original = MovingMagnetCartridge::new(magnetic_loss_config(-0.58)).unwrap();
+        for index in 0..3_000 {
+            let phase = index as f64 * 0.031;
+            original
+                .advance(dt, [0.04 * phase.sin(), -0.03 * phase.cos()])
+                .unwrap();
+        }
+        assert!(original
+            .snapshot()
+            .magnetic_loss_inductor_current_a
+            .into_iter()
+            .flatten()
+            .any(|current| current != 0.0));
+
+        let encoded = serde_json::to_string(&original.snapshot()).unwrap();
+        let decoded: MovingMagnetCartridgeSnapshot = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.version, SNAPSHOT_VERSION);
+        let mut restored = MovingMagnetCartridge::default();
+        restored.restore(decoded).unwrap();
+        for index in 0..5_000 {
+            let phase = index as f64 * 0.017;
+            let velocity = [0.07 * phase.cos(), 0.025 * (phase * 1.43).sin()];
+            assert_eq!(
+                original.advance(dt, velocity),
+                restored.advance(dt, velocity)
+            );
+            assert_eq!(original.snapshot(), restored.snapshot());
+        }
+
+        let stale = restored.prepare_affine_step(dt).unwrap();
+        restored.advance(dt, [0.02, -0.01]).unwrap();
+        let before_stale = restored.snapshot();
+        assert_eq!(
+            restored.commit_affine_step(stale, [0.0; 2]),
+            Err(MovingMagnetCartridgeError::StaleAffineStep)
+        );
+        assert_eq!(restored.snapshot(), before_stale);
+
+        let mut invalid = before_stale;
+        invalid.magnetic_loss_inductor_current_a[0][3] = 1.0e-6;
+        assert_eq!(
+            restored.restore(invalid),
+            Err(MovingMagnetCartridgeError::InvalidSnapshot)
+        );
+        assert_eq!(restored.snapshot(), before_stale);
+    }
+
+    #[test]
     fn coupled_coil_realtime_steps_allocate_no_memory() {
         let mut cartridge = MovingMagnetCartridge::new(mutual_config(0.67)).unwrap();
+        let dt = 1.0 / TEST_SAMPLE_RATE_HZ;
+        let mut completed = false;
+        assert_no_alloc::assert_no_alloc(|| {
+            for sample in 0..20_000 {
+                let phase = sample as f64 * 0.071;
+                cartridge
+                    .advance(dt, [0.08 * phase.sin(), -0.06 * (phase * 1.19).cos()])
+                    .unwrap();
+            }
+            completed = true;
+        });
+        assert!(completed);
+    }
+
+    #[test]
+    fn magnetic_loss_realtime_steps_allocate_no_memory() {
+        let mut cartridge = MovingMagnetCartridge::new(magnetic_loss_config(0.67)).unwrap();
         let dt = 1.0 / TEST_SAMPLE_RATE_HZ;
         let mut completed = false;
         assert_no_alloc::assert_no_alloc(|| {
@@ -1816,6 +2733,85 @@ mod tests {
             ..MovingMagnetCartridgeConfig::default()
         };
         assert!(boundary.validate().is_ok());
+    }
+
+    #[test]
+    fn magnetic_loss_configuration_enforces_bounds_slots_and_canonical_order() {
+        let mut incomplete = MovingMagnetCartridgeConfig::default();
+        incomplete.magnetic_loss_branches[0].relaxation_inductance_h = 0.1;
+        assert_eq!(
+            incomplete.validate(),
+            Err(MovingMagnetCartridgeConfigError::IncompleteMagneticLossBranch { branch: 0 })
+        );
+
+        let mut nonfinite = MovingMagnetCartridgeConfig::default();
+        nonfinite.magnetic_loss_branches[0] = MagneticLossRelaxationBranchConfig {
+            relaxation_inductance_h: f64::NAN,
+            loss_resistance_ohm: 1_000.0,
+        };
+        assert_eq!(
+            nonfinite.validate(),
+            Err(MovingMagnetCartridgeConfigError::InvalidMagneticLossBranch { branch: 0 })
+        );
+
+        let active = MagneticLossRelaxationBranchConfig {
+            relaxation_inductance_h: 0.1,
+            loss_resistance_ohm: 1_000.0,
+        };
+        let mut gap = MovingMagnetCartridgeConfig::default();
+        gap.magnetic_loss_branches[0] = active;
+        gap.magnetic_loss_branches[2] = MagneticLossRelaxationBranchConfig {
+            relaxation_inductance_h: 0.2,
+            loss_resistance_ohm: 1_000.0,
+        };
+        assert_eq!(
+            gap.validate(),
+            Err(MovingMagnetCartridgeConfigError::NonContiguousMagneticLossBranch { branch: 2 })
+        );
+
+        let mut unordered = MovingMagnetCartridgeConfig::default();
+        unordered.magnetic_loss_branches[0] = active;
+        unordered.magnetic_loss_branches[1] = MagneticLossRelaxationBranchConfig {
+            relaxation_inductance_h: 0.01,
+            loss_resistance_ohm: 1_000.0,
+        };
+        assert_eq!(
+            unordered.validate(),
+            Err(
+                MovingMagnetCartridgeConfigError::NonCanonicalMagneticLossBranchOrder { branch: 1 }
+            )
+        );
+
+        let mut excessive = MovingMagnetCartridgeConfig::default();
+        excessive.magnetic_loss_branches[0] = MagneticLossRelaxationBranchConfig {
+            relaxation_inductance_h: excessive.coil_inductance_h,
+            loss_resistance_ohm: 1_000.0,
+        };
+        assert!(matches!(
+            excessive.validate(),
+            Err(MovingMagnetCartridgeConfigError::InvalidMagneticLossInductanceBudget { .. })
+        ));
+    }
+
+    #[test]
+    fn residual_modal_inductance_boundary_is_strictly_passive() {
+        let mut boundary = MovingMagnetCartridgeConfig::default();
+        boundary.magnetic_loss_branches[0] = MagneticLossRelaxationBranchConfig {
+            relaxation_inductance_h: 0.2,
+            loss_resistance_ohm: 2_000.0,
+        };
+        let residual_inductance_h = boundary.coil_inductance_h - 0.2;
+        boundary.coil_mutual_inductance_h = residual_inductance_h - MIN_INDUCTANCE_H;
+        assert!(boundary.validate().is_ok());
+
+        let invalid = MovingMagnetCartridgeConfig {
+            coil_mutual_inductance_h: residual_inductance_h,
+            ..boundary
+        };
+        assert!(matches!(
+            invalid.validate(),
+            Err(MovingMagnetCartridgeConfigError::InvalidMutualInductance { .. })
+        ));
     }
 
     fn measure_direct_output_rms(channel: usize) -> f64 {
@@ -1894,9 +2890,13 @@ mod tests {
             magnet_velocity_m_s,
             generator_voltage_v,
             coil_current_a,
+            magnetic_loss_inductor_current_a: [[0.0; MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES]; 2],
             load_output_voltage_v,
             interval_average_generator_voltage_v,
             interval_average_coil_current_a,
+            interval_average_magnetic_loss_inductor_current_a: [[0.0;
+                MAX_MAGNETIC_LOSS_RELAXATION_BRANCHES];
+                2],
             interval_average_load_output_voltage_v,
             electromagnetic_reaction_force_n,
         }
@@ -1904,6 +2904,87 @@ mod tests {
 
     fn assert_array_bits_eq(actual: [f64; 2], expected: [f64; 2]) {
         assert_eq!(actual.map(f64::to_bits), expected.map(f64::to_bits));
+    }
+
+    fn assert_matrix_bits_eq(actual: [[f64; 2]; 2], expected: [[f64; 2]; 2]) {
+        for row in 0..2 {
+            assert_array_bits_eq(actual[row], expected[row]);
+        }
+    }
+
+    fn legacy_coupled_trapezoidal_circuit_affine_step(
+        config: MovingMagnetCartridgeConfig,
+        duration_seconds: f64,
+        previous_current_a: [f64; 2],
+        previous_load_voltage_v: [f64; 2],
+        previous_generator_voltage_v: [f64; 2],
+    ) -> Option<CoupledTrapezoidalCircuitAffineStep> {
+        assert_eq!(magnetic_loss_branch_count(config), 0);
+        if config.coil_mutual_inductance_h == 0.0 {
+            let mut current_bias_a = [0.0; 2];
+            let mut current_per_generator_voltage_a_per_v = [[0.0; 2]; 2];
+            let mut load_voltage_bias_v = [0.0; 2];
+            let mut load_voltage_per_generator_voltage = [[0.0; 2]; 2];
+            for channel in 0..2 {
+                let coefficients = trapezoidal_circuit_affine_step(
+                    config,
+                    duration_seconds,
+                    previous_current_a[channel],
+                    previous_load_voltage_v[channel],
+                    previous_generator_voltage_v[channel],
+                )?;
+                current_bias_a[channel] = coefficients.current_bias_a;
+                current_per_generator_voltage_a_per_v[channel][channel] =
+                    coefficients.current_per_generator_voltage_a_per_v;
+                load_voltage_bias_v[channel] = coefficients.load_voltage_bias_v;
+                load_voltage_per_generator_voltage[channel][channel] =
+                    coefficients.load_voltage_per_generator_voltage;
+            }
+            return Some(CoupledTrapezoidalCircuitAffineStep {
+                current_bias_a,
+                current_per_generator_voltage_a_per_v,
+                load_voltage_bias_v,
+                load_voltage_per_generator_voltage,
+            });
+        }
+
+        let previous_current_modes_a = to_symmetric_modes(previous_current_a);
+        let previous_load_voltage_modes_v = to_symmetric_modes(previous_load_voltage_v);
+        let previous_generator_voltage_modes_v = to_symmetric_modes(previous_generator_voltage_v);
+        let common = trapezoidal_circuit_affine_step_with_inductance(
+            config,
+            config.coil_inductance_h + config.coil_mutual_inductance_h,
+            duration_seconds,
+            previous_current_modes_a[0],
+            previous_load_voltage_modes_v[0],
+            previous_generator_voltage_modes_v[0],
+        )?;
+        let differential = trapezoidal_circuit_affine_step_with_inductance(
+            config,
+            config.coil_inductance_h - config.coil_mutual_inductance_h,
+            duration_seconds,
+            previous_current_modes_a[1],
+            previous_load_voltage_modes_v[1],
+            previous_generator_voltage_modes_v[1],
+        )?;
+        Some(CoupledTrapezoidalCircuitAffineStep {
+            current_bias_a: from_symmetric_modes([
+                common.current_bias_a,
+                differential.current_bias_a,
+            ]),
+            current_per_generator_voltage_a_per_v: symmetric_modal_matrix(
+                common.current_per_generator_voltage_a_per_v,
+                differential.current_per_generator_voltage_a_per_v,
+            ),
+            load_voltage_bias_v: from_symmetric_modes([
+                common.load_voltage_bias_v,
+                differential.load_voltage_bias_v,
+            ]),
+            load_voltage_per_generator_voltage: symmetric_modal_matrix(
+                common.load_voltage_per_generator_voltage,
+                differential.load_voltage_per_generator_voltage,
+            ),
+        })
     }
 
     fn measure_cross_to_direct_response(
@@ -1957,6 +3038,58 @@ mod tests {
             imaginary: (numerator.imaginary * denominator.real
                 - numerator.real * denominator.imaginary)
                 / scale,
+        }
+    }
+
+    fn impedance_as_complex(
+        impedance: CartridgeComplexImpedanceOhm,
+    ) -> CartridgeComplexVoltageRatio {
+        CartridgeComplexVoltageRatio {
+            real: impedance.resistance_ohm,
+            imaginary: impedance.reactance_ohm,
+        }
+    }
+
+    fn load_impedance_as_complex(
+        config: MovingMagnetCartridgeConfig,
+        frequency_hz: f64,
+    ) -> CartridgeComplexVoltageRatio {
+        let conductance = 1.0 / config.load_resistance_ohm;
+        let susceptance = std::f64::consts::TAU * frequency_hz * config.load_capacitance_f;
+        let scale = conductance * conductance + susceptance * susceptance;
+        CartridgeComplexVoltageRatio {
+            real: conductance / scale,
+            imaginary: -susceptance / scale,
+        }
+    }
+
+    fn complex_add(
+        left: CartridgeComplexVoltageRatio,
+        right: CartridgeComplexVoltageRatio,
+    ) -> CartridgeComplexVoltageRatio {
+        CartridgeComplexVoltageRatio {
+            real: left.real + right.real,
+            imaginary: left.imaginary + right.imaginary,
+        }
+    }
+
+    fn complex_subtract(
+        left: CartridgeComplexVoltageRatio,
+        right: CartridgeComplexVoltageRatio,
+    ) -> CartridgeComplexVoltageRatio {
+        CartridgeComplexVoltageRatio {
+            real: left.real - right.real,
+            imaginary: left.imaginary - right.imaginary,
+        }
+    }
+
+    fn complex_multiply(
+        left: CartridgeComplexVoltageRatio,
+        right: CartridgeComplexVoltageRatio,
+    ) -> CartridgeComplexVoltageRatio {
+        CartridgeComplexVoltageRatio {
+            real: left.real * right.real - left.imaginary * right.imaginary,
+            imaginary: left.real * right.imaginary + left.imaginary * right.real,
         }
     }
 }

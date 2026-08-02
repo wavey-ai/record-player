@@ -228,7 +228,10 @@ mod tests {
     use crate::physical::stylus::{
         StylusTraceContact, StylusTraceContactSet, MAX_SPHERICAL_TRACE_CONTACTS_PER_WALL,
     };
-    use crate::physical::{MovingMagnetCartridgeConfig, StylusContactConfig, TonearmConfig};
+    use crate::physical::{
+        MagneticLossRelaxationBranchConfig, MovingMagnetCartridgeConfig, StylusContactConfig,
+        TonearmConfig,
+    };
 
     const SAMPLE_RATE_HZ: f64 = 192_000.0;
 
@@ -434,6 +437,64 @@ mod tests {
             completed = true;
         });
         assert!(completed);
+    }
+
+    #[test]
+    fn magnetic_loss_network_is_reciprocal_in_the_same_sample_without_allocation() {
+        let (mut pickup, _) = states();
+        let seed = MovingMagnetCartridgeConfig::default();
+        let magnetic_loss_branches = [
+            MagneticLossRelaxationBranchConfig {
+                relaxation_inductance_h: 0.020,
+                loss_resistance_ohm: 4_000.0,
+            },
+            MagneticLossRelaxationBranchConfig {
+                relaxation_inductance_h: 0.180,
+                loss_resistance_ohm: 1_800.0,
+            },
+            MagneticLossRelaxationBranchConfig::default(),
+            MagneticLossRelaxationBranchConfig::default(),
+        ];
+        let residual_inductance_h = seed.coil_inductance_h - 0.2;
+        let mut cartridge = MovingMagnetCartridge::new(MovingMagnetCartridgeConfig {
+            coil_mutual_inductance_h: 0.61 * residual_inductance_h,
+            magnetic_loss_branches,
+            channel_balance_db: 0.0,
+            channel_separation_db: 200.0,
+            ..seed
+        })
+        .unwrap();
+        let mut observed_loss = false;
+        let mut completed = false;
+        assert_no_alloc::assert_no_alloc(|| {
+            for sample in 0..10_000 {
+                let telemetry =
+                    process_coupled_pickup_cartridge(&mut pickup, &mut cartridge, signal(sample))
+                        .unwrap();
+                observed_loss |= telemetry.cartridge.magnetic_loss_power_w > 0.0;
+                let expected_force = transform_vector_from_coil(
+                    telemetry.cartridge.electromagnetic_reaction_force_n,
+                );
+                assert!(vectors_nearly_equal(
+                    telemetry.pickup.electromagnetic_force_on_tip_n,
+                    expected_force,
+                ));
+                let scale = telemetry
+                    .electromagnetic_mechanical_power_w()
+                    .abs()
+                    .max(telemetry.cartridge.generator_electrical_power_w.abs())
+                    .max(1.0e-24);
+                assert!(
+                    (telemetry.electromagnetic_mechanical_power_w()
+                        + telemetry.cartridge.generator_electrical_power_w)
+                        .abs()
+                        <= 1.0e-10 * scale + 1.0e-18
+                );
+            }
+            completed = true;
+        });
+        assert!(completed);
+        assert!(observed_loss);
     }
 
     #[test]
