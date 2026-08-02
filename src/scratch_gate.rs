@@ -6,10 +6,11 @@ use thiserror::Error;
 
 pub const MIN_SCRATCH_CLICKS: u8 = 1;
 pub const MAX_SCRATCH_CLICKS: u8 = 8;
-pub const SCRATCH_GATE_ALGORITHM_VERSION: u32 = 7;
-pub const SCRATCH_GATE_SNAPSHOT_VERSION: u32 = 2;
-pub const SCRATCH_PERFORMANCE_SNAPSHOT_VERSION: u32 = 2;
+pub const SCRATCH_GATE_ALGORITHM_VERSION: u32 = 8;
+pub const SCRATCH_GATE_SNAPSHOT_VERSION: u32 = 3;
+pub const SCRATCH_PERFORMANCE_SNAPSHOT_VERSION: u32 = 3;
 pub const MAXIMUM_SCRATCH_RECORD_RATE: f64 = 20.0;
+const MAXIMUM_SCRATCH_RECORD_RATE_ROUNDOFF: f64 = 1.0e-12;
 const MAXIMUM_FRAME_DELTA_SECONDS: f64 = 1.0 / 8_000.0;
 
 const MOTION_ONSET_RATE: f64 = 0.035;
@@ -30,18 +31,13 @@ const DRUM_ACCELERATION_TRIGGER: f64 = 6.0;
 const DRUM_TRIGGER_MIN_RATE: f64 = 0.14;
 const DRUM_REFRACTORY_SECONDS: f64 = 0.045;
 const STAB_OPEN_START_FRACTION: f64 = 0.04;
-const STAB_OPEN_WIDTH_FRACTION: f64 = 0.24;
-const STAB_OPEN_END_FRACTION: f64 = STAB_OPEN_START_FRACTION + STAB_OPEN_WIDTH_FRACTION;
+const CHIRP_EDGE_MUTE_FRACTION: f64 = 0.04;
 const TRANSFORM_OPEN_FRACTION: f64 = 0.24;
 const FLARE_NOTCH_HALF_WIDTH: f64 = 0.07;
 const CRAB_BURST_START: f64 = 0.18;
 const CRAB_BURST_END: f64 = 0.72;
 const CRAB_PULSE_HALF_WIDTH: f64 = 0.035;
 const CRAB_PULSE_WIDTH_BUDGET: f64 = 0.22;
-const CHIRP_FORWARD_CLOSE_SLOW: f64 = 0.32;
-const CHIRP_FORWARD_CLOSE_FAST: f64 = 0.18;
-const CHIRP_REVERSE_OPEN_SLOW: f64 = 0.26;
-const CHIRP_REVERSE_OPEN_FAST: f64 = 0.14;
 const OPEN_SLOW_TIME_CONSTANT_SECONDS: f64 = 0.0015;
 const OPEN_FAST_TIME_CONSTANT_SECONDS: f64 = 0.00035;
 const CLOSE_SLOW_TIME_CONSTANT_SECONDS: f64 = 0.0020;
@@ -289,7 +285,7 @@ pub struct ScratchPerformanceInput {
 }
 
 impl ScratchPerformanceInput {
-    fn validate(self) -> Result<Self, ScratchPerformanceError> {
+    fn validate(mut self) -> Result<Self, ScratchPerformanceError> {
         if !self.delta_seconds.is_finite()
             || self.delta_seconds <= 0.0
             || self.delta_seconds > MAXIMUM_FRAME_DELTA_SECONDS
@@ -302,13 +298,21 @@ impl ScratchPerformanceInput {
             ("intentRecordRate", self.intent_record_rate),
             ("renderedRecordRate", self.rendered_record_rate),
         ] {
-            if !value.is_finite() || value.abs() > MAXIMUM_SCRATCH_RECORD_RATE {
+            if !value.is_finite()
+                || value.abs() > MAXIMUM_SCRATCH_RECORD_RATE + MAXIMUM_SCRATCH_RECORD_RATE_ROUNDOFF
+            {
                 return Err(ScratchPerformanceError::InvalidInput { field });
             }
         }
+        self.intent_record_rate = self
+            .intent_record_rate
+            .clamp(-MAXIMUM_SCRATCH_RECORD_RATE, MAXIMUM_SCRATCH_RECORD_RATE);
+        self.rendered_record_rate = self
+            .rendered_record_rate
+            .clamp(-MAXIMUM_SCRATCH_RECORD_RATE, MAXIMUM_SCRATCH_RECORD_RATE);
         let maximum_travel = MAXIMUM_SCRATCH_RECORD_RATE * self.delta_seconds;
-        let travel_roundoff =
-            32.0 * f64::EPSILON * maximum_travel.max(self.rendered_source_travel_seconds.abs());
+        let travel_roundoff = MAXIMUM_SCRATCH_RECORD_RATE_ROUNDOFF * self.delta_seconds
+            + 32.0 * f64::EPSILON * maximum_travel.max(self.rendered_source_travel_seconds.abs());
         if !self.rendered_source_travel_seconds.is_finite()
             || self.rendered_source_travel_seconds.abs() > maximum_travel + travel_roundoff
         {
@@ -316,6 +320,9 @@ impl ScratchPerformanceInput {
                 field: "renderedSourceTravelSeconds",
             });
         }
+        self.rendered_source_travel_seconds = self
+            .rendered_source_travel_seconds
+            .clamp(-maximum_travel, maximum_travel);
         if !self.manual_crossfader_gain.is_finite()
             || !(0.0..=1.0).contains(&self.manual_crossfader_gain)
         {
@@ -837,7 +844,19 @@ impl ScratchGate {
         }
         self.rest_seconds = 0.0;
 
-        let candidate = self.direction_candidate(intent_rate, rendered_rate);
+        let rendered_direction = if rendered_rate.abs() >= MOTION_ONSET_RATE {
+            sign(rendered_rate)
+        } else {
+            0
+        };
+        let candidate = if self.direction != 0
+            && rendered_direction != 0
+            && rendered_direction != self.direction
+        {
+            rendered_direction
+        } else {
+            self.direction_candidate(intent_rate, rendered_rate)
+        };
         if candidate == 0 {
             self.clear_pending_direction();
             return (MotionEvent::None, 0.0);
@@ -865,6 +884,10 @@ impl ScratchGate {
         }
         let physical_motion_confirms_direction =
             sign(rendered_rate) == candidate && rendered_rate.abs() >= MOTION_ONSET_RATE;
+        let reverses_confirmed_direction = self.direction != 0 && candidate != self.direction;
+        if reverses_confirmed_direction && !physical_motion_confirms_direction {
+            return (MotionEvent::None, 0.0);
+        }
         if !physical_motion_confirms_direction
             && (self.pending_seconds < confirmation_seconds
                 || !predicted_direction_is_physically_plausible(candidate, rendered_rate))
@@ -1010,37 +1033,25 @@ impl ScratchGate {
         self.drum_refractory = 0.0;
     }
 
-    fn compute_target(&self, _intent_rate: f64, rendered_rate: f64) -> f64 {
-        let speed = rendered_rate.abs();
-        let confidence = smoothstep(MOTION_ONSET_RATE, 2.0, speed);
+    fn compute_target(&self, intent_rate: f64, rendered_rate: f64) -> f64 {
         let reversal_is_pending = self.pending_direction != 0
             && self.direction != 0
             && self.pending_direction != self.direction;
+        let record_is_at_rest = intent_rate.abs() <= REST_RATE && rendered_rate.abs() <= REST_RATE;
         match self.preset {
             ScratchPreset::Baby => 1.0,
             ScratchPreset::Stab => f64::from(
                 self.moving
                     && self.direction > 0
                     && !reversal_is_pending
-                    && self.stroke_progress() >= STAB_OPEN_START_FRACTION
-                    && self.stroke_progress() < STAB_OPEN_END_FRACTION,
+                    && !record_is_at_rest
+                    && self.stroke_progress() >= STAB_OPEN_START_FRACTION,
             ),
             ScratchPreset::Chirp => {
-                if reversal_is_pending {
+                if !self.moving || reversal_is_pending || record_is_at_rest {
                     0.0
-                } else if self.direction == 0 {
-                    1.0
-                } else if self.direction > 0 {
-                    let close_at = lerp(
-                        CHIRP_FORWARD_CLOSE_SLOW,
-                        CHIRP_FORWARD_CLOSE_FAST,
-                        confidence,
-                    );
-                    f64::from(self.phase < close_at)
                 } else {
-                    let open_at =
-                        lerp(CHIRP_REVERSE_OPEN_SLOW, CHIRP_REVERSE_OPEN_FAST, confidence);
-                    f64::from(self.phase >= open_at)
+                    f64::from(self.stroke_progress() >= CHIRP_EDGE_MUTE_FRACTION)
                 }
             }
             ScratchPreset::Transform => {
@@ -1340,7 +1351,7 @@ mod tests {
             "../tests/fixtures/pvc_005_scratch_semantics.json"
         ))
         .unwrap();
-        assert_eq!(fixture["schemaVersion"], 2);
+        assert_eq!(fixture["schemaVersion"], 3);
         assert_eq!(fixture["caseId"], "PVC-005");
         assert_eq!(fixture["sampleRateHz"], SAMPLE_RATE);
         assert_eq!(fixture["algorithmVersion"], SCRATCH_GATE_ALGORITHM_VERSION);
@@ -1432,32 +1443,12 @@ mod tests {
             techniques[1]["forwardOpenStartFraction"],
             STAB_OPEN_START_FRACTION
         );
-        assert_eq!(
-            techniques[1]["forwardOpenWidthFraction"],
-            STAB_OPEN_WIDTH_FRACTION
-        );
-        assert!(
-            (techniques[1]["forwardOpenEndFraction"].as_f64().unwrap() - STAB_OPEN_END_FRACTION)
-                .abs()
-                <= f64::EPSILON
-        );
-        assert_eq!(
-            techniques[2]["forwardCloseFractionSlow"],
-            CHIRP_FORWARD_CLOSE_SLOW
-        );
-        assert_eq!(
-            techniques[2]["forwardCloseFractionFast"],
-            CHIRP_FORWARD_CLOSE_FAST
-        );
-        assert_eq!(
-            techniques[2]["reverseOpenFractionSlow"],
-            CHIRP_REVERSE_OPEN_SLOW
-        );
-        assert_eq!(
-            techniques[2]["reverseOpenFractionFast"],
-            CHIRP_REVERSE_OPEN_FAST
-        );
-        assert_eq!(techniques[2]["forwardEndpointPauseTarget"], 0.0);
+        assert_eq!(techniques[1]["forwardOpenUntilReversalIntent"], true);
+        assert_eq!(techniques[1]["reverseTarget"], 0.0);
+        assert_eq!(techniques[2]["edgeMuteFraction"], CHIRP_EDGE_MUTE_FRACTION);
+        assert_eq!(techniques[2]["closesOnReversalIntent"], true);
+        assert_eq!(techniques[2]["opensAfterPhysicalDirectionChange"], true);
+        assert_eq!(techniques[2]["restTarget"], 0.0);
         assert_eq!(techniques[3]["acceptedAlias"], "transformer");
         assert_eq!(techniques[3]["openFraction"], TRANSFORM_OPEN_FRACTION);
         assert_eq!(techniques[4]["notchHalfWidth"], FLARE_NOTCH_HALF_WIDTH);
@@ -1672,7 +1663,7 @@ mod tests {
             1.0
         );
 
-        for (progress, target) in [(0.039, 0.0), (0.041, 1.0), (0.279, 1.0), (0.281, 0.0)] {
+        for (progress, target) in [(0.039, 0.0), (0.041, 1.0), (0.50, 1.0), (0.99, 1.0)] {
             assert_eq!(
                 target_at_stroke_progress(ScratchPreset::Stab, 1, 1, progress, 2.0),
                 target,
@@ -1684,16 +1675,14 @@ mod tests {
             0.0
         );
 
-        for (direction, before, edge) in [(1, 0.179, 0.181), (-1, 0.139, 0.141)] {
-            let before_target = if direction > 0 { 1.0 } else { 0.0 };
-            let edge_target = 1.0 - before_target;
+        for direction in [1, -1] {
             assert_eq!(
-                target_at_stroke_progress(ScratchPreset::Chirp, 1, direction, before, 2.0,),
-                before_target
+                target_at_stroke_progress(ScratchPreset::Chirp, 1, direction, 0.039, 2.0,),
+                0.0
             );
             assert_eq!(
-                target_at_stroke_progress(ScratchPreset::Chirp, 1, direction, edge, 2.0,),
-                edge_target
+                target_at_stroke_progress(ScratchPreset::Chirp, 1, direction, 0.041, 2.0,),
+                1.0
             );
         }
 
@@ -1813,12 +1802,15 @@ mod tests {
     }
 
     #[test]
-    fn stab_is_one_short_forward_pulse_not_an_open_forward_stroke() {
+    fn stab_keeps_the_forward_stroke_audible_and_mutes_the_return() {
         let mut gate = ScratchGate::new(ScratchPreset::Stab);
         settle_direction(&mut gate, 1.0);
         assert_eq!(gate.target(), 1.0);
         let later_in_stroke = gate.learned_span() * 0.30;
         run(&mut gate, later_in_stroke, true, 1.0, 1.0);
+        assert_eq!(gate.direction(), 1);
+        assert_eq!(gate.target(), 1.0);
+        gate.process(1.0 / SAMPLE_RATE, true, -1.0, 0.2);
         assert_eq!(gate.direction(), 1);
         assert_eq!(gate.target(), 0.0);
         run(&mut gate, 0.020, true, -1.0, -1.0);
@@ -1829,13 +1821,12 @@ mod tests {
     #[test]
     fn physical_maximum_rate_onset_preserves_the_first_stab_attack() {
         let mut gate = ScratchGate::new(ScratchPreset::Stab);
-        let mut saw_open = false;
-        let frames_through_open_window = (STAB_OPEN_END_FRACTION
-            * ScratchPreset::Stab.initial_stroke_span()
-            / MAXIMUM_SCRATCH_RECORD_RATE
-            * SAMPLE_RATE)
-            .ceil() as usize;
-        for frame in 0..frames_through_open_window {
+        let frames_through_attack =
+            (2.0 * STAB_OPEN_START_FRACTION * ScratchPreset::Stab.initial_stroke_span()
+                / MAXIMUM_SCRATCH_RECORD_RATE
+                * SAMPLE_RATE)
+                .ceil() as usize;
+        for frame in 0..frames_through_attack {
             gate.process(
                 1.0 / SAMPLE_RATE,
                 true,
@@ -1847,13 +1838,8 @@ mod tests {
                 assert!(gate.moving());
                 assert_eq!(gate.target(), 0.0);
             }
-            saw_open |= gate.target() == 1.0;
         }
-        assert!(
-            saw_open,
-            "the confirmation must not consume the first Stab pulse"
-        );
-        assert_eq!(gate.target(), 0.0);
+        assert_eq!(gate.target(), 1.0);
     }
 
     #[test]
@@ -1922,28 +1908,31 @@ mod tests {
     }
 
     #[test]
-    fn intent_can_confirm_reversal_before_rendered_rate_crosses_zero() {
+    fn intent_cannot_commit_reversal_before_rendered_rate_crosses_zero() {
         let mut gate = ScratchGate::new(ScratchPreset::Transform);
         settle_direction(&mut gate, 0.8);
         run(&mut gate, 0.007, true, -0.7, 0.2);
+        assert_eq!(gate.direction(), 1);
+        assert_eq!(gate.pending_direction, -1);
+
+        gate.process(1.0 / SAMPLE_RATE, true, -0.7, -0.2);
         assert_eq!(gate.direction(), -1);
         assert!(gate.phase() < 0.02);
     }
 
     #[test]
-    fn reversed_stroke_waits_for_audible_motion_in_the_new_direction() {
+    fn outgoing_motion_keeps_the_existing_stroke_until_physical_reversal() {
         let mut gate = ScratchGate::new(ScratchPreset::Transform);
         settle_direction(&mut gate, 0.8);
         run(&mut gate, 0.030, true, 0.8, 0.8);
+        let outgoing_progress = gate.stroke_progress();
 
         run(&mut gate, 0.007, true, -0.8, 0.3);
+        assert_eq!(gate.direction(), 1);
+        assert!(gate.stroke_progress() > outgoing_progress);
+
+        gate.process(1.0 / SAMPLE_RATE, true, -0.8, -0.3);
         assert_eq!(gate.direction(), -1);
-        assert_eq!(gate.phase(), 0.0);
-
-        run(&mut gate, 0.020, true, -0.8, 0.3);
-        assert_eq!(gate.phase(), 0.0);
-
-        run(&mut gate, 0.006, true, -0.8, -0.3);
         assert!(gate.phase() > 0.0);
     }
 
@@ -2216,33 +2205,43 @@ mod tests {
     }
 
     #[test]
-    fn chirp_uses_velocity_and_direction_to_tighten_its_cut() {
+    fn chirp_mutes_each_physical_direction_edge() {
         let mut gate = ScratchGate::new(ScratchPreset::Chirp);
         gate.contact_active = true;
         gate.moving = true;
-        gate.phase = 0.24;
-
-        gate.direction = 1;
-        assert_eq!(gate.compute_target(0.04, 0.04), 1.0);
-        assert_eq!(gate.compute_target(2.0, 2.0), 0.0);
-
-        gate.direction = -1;
-        assert_eq!(gate.compute_target(-0.04, -0.04), 0.0);
-        assert_eq!(gate.compute_target(-2.0, -2.0), 1.0);
+        for direction in [1, -1] {
+            gate.direction = direction;
+            gate.stroke_travel = gate.learned_span() * 0.039;
+            gate.update_phase();
+            assert_eq!(
+                gate.compute_target(f64::from(direction), f64::from(direction)),
+                0.0
+            );
+            gate.stroke_travel = gate.learned_span() * 0.041;
+            gate.update_phase();
+            assert_eq!(
+                gate.compute_target(f64::from(direction), f64::from(direction)),
+                1.0
+            );
+        }
     }
 
     #[test]
-    fn chirp_has_direction_specific_cut_order() {
+    fn chirp_opens_after_each_edge_and_closes_before_the_turn() {
         let mut gate = ScratchGate::new(ScratchPreset::Chirp);
-        settle_direction(&mut gate, 1.0);
+        run(&mut gate, 0.005, true, 1.0, 1.0);
+        assert_eq!(gate.target(), 0.0);
+        run(&mut gate, 0.005, true, 1.0, 1.0);
         assert_eq!(gate.target(), 1.0);
-        run(&mut gate, 0.08, true, 1.0, 1.0);
+
+        gate.process(1.0 / SAMPLE_RATE, true, -1.0, 0.2);
+        assert_eq!(gate.direction(), 1);
         assert_eq!(gate.target(), 0.0);
 
-        run(&mut gate, 0.007, true, -1.0, -1.0);
+        gate.process(1.0 / SAMPLE_RATE, true, -1.0, -1.0);
         assert_eq!(gate.direction(), -1);
         assert_eq!(gate.target(), 0.0);
-        run(&mut gate, 0.05, true, -1.0, -1.0);
+        run(&mut gate, 0.010, true, -1.0, -1.0);
         assert_eq!(gate.target(), 1.0);
     }
 
@@ -2258,7 +2257,7 @@ mod tests {
         assert_eq!(gate.pending_direction, -1);
         assert_eq!(gate.target(), 0.0);
 
-        run(&mut gate, 0.007, true, -1.0, -0.2);
+        gate.process(1.0 / SAMPLE_RATE, true, -1.0, -0.2);
         assert_eq!(gate.direction(), -1);
         assert_eq!(gate.target(), 0.0);
     }
@@ -2266,15 +2265,16 @@ mod tests {
     #[test]
     fn chirp_pause_does_not_expose_the_forward_endpoint() {
         let mut gate = ScratchGate::new(ScratchPreset::Chirp);
-        settle_direction(&mut gate, 1.0);
-        run(&mut gate, 0.080, true, 1.0, 1.0);
-        assert_eq!(gate.target(), 0.0);
+        run(&mut gate, 0.020, true, 1.0, 1.0);
+        assert_eq!(gate.target(), 1.0);
         let phase_at_endpoint = gate.phase();
+
+        gate.process(1.0 / SAMPLE_RATE, true, 0.0, 0.0);
+        assert_eq!(gate.phase(), phase_at_endpoint);
+        assert_eq!(gate.target(), 0.0);
 
         run(&mut gate, 0.030, true, 0.0, 0.0);
         assert!(!gate.moving());
-        assert_eq!(gate.phase(), phase_at_endpoint);
-        assert_eq!(gate.target(), 0.0);
 
         run(&mut gate, 0.030, false, 0.0, 0.0);
         assert_eq!(gate.target(), 1.0);
@@ -2618,7 +2618,19 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(output.owner, ScratchCrossfaderOwner::AutomaticPreset);
-        assert!(output.audible_gain < 1.0e-9, "stab closes after its pulse");
+        assert!(
+            output.audible_gain > 0.999,
+            "stab keeps the forward stroke audible"
+        );
+        for _ in 0..2_000 {
+            output = performance
+                .process_frame(performance_input(true, -1.0, 0.2, 0.0))
+                .unwrap();
+        }
+        assert!(
+            output.audible_gain < 1.0e-9,
+            "stab closes before the physical return"
+        );
 
         performance.set_preset(ScratchPreset::Baby);
         for _ in 0..2_000 {
@@ -2703,6 +2715,32 @@ mod tests {
     }
 
     #[test]
+    fn maximum_rate_roundoff_clamps_to_the_exact_supported_boundary() {
+        let mut exact = ScratchPerformance::new(ScratchPreset::Transform);
+        let mut rounded = exact;
+        let exact_travel = MAXIMUM_SCRATCH_RECORD_RATE / SAMPLE_RATE;
+        let mut exact_input = performance_input(
+            true,
+            MAXIMUM_SCRATCH_RECORD_RATE,
+            MAXIMUM_SCRATCH_RECORD_RATE,
+            1.0,
+        );
+        exact_input.rendered_source_travel_seconds = exact_travel;
+        let mut rounded_input = exact_input;
+        rounded_input.intent_record_rate =
+            f64::from_bits(MAXIMUM_SCRATCH_RECORD_RATE.to_bits() + 1);
+        rounded_input.rendered_record_rate =
+            f64::from_bits(MAXIMUM_SCRATCH_RECORD_RATE.to_bits() + 1);
+        rounded_input.rendered_source_travel_seconds = f64::from_bits(exact_travel.to_bits() + 1);
+
+        assert_eq!(
+            rounded.process_frame(rounded_input),
+            exact.process_frame(exact_input)
+        );
+        assert_eq!(rounded.snapshot(), exact.snapshot());
+    }
+
+    #[test]
     fn performance_snapshot_restore_repeats_every_output_frame() {
         let mut performance = ScratchPerformance::new(ScratchPreset::Crab);
         performance.set_clicks(5);
@@ -2773,7 +2811,11 @@ mod tests {
         previous_performance_version.version = SCRATCH_PERFORMANCE_SNAPSHOT_VERSION - 1;
         assert_eq!(
             performance.restore(&previous_performance_version),
-            Err(ScratchPerformanceError::UnsupportedPerformanceSnapshotVersion { version: 1 })
+            Err(
+                ScratchPerformanceError::UnsupportedPerformanceSnapshotVersion {
+                    version: SCRATCH_PERFORMANCE_SNAPSHOT_VERSION - 1
+                }
+            )
         );
         assert_eq!(performance.snapshot(), before);
 
@@ -2781,7 +2823,9 @@ mod tests {
         previous_gate_version.gate.version = SCRATCH_GATE_SNAPSHOT_VERSION - 1;
         assert_eq!(
             performance.restore(&previous_gate_version),
-            Err(ScratchPerformanceError::UnsupportedGateSnapshotVersion { version: 1 })
+            Err(ScratchPerformanceError::UnsupportedGateSnapshotVersion {
+                version: SCRATCH_GATE_SNAPSHOT_VERSION - 1
+            })
         );
         assert_eq!(performance.snapshot(), before);
 

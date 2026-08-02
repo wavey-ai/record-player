@@ -32,7 +32,7 @@ Each case must contain these items:
 | `PVC-002` | `RP-012`, `RP-016`, `RP-028`, `RP-030` | Finalized-page publication exceeds the fixed cache | Confirmed; worker correction implemented |
 | `PVC-003` | `RP-008`, `RP-013`, `RP-028` | Midpoint active-mode solve misses a rapid-reversal callback deadline | Confirmed; core tail improved, complete path still fails |
 | `PVC-004` | `RP-009`, `RP-013`, `RP-023`, `RP-033` | One wall has two separated near-equal envelope maxima | Confirmed; tracer rejects unresolved height order |
-| `PVC-005` | `RP-003`, `RP-005`, `RP-034` | Named scratch presets need canonical timing and production integration | Rust gain integration passes; technique calibration remains open |
+| `PVC-005` | `RP-003`, `RP-005`, `RP-034` | Named scratch presets need canonical timing and production integration | Stab and Chirp topology passes; calibration remains open |
 | `PVC-006` | `RP-008`, `RP-020`, `RP-024` | Passive cartridge magnetic-loss invariants | Implemented and green; cartridge measurement remains open |
 | `PVC-007` | `RP-008`, `RP-013`, `RP-026`, `RP-033`, `RP-035`, `RP-036`, `RP-038`, `RP-039` | Passive groove compliance, coupled patches, and vector friction | Zero-speed regularization passes; identified tangential state and compliance remain open |
 
@@ -576,14 +576,20 @@ The existing predictor also remains stable during coalesced input and rapid reve
 
 ### Replacement Technique Fixture
 
-- **Algorithm version**: 7.
+- **Fixture schema version**: 3.
+- **Algorithm version**: 8.
+- **Gate snapshot version**: 3.
+- **Performance snapshot version**: 3.
 - **Sample rate**: 48,000 hertz.
 - **Supported record-rate range**: -20 through 20.
 - **Supported click count**: 1 through 8.
 - **Maximum frame interval**: 0.000125 seconds.
 - **Stab forward-open start**: 0.04 stroke.
-- **Stab forward-open width**: 0.24 stroke.
-- **Stab forward-open end**: 0.28 stroke.
+- **Stab forward-open duration**: Until reversal intent or a physical direction crossing.
+- **Stab reverse target**: Muted.
+- **Chirp edge-mute distance**: 0.04 stroke in each physical direction.
+- **Chirp reversal target**: Muted after opposite intent.
+- **Chirp rest target**: Muted while hand contact remains active.
 - **Transform open fraction**: 0.24.
 - **Flare notch half-width**: 0.07 stroke.
 - **Flare notched direction**: Forward only.
@@ -646,6 +652,10 @@ The maximum-rate fixture also covers plus and minus 20 record rate.
 - **Intent rule**: Opposite intent cannot reverse the gate during outgoing physical motion.
 - **Accepted result**: The first Stab pulse remains present at `20x`.
 - **Accepted result**: Transform, Flare, Crab, and Orbit retain the selected event count at `20x`.
+- **Observed rate drift**: One exact-`20x` physical result divided to `20.0000000000003268`.
+- **Former result**: Input validation rejected that physical frame.
+- **Correction**: Accept `1e-12` rate roundoff and clamp it to exact `20x`.
+- **Limit**: Values above the roundoff allowance still reject.
 
 ### Physical Travel Fixture
 
@@ -656,7 +666,11 @@ The maximum-rate fixture also covers plus and minus 20 record rate.
 
 ### Permanent Tests
 
-- `stab_is_one_short_forward_pulse_not_an_open_forward_stroke`
+- `stab_keeps_the_forward_stroke_audible_and_mutes_the_return`
+- `chirp_mutes_each_physical_direction_edge`
+- `chirp_opens_after_each_edge_and_closes_before_the_turn`
+- `intent_cannot_commit_reversal_before_rendered_rate_crosses_zero`
+- `outgoing_motion_keeps_the_existing_stroke_until_physical_reversal`
 - `flare_is_one_sided_while_orbit_repeats_the_notch_on_return`
 - `crab_is_a_clustered_finger_burst_not_a_transform_duty_variant`
 - `transform_has_a_closed_baseline_with_brief_uniform_taps`
@@ -672,13 +686,20 @@ The maximum-rate fixture also covers plus and minus 20 record rate.
 - `maximum_rate_reversals_remain_finite_and_bounded`
 - `physical_maximum_rate_onset_preserves_the_first_stab_attack`
 - `physical_maximum_rate_onset_preserves_every_early_click_event`
+- `maximum_rate_roundoff_clamps_to_the_exact_supported_boundary`
 - `outgoing_physical_motion_rejects_predicted_reversal_until_the_crossing_sample`
 - `performance_timing_is_sample_rate_invariant`
 - `pvc_005_fixture_matches_canonical_constants_and_claim_limits`
+- `stab_and_chirp_change_phono_audio_at_one_eight_and_twenty_times`
+- `scratch_gate_reversal_commits_on_the_rendered_motion_crossing`
 
 ### Result and Claim Limit
 
-The focused suite passes 58 tests.
+The focused `scratch_gate` suite passes 59 tests.
+
+The wider scratch-filtered suite passes 88 tests.
+
+Two offline evidence reports remain ignored in the wider suite.
 
 The tests validate topology, ownership, deterministic state, packetization behavior, sample-rate behavior, and numeric bounds.
 
@@ -698,13 +719,15 @@ The tests do not prove WASM or browser integration.
 
 The presets do not generate record motion.
 
+The Stab and Chirp topology corrections change real phono voltage.
+
 The technique fractions and crossfader envelope values remain unmeasured.
 
 ### Integration Decision
 
 Keep the physical player and native Swift on the canonical Rust implementation.
 
-Correct the remaining technique semantics before browser integration.
+Calibrate the technique timing before a faithful-technique claim.
 
 Do not retain browser technique equations after the Rust API becomes active.
 
@@ -717,14 +740,15 @@ Do not retain browser technique equations after the Rust API becomes active.
 - **Rejected behavior**: Do not permit preset motion beyond current hardware limits.
 - **Missing artifact**: The paper does not include the complete source trajectory tables.
 - **Next evidence**: Find the original GPL tables or record new expert performances.
-- **Catalog candidates**: Rolltear, Forward, Uzi, and Twiddle.
+- **Later catalog candidates**: Rolltear, Forward, Uzi, and Twiddle.
 - **Existing coverage**: Baby supplies the open-fader behavior for Tear and Scribble.
-- **Internal motion candidate**: Silent Back.
+- **Internal fader primitive**: Silent Back can mute a user-controlled return stroke.
 - **Catalog review**: Compare Chop with Stab before adding a second overlapping preset.
 - **Implementation rule**: A preset must not replace or reshape user record motion.
 - **Physics rule**: The crossfader must follow rendered physical motion.
 - **Research rule**: Recorded motion can identify crossfader landmarks only.
 - **Manual rule**: Direct record and crossfader control must remain available.
+- **Current decision**: Do not add a preset from this paper during the current pass.
 
 The paper supports the high-level controller design.
 
@@ -741,8 +765,8 @@ cargo test --lib scratch_gate::tests --no-fail-fast -- --test-threads=1
 ### Artifact
 
 - `tests/fixtures/pvc_005_scratch_semantics.json`
-- SHA-256: `24e771d3894f0038b910dc4a8532f5eeb2b0f0000198945442c21969a5f01dc3`
-- `src/scratch_gate.rs` SHA-256: `9d749e16db452dfa2890501558865ec9ab083f62fec0d3008e8568ce3b7d704f`
+- SHA-256: `250c225b549441185a42a42019ac5bf6966324aacd546df4ca1763987c8a88c2`
+- `src/scratch_gate.rs` SHA-256: `ba2962e418f117393b6cdd0c785015e0a9a97aad24524e0e6d309214fba74929`
 
 ## PVC-002: Finalized-Page Publication Exceeds the Fixed Cache
 

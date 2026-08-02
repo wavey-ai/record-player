@@ -3665,7 +3665,7 @@ mod tests {
     }
 
     #[test]
-    fn scratch_gate_reversal_waits_for_a_physically_plausible_rendered_spring() {
+    fn scratch_gate_reversal_commits_on_the_rendered_motion_crossing() {
         let mut dsp = scratch_signal_dsp(ScratchPreset::Transform, 8.0);
         dsp.render(512, 1);
         assert_eq!(dsp.scratch_direction(), 1);
@@ -3681,18 +3681,9 @@ mod tests {
             confirmation_frames += 1;
         }
         assert_eq!(dsp.scratch_direction(), -1);
-        assert_eq!(dsp.scratch_gate_phase(), 0.0);
-
-        let mut reversal_frames = 0;
-        while dsp.last_effective_rate > 0.0 && reversal_frames < 4_800 {
-            assert_eq!(dsp.scratch_gate_phase(), 0.0);
-            dsp.render(1, 1);
-            reversal_frames += 1;
-        }
         assert!(dsp.last_effective_rate < 0.0);
         assert!(dsp.scratch_gate_phase() > 0.0);
         assert!(confirmation_frames < 4_800);
-        assert!(reversal_frames < 4_800);
     }
 
     #[test]

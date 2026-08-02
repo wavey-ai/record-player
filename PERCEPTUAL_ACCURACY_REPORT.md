@@ -47,6 +47,7 @@ Therefore, this work does not yet improve production failure handling or rendere
 | Has an A/B render shown a clear full-output improvement? | No |
 | Has a controlled listening test shown a perceptual improvement? | No |
 | Are the Rust scratch presets active in native Swift? | Yes |
+| Do corrected Stab and Chirp gates change physical phono voltage? | Yes |
 | Can the product claim the most accurate recreation? | No |
 
 ## Production Changes With Perceptual Potential
@@ -251,7 +252,17 @@ Player, C ABI, and native Swift tests prove that scratch gain changes rendered s
 
 This result is a real production waveform change.
 
-The current technique timing and crossfader envelope remain unmeasured.
+Stab now passes the forward stroke and mutes the return.
+
+Chirp now cuts each physical direction edge and closes before a predicted reversal.
+
+Opposite intent can close the fader, but it cannot commit the new physical stroke.
+
+A physical-player test verifies Stab and Chirp phono output at `1x`, `8x`, and `20x`.
+
+The exact `20x` path now accepts floating-point drift of at most `1e-12` and clamps to the physical limit.
+
+The technique fractions and crossfader envelope remain unmeasured.
 
 ### Deterministic Branch Continuation
 
@@ -438,7 +449,9 @@ The integration changes actual phono output samples.
 
 It is a plausible perceptual improvement, but no listening test proves it.
 
-Stab, Chirp, Flare, Crab, and Drum still have documented semantic or calibration gaps.
+The identified Stab and Chirp topology defects are corrected.
+
+Stab, Chirp, Flare, Crab, and Drum still have calibration gaps.
 
 The Skipproof paper strengthens this limitation.
 
@@ -447,6 +460,10 @@ Its authors preserved expert record and crossfader recordings as paired lookup t
 They report that precise coordination is necessary to preserve each technique.
 
 Our current fixed stroke fractions do not provide equivalent calibration evidence.
+
+The paper does not justify a new preset in this pass.
+
+Rolltear, Forward, Uzi, and Twiddle remain later research candidates.
 
 ### Browser Canonical Activation
 
@@ -463,11 +480,10 @@ The next pass must prioritize measured output changes.
 1. Extend the reference through the coupled deck, pickup, cartridge, phono stage, and host output.
 2. Add bounded, event-aware swept contact for high signed travel.
 3. Compare force, torque, contact, and voltage against converged microsteps.
-4. Correct Stab and Chirp topology at physical direction crossings.
-5. Add direction-specific span prediction with error-aware confidence.
-6. Add tangential reversal state and identified sloped sticking.
-7. Render matched stop, `+20x`, `-20x`, and reversal audio fixtures.
-8. Run controlled, level-matched listening tests.
+4. Add direction-specific span prediction with error-aware confidence.
+5. Add tangential reversal state and identified sloped sticking.
+6. Render matched stop, `+20x`, `-20x`, and reversal audio fixtures.
+7. Run controlled, level-matched listening tests.
 
 Freeze unrelated proof work during this focused pass.
 

@@ -1994,6 +1994,26 @@ mod tests {
         PlayerControl::new(deck, true).with_scratch(preset, clicks, manual_crossfader_gain)
     }
 
+    fn closed_automatic_scratch(
+        preset: crate::ScratchPreset,
+        internal_sample_rate_hz: f64,
+    ) -> ScratchPerformance {
+        let mut scratch = ScratchPerformance::new(preset);
+        let input = ScratchPerformanceInput {
+            delta_seconds: 1.0 / internal_sample_rate_hz,
+            hand_contact: true,
+            intent_record_rate: 0.0,
+            rendered_record_rate: 0.0,
+            rendered_source_travel_seconds: 0.0,
+            manual_crossfader_gain: 1.0,
+        };
+        for _ in 0..8_192 {
+            scratch.process_frame(input).unwrap();
+        }
+        assert!(scratch.audible_gain() < 1.0e-9);
+        scratch
+    }
+
     fn assert_player_state_matches_ignoring_source_representation(
         left: &PhysicalRecordPlayer,
         right: &PhysicalRecordPlayer,
@@ -2579,6 +2599,107 @@ mod tests {
             exact_travel_seconds / crate::ScratchPreset::Transform.initial_stroke_span();
         assert!((one.scratch.stroke_progress - expected_progress).abs() < 1.0e-10);
         assert_eq!(one.scratch.stroke_progress, four.scratch.stroke_progress);
+    }
+
+    #[test]
+    fn stab_and_chirp_change_phono_audio_at_one_eight_and_twenty_times() {
+        let profile = PhysicalProfile::sl_1200mk7_concorde_mkii_scratch_seed();
+        let groove = sine_groove(&profile, 1_337.0);
+        let sample_rate = profile.config.solver.internal_sample_rate_hz;
+        let maximum_render_frames = profile.config.solver.maximum_render_frames;
+
+        for preset in [crate::ScratchPreset::Stab, crate::ScratchPreset::Chirp] {
+            for rate in [1.0, 8.0, 20.0] {
+                let mut player = PhysicalRecordPlayer::new(profile.clone()).unwrap();
+                player.load_groove(Arc::clone(&groove)).unwrap();
+                player.set_groove_frame_position(10_000.0).unwrap();
+                player.reset_transport(rate, rate, 0.0, 0.0).unwrap();
+                player.scratch = closed_automatic_scratch(preset, sample_rate);
+                player
+                    .enqueue_control(TimedPlayerControl::new(
+                        0,
+                        1,
+                        scratch_player_control(
+                            profile.config.deck,
+                            rate,
+                            rate,
+                            preset,
+                            preset.default_clicks(),
+                            1.0,
+                        ),
+                    ))
+                    .unwrap();
+
+                let mut first_frame = [0.0_f32; 2];
+                player
+                    .render_internal_interleaved(&mut first_frame)
+                    .unwrap();
+                let closed = player.telemetry();
+                assert_eq!(closed.scratch.preset, preset);
+                assert_eq!(closed.scratch.automatic_gate_target, 0.0);
+                assert!(closed.scratch.audible_gain < 1.0e-8);
+
+                let frames_to_open =
+                    (0.10 * preset.initial_stroke_span() / rate * sample_rate).ceil() as usize;
+                let mut remaining = frames_to_open.saturating_sub(1);
+                let mut opened_output_peak = 0.0_f32;
+                while remaining > 0 {
+                    let frames = remaining.min(maximum_render_frames);
+                    let mut block = vec![0.0_f32; frames * 2];
+                    player.render_internal_interleaved(&mut block).unwrap();
+                    opened_output_peak = block
+                        .into_iter()
+                        .fold(opened_output_peak, |peak, sample| peak.max(sample.abs()));
+                    remaining -= frames;
+                }
+                let opened = player.telemetry();
+                assert_eq!(
+                    opened.scratch.automatic_gate_target, 1.0,
+                    "{preset:?} at {rate}x"
+                );
+                assert!(opened.scratch.audible_gain > 0.35, "{preset:?} at {rate}x");
+                assert!(opened_output_peak > 0.0, "{preset:?} at {rate}x");
+                assert_eq!(
+                    opened.phono_output_v,
+                    opened
+                        .phono
+                        .output_v
+                        .map(|sample| sample * opened.scratch.audible_gain)
+                );
+
+                let reversal_frame = player.current_internal_frame();
+                player
+                    .enqueue_control(TimedPlayerControl::new(
+                        reversal_frame,
+                        2,
+                        scratch_player_control(
+                            profile.config.deck,
+                            rate,
+                            -rate,
+                            preset,
+                            preset.default_clicks(),
+                            1.0,
+                        ),
+                    ))
+                    .unwrap();
+                let mut reversal_frame_output = [0.0_f32; 2];
+                player
+                    .render_internal_interleaved(&mut reversal_frame_output)
+                    .unwrap();
+                let closing = player.telemetry();
+                assert_eq!(
+                    closing.scratch.automatic_gate_target, 0.0,
+                    "{preset:?} at {rate}x"
+                );
+                assert_eq!(
+                    closing.phono_output_v,
+                    closing
+                        .phono
+                        .output_v
+                        .map(|sample| sample * closing.scratch.audible_gain)
+                );
+            }
+        }
     }
 
     #[test]

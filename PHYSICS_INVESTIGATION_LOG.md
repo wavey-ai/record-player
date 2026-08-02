@@ -2251,7 +2251,7 @@ It is not a measured product calibration value.
 
 ### Current Rust workspace result
 
-- The canonical library passes 536 tests.
+- The canonical library passes 628 tests.
 - Five manual benchmarks and evidence reports remain ignored.
 - The native C boundary passes 15 tests.
 - The full Rust workspace has no failed test at this checkpoint.
@@ -2282,8 +2282,9 @@ It is not a measured product calibration value.
 
 ### Technique counterexamples
 
-- **Stab**: The previous law stayed open for the complete forward stroke.
-- **Required behavior**: Produce a short open pulse during forward motion.
+- **Stab audit error**: This log previously required only a short open pulse during forward motion.
+- **Corrected behavior**: Start closed, open during forward motion, close before reversal, and mute the return.
+- **Reason**: A short middle pulse changes Stab into a different fader gesture.
 - **Flare and Orbit**: The previous laws used equal equations.
 - **Required behavior**: Flare applies notches within one stroke. Orbit repeats the flare over both directions.
 - **Crab and Transform**: The previous laws differed only by duty and default click count.
@@ -2343,7 +2344,8 @@ It is not a measured product calibration value.
 - The C ABI exposes controls and scratch telemetry.
 - Native Swift uses the C ABI and contains no technique equation.
 - A native test proves that Rust manual gain changes rendered audio.
-- The focused scratch suite passes 58 tests.
+- The focused `scratch_gate` suite passes 59 tests.
+- A physical-player test covers Stab and Chirp phono output at `1x`, `8x`, and `20x`.
 
 ### Maximum-Rate Confirmation Counterexample
 
@@ -2361,27 +2363,37 @@ It is not a measured product calibration value.
 - **Protection**: Intent alone cannot reverse the gate while physical motion remains outgoing.
 - **Permanent result**: The first Stab attack remains at `20x`.
 - **Permanent result**: Transform, Flare, Crab, and Orbit retain all early events at `20x`.
+- **Boundary defect**: Derived physical rate reached `20.0000000000003268` because of floating-point division.
+- **Former effect**: The scratch helper rejected an otherwise valid exact-`20x` render.
+- **Correction**: Accept at most `1e-12` representational rate drift, then clamp to the exact limit.
+- **Limit**: The correction does not permit physical motion beyond `20x`.
 
 ### Current Technique Limits
 
 - **Scope**: The presets automate crossfader gain. They do not generate record motion.
-- **Stab limit**: The current pulse uses a provisional `0.04` through `0.28` stroke window.
-- **Chirp limit**: The current gate closes a broad region instead of a measured turnaround cut.
+- **Stab topology**: The gate mutes the first `0.04` stroke, passes the remaining forward stroke, and mutes the return.
+- **Stab reversal**: Opposite intent closes the gate before the rendered record crosses zero speed.
+- **Chirp topology**: The gate mutes the first `0.04` of each physical direction, then opens.
+- **Chirp reversal**: Opposite intent closes the gate before the physical direction crossing.
+- **Physical rule**: Intent can close a gate, but it cannot commit a new physical stroke.
 - **Flare limit**: The current preset notches only the forward stroke.
 - **Crab limit**: The current preset implements one closed-baseline variant.
 - **Drum limit**: The current preset uses acceleration. It does not use a cue-position motion plan.
 - **Prediction limit**: One span estimate serves both stroke directions.
 - **Confidence limit**: Four observations produce full confidence without a variance test.
 - **Envelope limit**: The crossfader time constants have no hardware measurement.
-- **Requirement**: Do not open a new stroke before the physical direction crossing.
-- **Requirement**: Correct Stab and Chirp topology before a faithful-technique claim.
-- **Requirement**: Test output audio at `1x`, `8x`, and `20x`.
+- **Completed requirement**: Do not commit a new stroke before the physical direction crossing.
+- **Completed requirement**: Correct the identified Stab and Chirp topology defects.
+- **Completed requirement**: Test physical phono output at `1x`, `8x`, and `20x`.
 - **Requirement**: Fit technique timing to expert motion and crossfader traces.
 
 ### Calibration boundary
 
-- Stab opens from 0.04 through 0.28 of the forward stroke.
-- The Stab opening width is 0.24 stroke.
+- Stab opens after 0.04 of the forward stroke.
+- Stab stays open until reversal intent or the physical direction crossing.
+- Stab stays closed during reverse motion.
+- Chirp mutes 0.04 of each new physical direction.
+- Chirp closes when opposite intent predicts a plausible reversal.
 - The Transform open fraction is 0.24.
 - The Flare notch half-width is 0.07 stroke.
 - Crab centers its burst from 0.18 through 0.72 stroke.
@@ -2444,14 +2456,16 @@ The current catalog also includes Stab, Transform, Orbit, and Drum.
 - **No new preset**: Tear changes record motion while its crossfader stays open.
 - **No new preset**: Scribble changes record motion while its crossfader stays open.
 - **Existing path**: Baby already provides the open-fader behavior for Tear and Scribble.
-- **Add candidate**: Rolltear can add a distinct automatic fader envelope over user motion.
-- **Add candidate**: Uzi adds rapid record oscillation with coordinated amplitude cuts.
-- **Add candidate**: Twiddle adds repeated fader cuts over one record stroke.
-- **Add candidate**: Forward adds an audible forward stroke with a muted return.
-- **Internal primitive**: Silent Back is the muted return for Forward and other techniques.
+- **Later candidate**: Rolltear can add a distinct automatic fader envelope over user motion.
+- **Later candidate**: Uzi can add coordinated amplitude cuts over user motion.
+- **Later candidate**: Twiddle can add repeated fader cuts over one record stroke.
+- **Later candidate**: Forward can add an audible forward stroke with a muted return.
+- **Internal fader primitive**: Silent Back is the muted return for Forward and related techniques.
 - **Overlap risk**: Chop can overlap the intended Stab topology.
 - **Requirement**: Compare Chop and Stab against expert traces before both names enter the public catalog.
 - **Requirement**: Do not give a new preset name to a technique that only changes user record motion.
+- **Current decision**: Do not add a preset from the paper during this pass.
+- **Reason**: The paper omits its complete lookup tables and does not calibrate current hardware.
 
 ### Current Implementation Gap
 

@@ -1,11 +1,11 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "caseId": "PVC-005",
   "sampleRateHz": 48000.0,
-  "algorithmVersion": 7,
+  "algorithmVersion": 8,
   "snapshotVersions": {
-    "gate": 2,
-    "performance": 2
+    "gate": 3,
+    "performance": 3
   },
   "limits": {
     "minimumClicks": 1,
@@ -50,8 +50,8 @@
       "usesManualCrossfader": false,
       "initialStrokeSpanSourceSeconds": 0.22,
       "forwardOpenStartFraction": 0.04,
-      "forwardOpenWidthFraction": 0.24,
-      "forwardOpenEndFraction": 0.28
+      "forwardOpenUntilReversalIntent": true,
+      "reverseTarget": 0.0
     },
     {
       "id": 2,
@@ -60,11 +60,10 @@
       "usesClicks": false,
       "usesManualCrossfader": false,
       "initialStrokeSpanSourceSeconds": 0.22,
-      "forwardCloseFractionSlow": 0.32,
-      "forwardCloseFractionFast": 0.18,
-      "reverseOpenFractionSlow": 0.26,
-      "reverseOpenFractionFast": 0.14,
-      "forwardEndpointPauseTarget": 0.0
+      "edgeMuteFraction": 0.04,
+      "closesOnReversalIntent": true,
+      "opensAfterPhysicalDirectionChange": true,
+      "restTarget": 0.0
     },
     {
       "id": 3,
