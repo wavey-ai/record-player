@@ -117,3 +117,42 @@ The deck correction remains necessary. A format change can alter motor controls 
 The report still does not contain the original Rust panic message. It cannot confirm the first failed invariant.
 
 The next TestFlight build must identify that invariant if the format change still fails.
+
+## Incident IOS-2026-08-02-1701
+
+### Report identity
+
+- The TestFlight feedback comment is `1701`.
+- The feedback identifier is `AN8oSAR4eW1mWJ8Ansj_FK8`.
+- The incident identifier is `28DBC8D4-F48F-4D10-93C9-55230F1AB1C9`.
+- The application version is `1.0 (22)`.
+- The device is an iPhone 13 mini.
+- The operating system is iOS 26.5.2.
+- The crash occurred at 2026-08-02 17:01:19 Europe/London.
+- The application launched at 16:53:59.
+
+### Confirmed evidence
+
+The process received `SIGABRT` on audio render thread 6. The callback requested stereo planar program audio.
+
+The archived dSYM matches the application image. Both UUIDs are `315AB821-85A7-370C-AFC1-E10D49A42256`.
+
+Symbolication identifies `bitneedle_native_record_player_render_stereo_planar`. The Swift call site is `NativeRecordAudioPipeline.swift:842`.
+
+The Rust stack contains `panic_in_cleanup`. It also contains panic reporter allocation and symbol-map frames.
+
+This signature matches the 16:52 incident. The report does not contain the original Rust panic message.
+
+### Release status
+
+Build 22 used `record-player` commit `129fdea1`. That commit did not contain the dynamic deck recovery correction.
+
+TestFlight build 23 uses `record-player` commit `4dd487bf`. It includes deck recovery and guarded native rendering.
+
+Build 23 also saves the exact first Rust panic diagnostic. App Store Connect marked build 23 as `VALID`.
+
+### Required verification
+
+Repeat normal playback and format changes with build 23. Confirm that no equivalent crash occurs.
+
+If build 23 stops, use its saved diagnostic as the primary cause evidence.

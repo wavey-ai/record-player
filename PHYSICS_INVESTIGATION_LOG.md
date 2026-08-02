@@ -154,6 +154,8 @@ Use this ledger to track requirements across the chronological findings.
 - **Test**: A native test changes from 45 RPM to LP speed during the powered brake tail.
 - **Result**: The test completes 512 stereo callback blocks with zero panics and zero deck recoveries.
 - **Decision**: iOS saves the first native diagnostic before it terminates away from the audio callback.
+- **Evidence**: The 17:01 build 22 incident has the same audio-thread panic-reporting signature.
+- **Release**: TestFlight build 23 contains the corrections and has the `VALID` state.
 - **Detail**: See `PRODUCTION_CRASH_INVESTIGATION.md`.
 
 ## 2026-08-01: Repository and History Investigation
