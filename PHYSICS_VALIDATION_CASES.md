@@ -1931,10 +1931,12 @@ The accepted profile domain needs a P-matrix proof or an equivalent bounded proo
 - **Catalog warning**: Family-level reachability can hide a feasible one-wall sticking mask.
 - **Catalog**: Generate 288 contacting labels from production mode mappings.
 - **Solve-only result**: The versioned catalog contains 24 lowered and 24 cue-supported systems.
+- **Solve-only certificate version**: Version 2 stores the complete active KKT inverse for each system.
 - **Shared builder**: Production zero-contact branches and certificate responses use one canonical KKT assembler.
 - **Lowered result**: All 24 lowered systems match the separated-land bases by exact bits.
 - **Cue result**: Cue support changes only the typed vertical-body dynamic coefficient.
 - **Verification result**: All 48 systems enclose their production unit-RHS mobility coefficients.
+- **Full-inverse result**: All 48 systems replay and enclose every active KKT basis response.
 - **Algebraic record count**: The 288 contact labels and 48 solve-only systems give 336 records.
 - **Full-KKT correction**: A literal scaled-solver catalog needs 672 active masks and 48 solve-only systems.
 - **Full-KKT total**: That alternative numerical catalog contains 720 subjects.
@@ -2028,10 +2030,19 @@ The accepted profile domain needs a P-matrix proof or an equivalent bounded proo
 
 ### Certified Block-Solver Replacement Hypothesis
 
-- **Status**: This design is not implemented. Tests can disprove or change it.
+- **Status**: The verified base inverses are implemented. The runtime block replacement is not implemented.
 - **Goal**: Replace parameterized full-KKT elimination with the same algebra used by the bounded contact evaluator.
 - **Base requirement**: Store the verified complete inverse of each fixed base KKT system.
-- **Current gap**: The current catalog stores only the six-by-six dynamic mobility block.
+- **Base result**: Certificate version 2 stores point and interval values for each complete active inverse.
+- **Catalog scope**: The catalog contains all 24 lowered systems and all 24 cue-supported systems.
+- **Path result**: Every right-hand side in one system uses one common verified scale-and-pivot path.
+- **Maximum scaled-pivot width**: The catalog-wide value is `6.66133814775094e-15`.
+- **Maximum dynamic-solution width**: The catalog-wide value is `2.9198865547641623e-14`.
+- **Maximum full-solution width**: The catalog-wide value is `1.1812062439275908e-10`.
+- **Maximum residual width**: The catalog-wide value is `2.625029082992115e-10`.
+- **Maximum residual absolute bound**: The catalog-wide value is `1.3136514098732735e-10`.
+- **Units warning**: Full-solution and residual values mix physical units. They are not normalized robustness margins.
+- **Current gap**: Production does not calculate contact branches from these inverses.
 - **Base solve**: Multiply the complete base inverse by the actual runtime right-hand side.
 - **Sticking update**: Apply the nonsymmetric stylus force column and equality row as one rank-one update.
 - **Contact update**: Solve each active one-wall or two-wall normal Schur system directly.
@@ -2113,6 +2124,207 @@ error_j  = abs(C_j) * e_scaled
 - **Exclusion**: It does not prove hybrid uniqueness, multiple contact, tracing uniqueness, or material fidelity.
 - **Possible error**: Point residual intervals can still become too wide for extreme valid right-hand sides.
 - **Disproof test**: Use huge finite right-hand sides and require certification or transactional rejection.
+
+### Pointwise Candidate Validator Prototype
+
+- **Status**: This read-only prototype does not change production behavior.
+- **Scope**: The prototype instrumented the current full-KKT branch solves.
+- **Replacement limit**: These results do not validate the proposed block solver.
+- **Allocation result**: The instrumented active-mode solve still passes the no-allocation test.
+- **Verifier result**: Every instrumented solve passed the pointwise verifier.
+- **Maximum normalized residual**: The largest value was less than `2.95e-16`.
+- **Production threshold**: The current backward-error threshold is `1e-10`.
+- **Required certificate data**: Store an outward bound for every component of the complete KKT inverse.
+- **Rejected shortcut**: A six-by-six dynamic mobility cannot bound normal or static multipliers.
+
+For residual interval `R_i`, define its magnitude bound as:
+
+```text
+rho_i = max(abs(lower(R_i)), abs(upper(R_i)))
+```
+
+Let `C_ij` contain an outward upper bound for `abs(inverse(A)_ij)`.
+
+```text
+epsilon_i = upward_sum_j(C_ij * rho_j)
+```
+
+The exact solution component is then inside this interval:
+
+```text
+[x_hat_i - epsilon_i, x_hat_i + epsilon_i]
+```
+
+- **Acceptance rule**: Require a normalized residual no greater than `1e-10`.
+- **Finite rule**: Require each `epsilon_i` and each solution interval to be finite.
+- **Guard rule**: Require the complete solution box to satisfy every active branch predicate.
+- **Ambiguity rule**: Reject the branch if one predicate interval crosses its boundary.
+- **Scalar fallback**: A verified infinity-norm inverse bound is valid but less precise.
+- **Preferred method**: Use componentwise inverse bounds because the KKT variables have different physical units.
+
+| Fixture | Attempted solves | Maximum residual width | Maximum absolute residual | Maximum normalized residual | Maximum forward bound |
+|---|---:|---:|---:|---:|---:|
+| Seed normal | 15 | `2.910e-11` | `2.183e-11` | `1.687e-16` | `5.852e-12` |
+| Rapid `+20` | 45 | `2.328e-10` | `1.746e-10` | `2.355e-16` | `3.000e-11` |
+| Rapid `-20` | 88 | `2.328e-10` | `1.746e-10` | `2.355e-16` | `3.000e-11` |
+| Stop | 119 | `5.551e-17` | `4.163e-17` | `1.769e-16` | `8.930e-17` |
+| 256-step reversal | 371 | `1.455e-11` | `1.091e-11` | `2.944e-16` | `1.364e-11` |
+
+- **Seed dynamic bounds**: The six maxima were `5.121e-15`, `5.121e-15`, `3.219e-17`, `2.728e-17`, `5.784e-21`, and `7.879e-21`.
+- **Rapid positive dynamic bounds**: The six maxima were `3.744e-14`, `5.614e-14`, `4.783e-15`, `2.985e-15`, `7.123e-19`, and `7.487e-19`.
+- **Rapid negative dynamic bounds**: The six maxima matched the positive fixture except for the fifth value, which was `7.182e-19`.
+- **Stop dynamic bound**: Every dynamic component bound was no greater than `4.462e-20`.
+- **Reversal dynamic bounds**: The six maxima were `2.292e-15`, `2.924e-15`, `7.039e-16`, `5.829e-16`, `3.945e-16`, and `9.874e-19`.
+- **Static-multiplier result**: Static multipliers produced the largest forward bounds in the seed and rapid fixtures.
+- **Next test**: Repeat this fixture audit on each proposed base-plus-Schur result.
+
+### Runtime Branch Guard Inventory
+
+- **Status**: This read-only audit records every known branch predicate before block-solver integration.
+- **Purpose**: A small residual does not certify a branch unless its complete solution enclosure passes these predicates.
+- **Normal tolerance**: `CONTACT_TOLERANCE_M = 1.0e-11 m`.
+- **Force tolerance**: `TANGENTIAL_FORCE_TOLERANCE_N = 1.0e-10 N`.
+- **Sticking velocity tolerance**: `TANGENTIAL_VELOCITY_TOLERANCE_M_S = 1.0e-12 m/s`.
+- **Friction-power allowance**: `1.0e-18 W`.
+
+The active solution uses this coordinate order:
+
+| Index | Coordinate |
+|---:|---|
+| 0 | Platter angular velocity |
+| 1 | Record angular velocity |
+| 2 | Tip lateral velocity |
+| 3 | Tip vertical velocity |
+| 4 | Body lateral velocity |
+| 5 | Body vertical velocity |
+| 6 and later | Active multipliers |
+
+Active multipliers use this order:
+
+1. Active normal multipliers in ascending constraint order.
+2. Pickup-bearing multiplier.
+3. Deck-bearing multiplier.
+4. Slipmat multiplier.
+5. Hand multiplier.
+6. Stylus sticking multiplier.
+
+- **Mask warning**: For mask `0b10`, solution index 6 belongs to wall 1.
+- **Dependent stylus rule**: A missing stylus multiplier means exact zero after the runtime compatibility check.
+- **Normal multiplier meaning**: Each normal multiplier is a projected normal force.
+- **Stylus multiplier meaning**: The stylus multiplier is the total record-reaction tangential force.
+
+For each raw active normal multiplier `lambda`:
+
+```text
+lambda >= -1.0e-10 N
+projected_force = max(lambda, 0)
+```
+
+- **Clamp warning**: The clamp creates a derivative discontinuity at zero.
+- **Enclosure clamp**: Map `[lo, hi]` to `[max(lo, 0), max(hi, 0)]`.
+- **Inactive gap guard**: Require `gap >= -1.0e-11 m` for each inactive available constraint.
+- **Active gap omission**: The current validator does not check active gaps after solving.
+- **KKT role**: The active equality supplies a mathematical zero-gap condition.
+
+The tangential relative velocity is:
+
+```text
+gamma = 0.5 * groove_radius * (previous_record_velocity + record_velocity)
+      - skating_factor * body_lateral_velocity
+```
+
+Sticking requires:
+
+```text
+normal_force > 1.0e-10 N
+abs(gamma) <= 1.0e-12 m/s
+abs(total_tangent_force - modulation_force)
+    <= friction_coefficient * normal_force + 1.0e-10 N
+```
+
+Sliding-positive requires `normal_force > 1.0e-10 N` and `gamma > 0`.
+
+Sliding-negative requires `normal_force > 1.0e-10 N` and `gamma < 0`.
+
+- **Sliding sign warning**: Sliding uses a strict zero boundary, not the sticking velocity tolerance.
+- **Separated tolerance**: Positive-friction separation permits normal force no greater than `1.0e-10 N`.
+- **Zero-friction exception**: A separated branch can carry positive normal load when friction is zero.
+- **Friction-cone rule**: The complete interval must remain inside the cone and its force tolerance.
+- **Power rule**: The complete friction-power interval must have an upper bound no greater than `1.0e-18 W`.
+- **Power warning**: Sliding power is bilinear in projected normal force and relative velocity.
+- **Local-power gap**: Production checks total friction power, not each contact's local power.
+
+Pickup-bearing sticking requires:
+
+```text
+abs(bearing_multiplier)
+    <= lateral_static_friction + 1.0e-10 N
+```
+
+Pickup-bearing positive requires positive body lateral velocity.
+
+Pickup-bearing negative requires negative body lateral velocity.
+
+Each sticking deck port requires:
+
+```text
+abs(relative_velocity) <= 1.0e-6 rad/s
+abs(torque) <= static_limit + 1.0e-9 N*m
+```
+
+- **Deck sliding rule**: Each sliding mode requires a strict relative-velocity sign.
+- **Hand separation rule**: A separated hand has structurally exact-zero torque.
+- **Bearing relative velocity**: Use platter angular velocity.
+- **Slipmat relative velocity**: Use platter velocity minus record velocity.
+- **Hand relative velocity**: Use hand velocity minus record velocity.
+
+Before a solve, production also checks these conditions:
+
+- Reject groove sticking with positive friction when any active wall slope is not exact zero.
+- Preserve the existing equality-rank threshold of `1.0e-14`.
+- Preserve the dependent right-hand-side tolerance of `1.0e-12` times the applicable scale.
+- Reject a system larger than 13 variables.
+- Reject inconsistent row and column counts.
+- Reject separated deck-bearing or slipmat modes.
+
+The current scaled solver rejects these numerical conditions:
+
+- A nonfinite or zero row scale.
+- A nonfinite or zero column scale.
+- A nonfinite scaled pivot.
+- A scaled pivot no larger than `128 * EPSILON * system_size` in magnitude.
+- A nonfinite active solution coordinate.
+- A nonfinite normalized backward error.
+- A normalized backward error greater than `1.0e-10`.
+
+Post-validation commit adds these important conditions:
+
+- **Stylus-torque limit**: Require `abs(stylus_torque) <= 1.0 N*m`.
+- **All-gap rule**: Recalculate and check every groove-wall or land gap.
+- **Active-gap result**: The commit gap test includes active constraints.
+- **Pickup-time rule**: Commit uses `1 / pickup_sample_rate` for tip displacement.
+- **Deck-time rule**: Candidate validation uses the deck time step.
+- **Time-step tolerance**: The caller permits the two time steps to differ by 16 machine epsilons.
+- **Certificate consequence**: Certify both gap formulas separately.
+- **Nonfinite-gap gap**: The current groove commit can ignore a nonfinite gap during its penetration test.
+- **Fail-closed requirement**: The certificate must reject every nonfinite gap.
+- **Force-accounting rule**: Preserve the production split-and-residual operation order.
+- **Force-equality tolerance**: Commit uses relative `1.0e-12` plus absolute `1.0e-18 N`.
+- **Energy rule**: Commit finite-checks kinetic and suspension energies, which are quadratic.
+- **Counter rule**: A deck step-counter overflow rejects independently of the candidate solution.
+
+After both commits, the caller requires this exact floating equality:
+
+```text
+pickup_record_reaction_force * groove_radius == deck_stylus_torque
+```
+
+- **Reciprocity rule**: Preserve one canonical expression so this comparison remains structural.
+- **Successor-state warning**: The contact booleans use `projected_force > 0`.
+- **Successor ambiguity**: A raw multiplier enclosure that crosses zero cannot certify one exact next mode.
+- **Strong-successor rule**: Require the raw multiplier interval to lie strictly above zero or no greater than zero.
+- **Fallback rule**: Reject an inconclusive certificate branch and continue deterministic enumeration.
+- **Transaction rule**: Do not call a commit that can reject after a branch has been selected.
 
 ### Playback Configuration Identity Checkpoint
 

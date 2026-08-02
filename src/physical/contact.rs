@@ -1242,6 +1242,7 @@ pub(crate) struct CoupledDeckPickupStep {
 const JOINT_DYNAMIC_VARIABLES: usize = 6;
 const JOINT_MAX_VARIABLES: usize = 13;
 const JOINT_RHS_COLUMN: usize = JOINT_MAX_VARIABLES;
+pub(crate) const COUPLED_FIXED_KKT_CAPACITY: usize = JOINT_MAX_VARIABLES;
 pub(crate) const COUPLED_FIXED_MODE_OPERATOR_VERSION: u32 = 1;
 pub(crate) const COUPLED_FIXED_MODE_FAMILY_SET_VERSION: u32 = 1;
 pub(crate) const COUPLED_FIXED_SOLVE_ONLY_SUBJECT_SET_VERSION: u32 = 1;
@@ -1642,6 +1643,7 @@ pub(crate) struct CoupledFixedSolveOnlyResponse {
     pub(crate) equality: CoupledFixedEqualityDiagnostics,
     pub(crate) solve: CoupledFixedSolveDiagnostics,
     pub(crate) kkt_lhs: CoupledFixedModeKktLhs,
+    pub(crate) kkt_inverse: CoupledFixedKktInverse,
     pub(crate) dynamic_mobility: CoupledFixedDynamicMobility,
 }
 
@@ -1706,6 +1708,113 @@ pub(crate) const JOINT_DYNAMIC_VELOCITIES: [JointDynamicVelocity; JOINT_DYNAMIC_
     JointDynamicVelocity::BodyX,
     JointDynamicVelocity::BodyZ,
 ];
+
+/// Identifies one active KKT solution coordinate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum JointKktSolutionCoordinate {
+    DynamicVelocity(JointDynamicVelocity),
+    EqualityMultiplier(usize),
+}
+
+impl JointKktSolutionCoordinate {
+    pub(crate) fn from_active_index(index: usize, equality_count: usize) -> Option<Self> {
+        if index < JOINT_DYNAMIC_VARIABLES {
+            Some(Self::DynamicVelocity(JOINT_DYNAMIC_VELOCITIES[index]))
+        } else if index < JOINT_DYNAMIC_VARIABLES + equality_count {
+            Some(Self::EqualityMultiplier(index - JOINT_DYNAMIC_VARIABLES))
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn active_index(self, equality_count: usize) -> Option<usize> {
+        match self {
+            Self::DynamicVelocity(velocity) => Some(velocity as usize),
+            Self::EqualityMultiplier(index) if index < equality_count => {
+                Some(JOINT_DYNAMIC_VARIABLES + index)
+            }
+            Self::EqualityMultiplier(_) => None,
+        }
+    }
+}
+
+/// Identifies one active KKT right-hand-side coordinate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum JointKktRhsCoordinate {
+    DynamicEquation(JointDynamicEquation),
+    EqualityConstraint(usize),
+}
+
+impl JointKktRhsCoordinate {
+    pub(crate) fn from_active_index(index: usize, equality_count: usize) -> Option<Self> {
+        if index < JOINT_DYNAMIC_VARIABLES {
+            Some(Self::DynamicEquation(JOINT_DYNAMIC_EQUATIONS[index]))
+        } else if index < JOINT_DYNAMIC_VARIABLES + equality_count {
+            Some(Self::EqualityConstraint(index - JOINT_DYNAMIC_VARIABLES))
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn active_index(self, equality_count: usize) -> Option<usize> {
+        match self {
+            Self::DynamicEquation(equation) => Some(equation as usize),
+            Self::EqualityConstraint(index) if index < equality_count => {
+                Some(JOINT_DYNAMIC_VARIABLES + index)
+            }
+            Self::EqualityConstraint(_) => None,
+        }
+    }
+}
+
+/// Stores the complete inverse of one active fixed KKT system.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CoupledFixedKktInverse {
+    pub(crate) system_size: usize,
+    pub(crate) equality_count: usize,
+    pub(crate) solution_by_rhs: [[f64; JOINT_MAX_VARIABLES]; JOINT_MAX_VARIABLES],
+}
+
+impl CoupledFixedKktInverse {
+    /// Gets one coefficient through typed active coordinates.
+    pub(crate) fn coefficient(
+        &self,
+        solution: JointKktSolutionCoordinate,
+        rhs: JointKktRhsCoordinate,
+    ) -> Option<f64> {
+        let solution_index = solution.active_index(self.equality_count)?;
+        let rhs_index = rhs.active_index(self.equality_count)?;
+        (solution_index < self.system_size && rhs_index < self.system_size)
+            .then_some(self.solution_by_rhs[solution_index][rhs_index])
+    }
+
+    pub(crate) fn has_valid_inactive_storage(&self) -> bool {
+        self.system_size >= JOINT_DYNAMIC_VARIABLES
+            && self.system_size <= JOINT_MAX_VARIABLES
+            && self.equality_count == self.system_size - JOINT_DYNAMIC_VARIABLES
+            && self
+                .solution_by_rhs
+                .iter()
+                .enumerate()
+                .all(|(row, values)| {
+                    values.iter().enumerate().all(|(column, value)| {
+                        (row < self.system_size && column < self.system_size)
+                            || value.to_bits() == 0.0_f64.to_bits()
+                    })
+                })
+    }
+
+    pub(crate) fn dynamic_mobility(&self) -> CoupledFixedDynamicMobility {
+        let mut mobility = CoupledFixedDynamicMobility {
+            velocity_by_equation_rhs: [[0.0; JOINT_DYNAMIC_VARIABLES]; JOINT_DYNAMIC_VARIABLES],
+        };
+        for velocity in 0..JOINT_DYNAMIC_VARIABLES {
+            mobility.velocity_by_equation_rhs[velocity]
+                .copy_from_slice(&self.solution_by_rhs[velocity][..JOINT_DYNAMIC_VARIABLES]);
+        }
+        mobility
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct JointDynamicEquationRhs {
@@ -2250,8 +2359,9 @@ pub(crate) fn coupled_fixed_solve_only_response(
             + usize::from(mechanical.pickup_bearing == FixedModeFrictionMobility::Sticking);
     let (kkt_lhs, equality) =
         fixed_kkt_lhs_and_equality(augmented, layout.system_size, requested_count);
-    let (dynamic_mobility, solve) = fixed_dynamic_mobility_and_solve(augmented, layout.system_size)
-        .ok_or(CoupledFixedModeResponseError::SingularOrIllConditioned)?;
+    let (kkt_inverse, dynamic_mobility, solve) =
+        fixed_complete_kkt_inverse_and_solve(augmented, layout.system_size)
+            .ok_or(CoupledFixedModeResponseError::SingularOrIllConditioned)?;
 
     Ok(CoupledFixedSolveOnlyResponse {
         operator_version: COUPLED_FIXED_MODE_OPERATOR_VERSION,
@@ -2259,6 +2369,7 @@ pub(crate) fn coupled_fixed_solve_only_response(
         equality,
         solve,
         kkt_lhs,
+        kkt_inverse,
         dynamic_mobility,
     })
 }
@@ -2353,6 +2464,56 @@ fn fixed_dynamic_mobility_and_solve(
         maximum_backward_error = maximum_backward_error.max(solved.diagnostics.backward_error);
     }
     Some((
+        dynamic_mobility,
+        CoupledFixedSolveDiagnostics {
+            system_size,
+            minimum_scaled_pivot,
+            maximum_scaled_pivot,
+            scaled_pivot_ratio: minimum_scaled_pivot / maximum_scaled_pivot,
+            maximum_backward_error,
+        },
+    ))
+}
+
+fn fixed_complete_kkt_inverse_and_solve(
+    augmented: [[f64; JOINT_MAX_VARIABLES + 1]; JOINT_MAX_VARIABLES],
+    system_size: usize,
+) -> Option<(
+    CoupledFixedKktInverse,
+    CoupledFixedDynamicMobility,
+    CoupledFixedSolveDiagnostics,
+)> {
+    if !(JOINT_DYNAMIC_VARIABLES..=JOINT_MAX_VARIABLES).contains(&system_size) {
+        return None;
+    }
+    let mut solution_by_rhs = [[0.0; JOINT_MAX_VARIABLES]; JOINT_MAX_VARIABLES];
+    let mut minimum_scaled_pivot = f64::INFINITY;
+    let mut maximum_scaled_pivot = 0.0_f64;
+    let mut maximum_backward_error = 0.0_f64;
+    for rhs_index in 0..system_size {
+        let mut system = augmented;
+        system[rhs_index][JOINT_RHS_COLUMN] = 1.0;
+        let solved = solve_joint_linear_system_with_diagnostics(&mut system, system_size)?;
+        for (solution_index, solution_row) in
+            solution_by_rhs.iter_mut().enumerate().take(system_size)
+        {
+            solution_row[rhs_index] = solved.solution[solution_index];
+        }
+        minimum_scaled_pivot = minimum_scaled_pivot.min(solved.diagnostics.minimum_scaled_pivot);
+        maximum_scaled_pivot = maximum_scaled_pivot.max(solved.diagnostics.maximum_scaled_pivot);
+        maximum_backward_error = maximum_backward_error.max(solved.diagnostics.backward_error);
+    }
+    let kkt_inverse = CoupledFixedKktInverse {
+        system_size,
+        equality_count: system_size.checked_sub(JOINT_DYNAMIC_VARIABLES)?,
+        solution_by_rhs,
+    };
+    if !kkt_inverse.has_valid_inactive_storage() {
+        return None;
+    }
+    let dynamic_mobility = kkt_inverse.dynamic_mobility();
+    Some((
+        kkt_inverse,
         dynamic_mobility,
         CoupledFixedSolveDiagnostics {
             system_size,
@@ -5354,7 +5515,105 @@ mod tests {
                 solve_only.dynamic_mobility, base.dynamic_mobility,
                 "{subject:?}"
             );
-            assert_eq!(solve_only.solve, base.solve, "{subject:?}");
+            assert_eq!(solve_only.solve.system_size, base.solve.system_size);
+            assert_eq!(
+                solve_only.solve.minimum_scaled_pivot.to_bits(),
+                base.solve.minimum_scaled_pivot.to_bits()
+            );
+            assert_eq!(
+                solve_only.solve.maximum_scaled_pivot.to_bits(),
+                base.solve.maximum_scaled_pivot.to_bits()
+            );
+            assert_eq!(
+                solve_only.solve.scaled_pivot_ratio.to_bits(),
+                base.solve.scaled_pivot_ratio.to_bits()
+            );
+            assert!(
+                solve_only.solve.maximum_backward_error >= base.solve.maximum_backward_error,
+                "{subject:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn all_solve_only_complete_inverses_replay_with_typed_active_layout() {
+        let config = seed_playback_config();
+        for subject in coupled_fixed_solve_only_subjects() {
+            let response = coupled_fixed_solve_only_response(config, subject).unwrap();
+            let inverse = response.kkt_inverse;
+            assert_eq!(inverse.system_size, response.kkt_lhs.system_size);
+            assert_eq!(inverse.equality_count, response.kkt_lhs.equality_count);
+            assert!(inverse.has_valid_inactive_storage());
+            assert_eq!(inverse.dynamic_mobility(), response.dynamic_mobility);
+
+            for rhs_index in 0..inverse.system_size {
+                let rhs_coordinate =
+                    JointKktRhsCoordinate::from_active_index(rhs_index, inverse.equality_count)
+                        .unwrap();
+                let mut replay = [[0.0; JOINT_MAX_VARIABLES + 1]; JOINT_MAX_VARIABLES];
+                for (row, coefficients) in response
+                    .kkt_lhs
+                    .coefficients
+                    .iter()
+                    .enumerate()
+                    .take(inverse.system_size)
+                {
+                    replay[row][..inverse.system_size]
+                        .copy_from_slice(&coefficients[..inverse.system_size]);
+                }
+                replay[rhs_index][JOINT_RHS_COLUMN] = 1.0;
+                let solved =
+                    solve_joint_linear_system_with_diagnostics(&mut replay, inverse.system_size)
+                        .unwrap();
+                for solution_index in 0..inverse.system_size {
+                    let solution_coordinate = JointKktSolutionCoordinate::from_active_index(
+                        solution_index,
+                        inverse.equality_count,
+                    )
+                    .unwrap();
+                    let stored = inverse
+                        .coefficient(solution_coordinate, rhs_coordinate)
+                        .unwrap();
+                    assert_eq!(
+                        stored.to_bits(),
+                        solved.solution[solution_index].to_bits(),
+                        "{subject:?}, solution={solution_index}, rhs={rhs_index}"
+                    );
+                    assert_eq!(
+                        stored.to_bits(),
+                        inverse.solution_by_rhs[solution_index][rhs_index].to_bits()
+                    );
+                }
+            }
+
+            for row in 0..JOINT_MAX_VARIABLES {
+                for column in 0..JOINT_MAX_VARIABLES {
+                    if row >= inverse.system_size || column >= inverse.system_size {
+                        assert_eq!(
+                            inverse.solution_by_rhs[row][column].to_bits(),
+                            0.0_f64.to_bits(),
+                            "{subject:?}, inverse [{row}][{column}]"
+                        );
+                        assert_eq!(
+                            response.kkt_lhs.coefficients[row][column].to_bits(),
+                            0.0_f64.to_bits(),
+                            "{subject:?}, KKT [{row}][{column}]"
+                        );
+                    }
+                }
+            }
+            assert!(inverse
+                .coefficient(
+                    JointKktSolutionCoordinate::EqualityMultiplier(inverse.equality_count),
+                    JointKktRhsCoordinate::DynamicEquation(JointDynamicEquation::Platter),
+                )
+                .is_none());
+            assert!(inverse
+                .coefficient(
+                    JointKktSolutionCoordinate::DynamicVelocity(JointDynamicVelocity::Platter),
+                    JointKktRhsCoordinate::EqualityConstraint(inverse.equality_count),
+                )
+                .is_none());
         }
     }
 

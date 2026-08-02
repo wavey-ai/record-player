@@ -724,12 +724,22 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Change size**: The outer endpoint changed by one ULP. The inner endpoint changed by four ULP.
 - **Interpretation**: The bit changes replace less accurate trigonometric reconstruction results.
 - **Solve-only status**: The crate now defines 24 lowered systems and 24 cue-supported systems.
+- **Solve-only certificate version**: Version 2 stores each complete active KKT inverse.
 - **Shared assembly**: Production and certificate paths now call one no-contact KKT assembler.
 - **Time-step rule**: Production supplies separate deck and pickup time steps to that assembler.
 - **Lowered parity**: All 24 lowered systems match the former separated-land base by exact bits.
 - **Cue result**: Cue support changes only the typed `BodyZ` equation and `BodyZ` velocity coefficient.
 - **Cue formula**: The change equals cue stiffness times pickup duration plus cue damping.
 - **Verification result**: All 48 systems replay and enclose every production unit-RHS mobility coefficient.
+- **Full-inverse result**: All 48 systems replay and enclose every active KKT basis response.
+- **Path result**: Every right-hand side in one system uses one common verified scale-and-pivot path.
+- **Maximum scaled-pivot width**: The catalog-wide value is `6.66133814775094e-15`.
+- **Maximum dynamic-solution width**: The catalog-wide value is `2.9198865547641623e-14`.
+- **Maximum full-solution width**: The catalog-wide value is `1.1812062439275908e-10`.
+- **Maximum residual width**: The catalog-wide value is `2.625029082992115e-10`.
+- **Maximum residual absolute bound**: The catalog-wide value is `1.3136514098732735e-10`.
+- **Units warning**: Full-solution and residual values mix physical units. They do not state physical error.
+- **Production limit**: The runtime branch solver does not yet use the verified base inverse.
 - **Dependency rule**: A dependent hand equality still requires runtime right-hand-side compatibility.
 - **Algebraic catalog**: The 288 contact labels and 48 solve-only systems give 336 algebraic records.
 - **Numerical correction**: A literal full-KKT proof needs 672 nonempty contact masks and 48 solve-only systems.
@@ -784,7 +794,7 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Cause hypothesis**: Direct residual intervals lose correlation between the radius-dependent matrix and solution.
 - **Conclusion**: Fixed-path replay can enclose mobility, but its naive residual bound cannot gate playback.
 - **Replacement hypothesis**: Use verified base mobility with canonical rank-one and normal-contact Schur updates in production.
-- **Base requirement**: Extend each fixed certificate from dynamic mobility to the complete KKT inverse.
+- **Base result**: Each fixed solve-only certificate now contains the complete active KKT inverse.
 - **Runtime proof**: Bound the actual point residual with outward arithmetic after each candidate solve.
 - **Forward bound**: Combine the residual with a certified scaled inverse norm for that proof leaf.
 - **Guard rule**: Require every point guard and complete solution-enclosure guard to pass.
@@ -793,6 +803,43 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Runtime requirement**: Certify the actual finite right-hand side after each candidate solve.
 - **Possible error**: The prototype covers the seed profile. It does not prove every valid configuration or target.
 - **Permanent-test requirement**: Repeat residual and FMA checks on native and WASM targets.
+
+### Pointwise runtime-validator prototype
+
+- **Status**: A read-only prototype instrumented the current full-KKT branch solves.
+- **Allocation result**: The active-mode test remained allocation-free.
+- **Verification result**: All instrumented seed, rapid, stop, and reversal solves passed.
+- **Maximum normalized residual**: The largest value was less than `2.95e-16`.
+- **Maximum forward bound**: The largest componentwise bound was `3.00e-11` in rapid motion.
+- **Important limit**: The prototype did not run the proposed base-plus-Schur solver.
+- **Certificate requirement**: Store componentwise bounds for the complete KKT inverse.
+- **Reason**: Candidate guards read normal forces and static multipliers as well as dynamic velocities.
+- **Rejected shortcut**: A six-by-six mobility cannot certify those multiplier guards.
+- **Runtime rule**: Calculate outward residual intervals from the actual finite matrix, right-hand side, and candidate.
+- **Forward rule**: Multiply residual magnitudes by the verified componentwise inverse bounds.
+- **Guard rule**: Require every predicate to hold over the complete forward-error box.
+- **Ambiguity rule**: Reject one branch when its interval crosses a predicate boundary.
+- **Uncertainty**: Extreme valid right-hand sides or a new solver can produce wider intervals.
+- **Required disproof test**: Run the same validator on every base-plus-Schur stress fixture before production activation.
+
+### Runtime guard audit
+
+- **Status**: The read-only audit found acceptance predicates outside `validate_joint_candidate`.
+- **Hidden torque guard**: Deck commit rejects stylus torque with magnitude greater than `1.0 N*m`.
+- **Hidden gap guard**: Pickup commit recalculates every gap, including each active constraint.
+- **Time-step difference**: Validation uses deck duration. Pickup commit uses the reciprocal pickup sample rate.
+- **Requirement**: Certify both gap calculations over the complete solution enclosure.
+- **Clamp rule**: Raw normal multipliers can reach `-1.0e-10 N` and then clamp to zero.
+- **Requirement**: Propagate the clamp through force, friction, power, torque, and contact-state calculations.
+- **Successor ambiguity**: A multiplier enclosure that crosses zero cannot identify one exact next contact state.
+- **Friction-power result**: Production checks total power, not every contact's local power.
+- **Nonfinite-gap issue**: The current groove penetration test can ignore a nonfinite gap.
+- **Certificate rule**: Reject each nonfinite value, even when the current point path does not reject it.
+- **Exact reciprocity**: The caller compares pickup reaction torque and deck stylus torque by exact floating equality.
+- **Implementation rule**: Calculate both values from one canonical expression.
+- **Control-flow trap**: A commit error aborts the midpoint call instead of trying the next branch.
+- **Required correction**: Move every rejecting solution predicate before branch selection.
+- **Detailed record**: `PHYSICS_VALIDATION_CASES.md` contains the exact constants, layouts, and predicates.
 
 - **Initial robustness floor**: Use `6.4e-9`, derived from 64 times the current backward-error limit.
 - **Config checkpoint**: The versioned config identity binds all 84 validated manifest leaves.

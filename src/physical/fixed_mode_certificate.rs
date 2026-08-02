@@ -10,10 +10,11 @@ use super::contact::{
     interior_spiral_origin_shift_per_record_velocity_m_s, stylus_sticking_equality_row,
     stylus_sticking_force_column, CoupledFixedContactFamily, CoupledFixedContactPoint,
     CoupledFixedContactSurface, CoupledFixedDynamicMobility, CoupledFixedEqualityDiagnostics,
-    CoupledFixedMechanicalMode, CoupledFixedModeInfeasibility, CoupledFixedModeKktLhs,
-    CoupledFixedModeResponseError, CoupledFixedOriginLaw, CoupledFixedPickupSupport,
-    CoupledFixedSolveOnlySubject, FixedStylusConstraintRelation, JointDynamicEquation,
-    JointDynamicVelocity, StylusTangentialMode, COUPLED_FIXED_CONTACT_FAMILY_COUNT,
+    CoupledFixedKktInverse, CoupledFixedMechanicalMode, CoupledFixedModeInfeasibility,
+    CoupledFixedModeKktLhs, CoupledFixedModeResponseError, CoupledFixedOriginLaw,
+    CoupledFixedPickupSupport, CoupledFixedSolveOnlySubject, FixedStylusConstraintRelation,
+    JointDynamicEquation, JointDynamicVelocity, JointKktRhsCoordinate, JointKktSolutionCoordinate,
+    StylusTangentialMode, COUPLED_FIXED_CONTACT_FAMILY_COUNT, COUPLED_FIXED_KKT_CAPACITY,
     COUPLED_FIXED_MECHANICAL_CLASS_COUNT, COUPLED_FIXED_MODE_FAMILY_SET_VERSION,
     COUPLED_FIXED_MODE_OPERATOR_VERSION, COUPLED_FIXED_SOLVE_ONLY_SUBJECT_COUNT,
     COUPLED_FIXED_SOLVE_ONLY_SUBJECT_SET_VERSION, JOINT_DYNAMIC_EQUATIONS,
@@ -23,7 +24,7 @@ use super::verified_interval::{OutwardInterval, OutwardIntervalError};
 use super::{PhysicalPlaybackConfig, PhysicalPlaybackConfigIdentity, PhysicalProfileError};
 
 const DYNAMIC_VARIABLE_COUNT: usize = 6;
-const KKT_CAPACITY: usize = 13;
+const KKT_CAPACITY: usize = COUPLED_FIXED_KKT_CAPACITY;
 const AUGMENTED_COLUMN_COUNT: usize = KKT_CAPACITY + 1;
 const RHS_COLUMN: usize = KKT_CAPACITY;
 const UNUSED_PIVOT_ROW: usize = usize::MAX;
@@ -31,7 +32,7 @@ const REFERENCE_RELATIVE_PIVOT_FACTOR: f64 = 128.0;
 
 /// Identifies the point-solve certificate format.
 pub(crate) const FIXED_MODE_POINT_MOBILITY_CERTIFICATE_VERSION: u32 = 2;
-pub(crate) const FIXED_MODE_SOLVE_ONLY_MOBILITY_CERTIFICATE_VERSION: u32 = 1;
+pub(crate) const FIXED_MODE_SOLVE_ONLY_MOBILITY_CERTIFICATE_VERSION: u32 = 2;
 pub(crate) const FIXED_MODE_CONTACT_BOX_CERTIFICATE_VERSION: u32 = 1;
 
 /// Contains outward enclosures of one dynamic mobility matrix.
@@ -50,6 +51,52 @@ impl VerifiedFixedDynamicMobility {
         equation: JointDynamicEquation,
     ) -> OutwardInterval {
         self.velocity_by_equation_rhs[velocity as usize][equation as usize]
+    }
+}
+
+/// Contains the verified complete inverse of one active KKT system.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct VerifiedFixedKktInverse {
+    pub(crate) system_size: usize,
+    pub(crate) equality_count: usize,
+    solution_by_rhs: [[OutwardInterval; KKT_CAPACITY]; KKT_CAPACITY],
+}
+
+impl VerifiedFixedKktInverse {
+    /// Gets one coefficient through typed active coordinates.
+    pub(crate) fn coefficient(
+        &self,
+        solution: JointKktSolutionCoordinate,
+        rhs: JointKktRhsCoordinate,
+    ) -> Option<OutwardInterval> {
+        let solution_index = solution.active_index(self.equality_count)?;
+        let rhs_index = rhs.active_index(self.equality_count)?;
+        (solution_index < self.system_size && rhs_index < self.system_size)
+            .then_some(self.solution_by_rhs[solution_index][rhs_index])
+    }
+
+    fn has_valid_inactive_storage(&self) -> bool {
+        self.system_size >= DYNAMIC_VARIABLE_COUNT
+            && self.system_size <= KKT_CAPACITY
+            && self.equality_count == self.system_size - DYNAMIC_VARIABLE_COUNT
+            && self
+                .solution_by_rhs
+                .iter()
+                .enumerate()
+                .all(|(row, values)| {
+                    values.iter().enumerate().all(|(column, value)| {
+                        (row < self.system_size && column < self.system_size)
+                            || (value.lower() == 0.0 && value.upper() == 0.0)
+                    })
+                })
+    }
+
+    fn dynamic_mobility(&self) -> VerifiedFixedDynamicMobility {
+        VerifiedFixedDynamicMobility {
+            velocity_by_equation_rhs: std::array::from_fn(|velocity| {
+                std::array::from_fn(|equation| self.solution_by_rhs[velocity][equation])
+            }),
+        }
     }
 }
 
@@ -103,6 +150,8 @@ pub(crate) struct VerifiedFixedSolveOnlyMobility {
     pub(crate) subject: CoupledFixedSolveOnlySubject,
     pub(crate) kkt_lhs: CoupledFixedModeKktLhs,
     pub(crate) equality: CoupledFixedEqualityDiagnostics,
+    pub(crate) reference_inverse: CoupledFixedKktInverse,
+    pub(crate) verified_inverse: VerifiedFixedKktInverse,
     pub(crate) reference_mobility: CoupledFixedDynamicMobility,
     pub(crate) verified_mobility: VerifiedFixedDynamicMobility,
     pub(crate) diagnostics: VerifiedBaseKktDiagnostics,
@@ -117,7 +166,8 @@ pub(crate) struct VerifiedFixedSolveOnlyMobilityCatalog {
     pub(crate) config_identity: PhysicalPlaybackConfigIdentity,
     pub(crate) config_identity_version: u32,
     pub(crate) config_sha256: [u8; 32],
-    pub(crate) systems: [VerifiedFixedSolveOnlyMobility; COUPLED_FIXED_SOLVE_ONLY_SUBJECT_COUNT],
+    pub(crate) systems:
+        Box<[VerifiedFixedSolveOnlyMobility; COUPLED_FIXED_SOLVE_ONLY_SUBJECT_COUNT]>,
 }
 
 impl VerifiedFixedSolveOnlyMobilityCatalog {
@@ -400,12 +450,10 @@ pub(crate) enum FixedModeSolveOnlyMobilityCertificateError {
         #[source]
         source: CoupledFixedModeResponseError,
     },
-    #[error(
-        "the verified KKT solve failed for subject {subject_index}, equation {equation_index}"
-    )]
+    #[error("the verified KKT solve failed for subject {subject_index}, RHS {rhs_index}")]
     KktSolve {
         subject_index: usize,
-        equation_index: usize,
+        rhs_index: usize,
         #[source]
         source: VerifiedPointKktError,
     },
@@ -413,18 +461,22 @@ pub(crate) enum FixedModeSolveOnlyMobilityCertificateError {
         "the verified solve path changed between right-hand sides for subject {subject_index}"
     )]
     InconsistentSolvePath { subject_index: usize },
-    #[error("the point replay differs from production for subject {subject_index}, velocity {velocity_index}, equation {equation_index}")]
-    ProductionReplayMismatch {
+    #[error("the complete KKT replay differs from production for subject {subject_index}, solution {solution_index}, RHS {rhs_index}")]
+    ProductionInverseReplayMismatch {
         subject_index: usize,
-        velocity_index: usize,
-        equation_index: usize,
+        solution_index: usize,
+        rhs_index: usize,
     },
-    #[error("the verified mobility does not contain production for subject {subject_index}, velocity {velocity_index}, equation {equation_index}")]
-    ProductionNotEnclosed {
+    #[error("the verified complete KKT inverse does not contain production for subject {subject_index}, solution {solution_index}, RHS {rhs_index}")]
+    ProductionInverseNotEnclosed {
         subject_index: usize,
-        velocity_index: usize,
-        equation_index: usize,
+        solution_index: usize,
+        rhs_index: usize,
     },
+    #[error("the complete KKT inverse storage is invalid for subject {subject_index}")]
+    InvalidInverseStorage { subject_index: usize },
+    #[error("the dynamic mobility projection differs from the complete KKT inverse for subject {subject_index}")]
+    DynamicProjectionMismatch { subject_index: usize },
 }
 
 /// Reports why one scaled point system could not be verified.
@@ -543,10 +595,12 @@ pub(crate) fn verify_fixed_solve_only_mobilities(
             subject,
             response.kkt_lhs,
             response.equality,
+            response.kkt_inverse,
             response.dynamic_mobility,
         )?);
     }
     let systems = systems
+        .into_boxed_slice()
         .try_into()
         .map_err(|_| FixedModeSolveOnlyMobilityCertificateError::InvalidCatalog)?;
     Ok(VerifiedFixedSolveOnlyMobilityCatalog {
@@ -1169,18 +1223,174 @@ fn verify_solve_only_mobility(
     subject: CoupledFixedSolveOnlySubject,
     kkt_lhs: CoupledFixedModeKktLhs,
     equality: CoupledFixedEqualityDiagnostics,
+    reference_inverse: CoupledFixedKktInverse,
     production_mobility: CoupledFixedDynamicMobility,
 ) -> Result<VerifiedFixedSolveOnlyMobility, FixedModeSolveOnlyMobilityCertificateError> {
-    let verified = verify_mobility(kkt_lhs, production_mobility)
-        .map_err(|error| map_solve_only_mobility_error(subject_index, error))?;
+    let verified = verify_complete_kkt_inverse(subject_index, kkt_lhs, &reference_inverse)?;
+    if reference_inverse.dynamic_mobility() != production_mobility
+        || verified.inverse.dynamic_mobility() != verified.mobility
+    {
+        return Err(
+            FixedModeSolveOnlyMobilityCertificateError::DynamicProjectionMismatch { subject_index },
+        );
+    }
     Ok(VerifiedFixedSolveOnlyMobility {
         subject,
         kkt_lhs,
         equality,
+        reference_inverse,
+        verified_inverse: verified.inverse,
         reference_mobility: production_mobility,
         verified_mobility: verified.mobility,
         diagnostics: verified.diagnostics,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct VerifiedCompleteKktInverse {
+    inverse: VerifiedFixedKktInverse,
+    mobility: VerifiedFixedDynamicMobility,
+    diagnostics: VerifiedBaseKktDiagnostics,
+}
+
+fn verify_complete_kkt_inverse(
+    subject_index: usize,
+    kkt_lhs: CoupledFixedModeKktLhs,
+    reference_inverse: &CoupledFixedKktInverse,
+) -> Result<VerifiedCompleteKktInverse, FixedModeSolveOnlyMobilityCertificateError> {
+    if reference_inverse.system_size != kkt_lhs.system_size
+        || reference_inverse.equality_count != kkt_lhs.equality_count
+        || !reference_inverse.has_valid_inactive_storage()
+        || !kkt_lhs_has_valid_inactive_storage(&kkt_lhs)
+    {
+        return Err(
+            FixedModeSolveOnlyMobilityCertificateError::InvalidInverseStorage { subject_index },
+        );
+    }
+    let zero = OutwardInterval::point(0.0).map_err(|source| {
+        FixedModeSolveOnlyMobilityCertificateError::KktSolve {
+            subject_index,
+            rhs_index: 0,
+            source: source.into(),
+        }
+    })?;
+    let mut solution_by_rhs = [[zero; KKT_CAPACITY]; KKT_CAPACITY];
+    let mut common_path = None;
+    let mut aggregate = VerifiedSolveAggregate::default();
+
+    for rhs_index in 0..kkt_lhs.system_size {
+        let mut rhs = [0.0; KKT_CAPACITY];
+        rhs[rhs_index] = 1.0;
+        let rhs_coordinate =
+            JointKktRhsCoordinate::from_active_index(rhs_index, kkt_lhs.equality_count).ok_or(
+                FixedModeSolveOnlyMobilityCertificateError::InvalidInverseStorage { subject_index },
+            )?;
+        let solved = verify_point_kkt_system(kkt_lhs.coefficients, kkt_lhs.system_size, rhs)
+            .map_err(
+                |source| FixedModeSolveOnlyMobilityCertificateError::KktSolve {
+                    subject_index,
+                    rhs_index,
+                    source,
+                },
+            )?;
+        let path = VerifiedEliminationPath::from(solved.diagnostics);
+        if let Some(expected) = common_path {
+            if expected != path {
+                return Err(
+                    FixedModeSolveOnlyMobilityCertificateError::InconsistentSolvePath {
+                        subject_index,
+                    },
+                );
+            }
+        } else {
+            common_path = Some(path);
+        }
+        aggregate.include(solved.diagnostics);
+
+        for (solution_index, solution_row) in solution_by_rhs
+            .iter_mut()
+            .enumerate()
+            .take(kkt_lhs.system_size)
+        {
+            let solution_coordinate = JointKktSolutionCoordinate::from_active_index(
+                solution_index,
+                kkt_lhs.equality_count,
+            )
+            .ok_or(
+                FixedModeSolveOnlyMobilityCertificateError::InvalidInverseStorage { subject_index },
+            )?;
+            let production = reference_inverse
+                .coefficient(solution_coordinate, rhs_coordinate)
+                .ok_or(
+                    FixedModeSolveOnlyMobilityCertificateError::InvalidInverseStorage {
+                        subject_index,
+                    },
+                )?;
+            if solved.reference_solution[solution_index].to_bits() != production.to_bits() {
+                return Err(
+                    FixedModeSolveOnlyMobilityCertificateError::ProductionInverseReplayMismatch {
+                        subject_index,
+                        solution_index,
+                        rhs_index,
+                    },
+                );
+            }
+            let enclosure = solved.solution[solution_index];
+            if !enclosure.contains(production) {
+                return Err(
+                    FixedModeSolveOnlyMobilityCertificateError::ProductionInverseNotEnclosed {
+                        subject_index,
+                        solution_index,
+                        rhs_index,
+                    },
+                );
+            }
+            solution_row[rhs_index] = enclosure;
+        }
+    }
+
+    let path = common_path.ok_or(FixedModeSolveOnlyMobilityCertificateError::InvalidCatalog)?;
+    let inverse = VerifiedFixedKktInverse {
+        system_size: kkt_lhs.system_size,
+        equality_count: kkt_lhs.equality_count,
+        solution_by_rhs,
+    };
+    if !inverse.has_valid_inactive_storage() {
+        return Err(
+            FixedModeSolveOnlyMobilityCertificateError::InvalidInverseStorage { subject_index },
+        );
+    }
+    Ok(VerifiedCompleteKktInverse {
+        inverse,
+        mobility: inverse.dynamic_mobility(),
+        diagnostics: aggregate.finish(kkt_lhs.equality_count, path),
+    })
+}
+
+fn kkt_lhs_has_valid_inactive_storage(kkt_lhs: &CoupledFixedModeKktLhs) -> bool {
+    kkt_lhs.system_size >= DYNAMIC_VARIABLE_COUNT
+        && kkt_lhs.system_size <= KKT_CAPACITY
+        && kkt_lhs.equality_count == kkt_lhs.system_size - DYNAMIC_VARIABLE_COUNT
+        && kkt_lhs
+            .coefficients
+            .iter()
+            .enumerate()
+            .all(|(row, values)| {
+                values.iter().enumerate().all(|(column, value)| {
+                    (row < kkt_lhs.system_size && column < kkt_lhs.system_size)
+                        || value.to_bits() == 0.0_f64.to_bits()
+                })
+            })
+        && kkt_lhs
+            .equality_basis
+            .iter()
+            .skip(kkt_lhs.equality_count)
+            .all(|basis| {
+                basis
+                    .coefficients_in_velocity_column_order()
+                    .into_iter()
+                    .all(|value| value.to_bits() == 0.0_f64.to_bits())
+            })
 }
 
 #[derive(Debug)]
@@ -1313,44 +1523,6 @@ fn map_base_mobility_error(
             equation_index,
         } => FixedModePointMobilityCertificateError::ProductionNotEnclosed {
             mechanical_class_index,
-            velocity_index,
-            equation_index,
-        },
-    }
-}
-
-fn map_solve_only_mobility_error(
-    subject_index: usize,
-    error: MobilityVerificationError,
-) -> FixedModeSolveOnlyMobilityCertificateError {
-    match error {
-        MobilityVerificationError::InvalidCatalog => {
-            FixedModeSolveOnlyMobilityCertificateError::InvalidCatalog
-        }
-        MobilityVerificationError::KktSolve {
-            equation_index,
-            source,
-        } => FixedModeSolveOnlyMobilityCertificateError::KktSolve {
-            subject_index,
-            equation_index,
-            source,
-        },
-        MobilityVerificationError::InconsistentSolvePath => {
-            FixedModeSolveOnlyMobilityCertificateError::InconsistentSolvePath { subject_index }
-        }
-        MobilityVerificationError::ProductionReplayMismatch {
-            velocity_index,
-            equation_index,
-        } => FixedModeSolveOnlyMobilityCertificateError::ProductionReplayMismatch {
-            subject_index,
-            velocity_index,
-            equation_index,
-        },
-        MobilityVerificationError::ProductionNotEnclosed {
-            velocity_index,
-            equation_index,
-        } => FixedModeSolveOnlyMobilityCertificateError::ProductionNotEnclosed {
-            subject_index,
             velocity_index,
             equation_index,
         },
@@ -1958,10 +2130,104 @@ mod tests {
         for (index, system) in catalog.systems.iter().enumerate() {
             assert_eq!(system.subject, subjects[index]);
             assert_eq!(catalog.get(subjects[index]), Some(system));
+            let response = coupled_fixed_solve_only_response(config, system.subject).unwrap();
+            assert_eq!(system.reference_inverse, response.kkt_inverse);
+            assert_eq!(
+                system.reference_inverse.system_size,
+                system.kkt_lhs.system_size
+            );
+            assert_eq!(
+                system.reference_inverse.equality_count,
+                system.kkt_lhs.equality_count
+            );
+            assert_eq!(
+                system.verified_inverse.system_size,
+                system.kkt_lhs.system_size
+            );
+            assert_eq!(
+                system.verified_inverse.equality_count,
+                system.kkt_lhs.equality_count
+            );
+            assert!(system.reference_inverse.has_valid_inactive_storage());
+            assert!(system.verified_inverse.has_valid_inactive_storage());
             let production_pivot_tolerance = REFERENCE_RELATIVE_PIVOT_FACTOR
                 * f64::EPSILON
                 * system.diagnostics.system_size as f64;
             assert!(system.diagnostics.minimum_verified_scaled_pivot > production_pivot_tolerance);
+            let mut common_path = None;
+            for rhs_index in 0..system.kkt_lhs.system_size {
+                let rhs_coordinate = JointKktRhsCoordinate::from_active_index(
+                    rhs_index,
+                    system.kkt_lhs.equality_count,
+                )
+                .unwrap();
+                let mut rhs = [0.0; KKT_CAPACITY];
+                rhs[rhs_index] = 1.0;
+                let replay = verify_point_kkt_system(
+                    system.kkt_lhs.coefficients,
+                    system.kkt_lhs.system_size,
+                    rhs,
+                )
+                .unwrap();
+                let path = VerifiedEliminationPath::from(replay.diagnostics);
+                if let Some(expected) = common_path {
+                    assert_eq!(path, expected);
+                } else {
+                    common_path = Some(path);
+                }
+                for solution_index in 0..system.kkt_lhs.system_size {
+                    let solution_coordinate = JointKktSolutionCoordinate::from_active_index(
+                        solution_index,
+                        system.kkt_lhs.equality_count,
+                    )
+                    .unwrap();
+                    let production = system
+                        .reference_inverse
+                        .coefficient(solution_coordinate, rhs_coordinate)
+                        .unwrap();
+                    let verified = system
+                        .verified_inverse
+                        .coefficient(solution_coordinate, rhs_coordinate)
+                        .unwrap();
+                    assert_eq!(
+                        replay.reference_solution[solution_index].to_bits(),
+                        production.to_bits()
+                    );
+                    assert!(verified.contains(production));
+                }
+            }
+            let common_path = common_path.unwrap();
+            assert_eq!(common_path.system_size, system.diagnostics.system_size);
+            assert_eq!(common_path.row_scales, system.diagnostics.row_scales);
+            assert_eq!(common_path.column_scales, system.diagnostics.column_scales);
+            assert_eq!(common_path.pivot_rows, system.diagnostics.pivot_rows);
+            assert_eq!(
+                common_path.minimum_verified_scaled_pivot,
+                system.diagnostics.minimum_verified_scaled_pivot
+            );
+            assert_eq!(
+                common_path.maximum_verified_scaled_pivot_width,
+                system.diagnostics.maximum_verified_scaled_pivot_width
+            );
+            for row in 0..KKT_CAPACITY {
+                for column in 0..KKT_CAPACITY {
+                    if row >= system.kkt_lhs.system_size || column >= system.kkt_lhs.system_size {
+                        let reference = system.reference_inverse.solution_by_rhs[row][column];
+                        let verified = system.verified_inverse.solution_by_rhs[row][column];
+                        assert_eq!(reference.to_bits(), 0.0_f64.to_bits());
+                        assert_eq!(verified.lower(), 0.0);
+                        assert_eq!(verified.upper(), 0.0);
+                    }
+                }
+            }
+            assert_eq!(
+                system.reference_inverse.dynamic_mobility(),
+                system.reference_mobility
+            );
+            assert_eq!(
+                system.verified_inverse.dynamic_mobility(),
+                system.verified_mobility
+            );
             for velocity in JOINT_DYNAMIC_VELOCITIES {
                 for equation in JOINT_DYNAMIC_EQUATIONS {
                     let production = system.reference_mobility.coefficient(velocity, equation);
@@ -1972,6 +2238,50 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn solve_only_verifier_rejects_nonzero_inactive_storage() {
+        let config = seed_config();
+        let subject = coupled_fixed_solve_only_subjects().next().unwrap();
+        let response = coupled_fixed_solve_only_response(config, subject).unwrap();
+        assert!(response.kkt_lhs.system_size < KKT_CAPACITY);
+
+        let mut inverse = response.kkt_inverse;
+        inverse.solution_by_rhs[KKT_CAPACITY - 1][KKT_CAPACITY - 1] = 1.0;
+        assert!(matches!(
+            verify_solve_only_mobility(
+                0,
+                subject,
+                response.kkt_lhs,
+                response.equality,
+                inverse,
+                response.dynamic_mobility,
+            ),
+            Err(
+                FixedModeSolveOnlyMobilityCertificateError::InvalidInverseStorage {
+                    subject_index: 0
+                }
+            )
+        ));
+
+        let mut kkt_lhs = response.kkt_lhs;
+        kkt_lhs.coefficients[KKT_CAPACITY - 1][KKT_CAPACITY - 1] = 1.0;
+        assert!(matches!(
+            verify_solve_only_mobility(
+                0,
+                subject,
+                kkt_lhs,
+                response.equality,
+                response.kkt_inverse,
+                response.dynamic_mobility,
+            ),
+            Err(
+                FixedModeSolveOnlyMobilityCertificateError::InvalidInverseStorage {
+                    subject_index: 0
+                }
+            )
+        ));
     }
 
     #[test]
@@ -1993,7 +2303,50 @@ mod tests {
             assert_eq!(lowered.equality, base_system.equality);
             assert_eq!(lowered.reference_mobility, base_system.reference_mobility);
             assert_eq!(lowered.verified_mobility, base_system.verified_mobility);
-            assert_eq!(lowered.diagnostics, base_system.diagnostics);
+            assert_eq!(
+                lowered.diagnostics.system_size,
+                base_system.diagnostics.system_size
+            );
+            assert_eq!(
+                lowered.diagnostics.equality_count,
+                base_system.diagnostics.equality_count
+            );
+            assert_eq!(
+                lowered.diagnostics.row_scales,
+                base_system.diagnostics.row_scales
+            );
+            assert_eq!(
+                lowered.diagnostics.column_scales,
+                base_system.diagnostics.column_scales
+            );
+            assert_eq!(
+                lowered.diagnostics.pivot_rows,
+                base_system.diagnostics.pivot_rows
+            );
+            assert_eq!(
+                lowered.diagnostics.minimum_verified_scaled_pivot,
+                base_system.diagnostics.minimum_verified_scaled_pivot
+            );
+            assert_eq!(
+                lowered.diagnostics.maximum_verified_scaled_pivot_width,
+                base_system.diagnostics.maximum_verified_scaled_pivot_width
+            );
+            assert!(
+                lowered.diagnostics.maximum_dynamic_solution_width
+                    >= base_system.diagnostics.maximum_dynamic_solution_width
+            );
+            assert!(
+                lowered.diagnostics.maximum_full_solution_width
+                    >= base_system.diagnostics.maximum_full_solution_width
+            );
+            assert!(
+                lowered.diagnostics.maximum_residual_width
+                    >= base_system.diagnostics.maximum_residual_width
+            );
+            assert!(
+                lowered.diagnostics.maximum_residual_absolute_bound
+                    >= base_system.diagnostics.maximum_residual_absolute_bound
+            );
         }
     }
 
