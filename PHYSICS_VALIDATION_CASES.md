@@ -1673,10 +1673,10 @@ The response also depends on skating geometry, masses, damping, deck inertia, an
 
 The accepted profile domain needs a P-matrix proof or an equivalent bounded proof.
 
-### Provisional Coupled Uniqueness Counterexample
+### Confirmed Coupled Normal-Response Counterexample
 
 - **Observation date**: 2026-08-02.
-- **Status**: A provisional calculation indicates that the scalar gate admits a negative minor.
+- **Status**: The canonical production operator confirms that the scalar gate admits a negative minor.
 - **Timestep**: Use `1 / 192000` seconds.
 - **Record inertia**: Use `1e-7` kilogram square meters.
 - **Stylus moving mass**: Use `0.01` kilograms.
@@ -1694,14 +1694,96 @@ The accepted profile domain needs a P-matrix proof or an equivalent bounded proo
 - **Deck contribution**: The value is `-0.007866686227009534`.
 - **Pickup contribution**: The value is `0.000536859604648429`.
 - **One-wall minor**: `W_00` is `-0.007329826622361105`.
-- **Provisional conclusion**: The one-contact Delassus operator is not positive for this witness.
+- **Confirmed conclusion**: The one-contact Delassus operator is not positive for this witness.
 - **Possible physical effect**: A one-dimensional complementarity problem can have two solutions or no solution.
-- **Mode count**: The current midpoint solver has 24 mobility classes and 48 signed sliding families.
+- **Canonical builder**: Production and the witness use the same midpoint `H` and `G` coefficients.
+- **Order protection**: Separate types identify equation-row and velocity-column coordinate orders.
+- **Signed-zero test**: `contact_operator_writers_preserve_the_signed_zero_layout` protects bit-level assembly parity.
+- **Permanent test**: `admitted_midpoint_configuration_has_a_negative_normal_minor` reproduces `W_00`.
+- **Former mode count**: The 48 signed families cover only groove-wall sliding.
+- **Mechanical basis**: There are 24 nominal mobility classes after kinetic signs share one left-hand side.
+- **Land addition**: Record-land sliding adds 48 labeled families.
+- **Sticking addition**: Groove and land sticking add 24 labeled families for each surface.
+- **Boundary addition**: Held-boundary groove contact has a different spiral-origin row.
+- **Separated addition**: The solver also evaluates separated labels for active masks.
+- **Groove catalog**: Four stylus labels, two origin laws, and 24 mechanical classes give 192 families.
+- **Land catalog**: Four stylus labels and 24 mechanical classes give 96 families.
+- **Contacting total**: The structurally different labeled catalog contains 288 families.
+- **Mask total**: Principal-minor coverage gives 768 structurally distinct mode-mask families.
+- **Runtime maximum**: One hand-active groove sample evaluates 1,053 current branches.
+- **Registered bound**: The 1,296 bound is safe, but it is not the exact current fallback count.
+- **Implementation status**: Production code does not yet generate the versioned certificate catalog.
 - **Required proof**: Prove both diagonal minors and the determinant for every family.
 - **Required domain**: Bind radius, both slopes, pitch, tonearm geometry, damping, profile, source, and generation.
 - **Required failure**: Reject an uncertified operator before any state change.
-- **Current uncertainty**: The calculated witness does not yet use a permanent production matrix-builder test.
-- **Disproof test**: Reproduce every value through one canonical builder shared by playback and certification.
+- **Current uncertainty**: The test confirms one point. It does not yet certify a bounded source domain.
+- **Required method**: Use outward interval bounds over radius, slope, and every configuration-dependent coefficient.
+
+### Fixed-Mode and Hybrid Uniqueness Scope
+
+- **Fixed-mode theorem**: A P-matrix gives one solution for every right-hand side of one fixed LCP.
+- **Scope limit**: Different fixed systems can each have one solution and still overlap.
+- **Exact production overlap**: Set the stylus friction coefficient to zero.
+- **Contact state**: Use a loaded contact with positive relative slip.
+- **Sliding result**: `SlidingPositive` uses the zero-friction normal operator.
+- **Separated result**: `Separated` uses the same augmented system and passes its current force check.
+- **Consequence**: Both mode labels can describe the same accepted mechanical state.
+- **Additional overlap**: Static limits above kinetic force can make stick and slide branches both feasible.
+- **Deck witness start**: Set platter and record velocity to zero.
+- **Deck witness control**: Separate the hand and stylus, and make the slipmat stick.
+- **Deck witness torque**: Apply `0.00020 N m` of motor torque.
+- **Default bearing limits**: Kinetic torque is `0.00018 N m` and static torque is `0.00024 N m`.
+- **Sticking result**: Zero platter speed and `0.00020 N m` bearing torque pass the static limit.
+- **Sliding result**: Positive sliding gives `3.88313554466e-9 rad/s`.
+- **Sliding slipmat torque**: The result is `1.50976309976e-6 N m`.
+- **Consequence**: Both branches pass and produce different next states.
+- **Other overlaps**: The slipmat, hand, and pickup bearing also have static limits above kinetic limits.
+- **Mask witness**: Let one free gap be `-delta`, where `0 < delta <= 1e-11 m`.
+- **Inactive result**: The inactive mask accepts this penetration through `CONTACT_TOLERANCE_M`.
+- **Active result**: The active mask can close the gap with a positive normal force.
+- **Negative-force case**: The solver accepts forces down to `-1e-10 N` and clamps them to zero.
+- **Theorem mismatch**: These tolerance bands are not the exact complementarity law used by the P-matrix theorem.
+- **Current selection**: Branch order and prior-state hints select the first accepted mode.
+- **Interpretation**: This is a deterministic algorithmic selection law.
+- **Claim limit**: It is not evidence for one unique physical hybrid mode.
+- **Requirement**: Add a constitutive transition law or prove that valid mode interiors cannot overlap.
+- **Alternative**: Form one global mixed complementarity problem and prove a global uniqueness property.
+- **Alternative**: Evaluate all valid candidates and reject materially different results.
+- **Common requirement**: Use outward-certified guards and define redundant static-force selection.
+- **Reference**: The fixed-LCP P-matrix result is at <https://doi.org/10.1137/0120041>.
+- **Reference**: Rigid frictional contact limits are reviewed at <https://arxiv.org/abs/1601.03545>.
+
+### Midpoint Constraint-Rank Counterexample
+
+- **Former projection**: Hand sticking and stylus sticking both used the deck vector `[0, 1]`.
+- **Production stylus row**: The full row also contains `-2 * K / r` times lateral body velocity.
+- **Former effect**: The selector could reject unequal targets before a solve.
+- **Former effect**: Equal targets could remove a physically independent stylus constraint.
+- **Correction**: Keep both rows when the pickup bearing slides and `K` is nonzero.
+- **Dependent case**: Deduplicate the rows when the pickup bearing sticks or `K` is zero.
+- **Permanent rank test**: `hand_and_stylus_sticking_keep_the_independent_body_constraint` covers both cases.
+- **Permanent branch test**: `joint_branch_enforces_independent_and_dependent_sticking_equalities` covers both cases.
+
+### Coupled Contact Certificate Design Record
+
+- **Owner**: `PhysicalRecordPlayer` must own the validated certificate with the loaded source.
+- **Exclusion**: Do not store this profile-dependent proof in the profile-independent trace certificate.
+- **Config binding**: Hash every exact `PhysicalPlaybackConfig` field with versioned tags.
+- **Source binding**: Bind the complete `PhysicalGrooveSourceIdentity` and current generation.
+- **Domain binding**: Bind radius bounds, slope bounds, origin regime, surface, and family catalog.
+- **Algorithm binding**: Bind certificate, operator, family-set, and numerical-solver versions.
+- **Margins**: Store lower bounds for both diagonal minors and the determinant.
+- **Land margin**: Store the one-dimensional land response lower bound.
+- **Numerical margin**: Store a solve-conditioning margin in addition to physical minors.
+- **Load gate**: Build the proof before `load_source` changes player state.
+- **Replacement gate**: Build a prospective proof before a paged cache replacement commits.
+- **Publication gate**: Realtime page publication must update source identity and proof atomically.
+- **Render gate**: Compare cached source and certificate identities once for each render block.
+- **Sample gate**: Check only radius and slope enclosure bounds in the sample loop.
+- **Snapshot gate**: Bind and verify the certificate identity before restore changes state.
+- **Thread rule**: Run interval subdivision and family enumeration outside the audio thread.
+- **Realtime limit**: Resident-page slope maxima do not bound an unpublished whole record.
+- **Requirement**: Add an authoritative whole-record domain or certify each publication transactionally.
 
 This result concerns the reduced rigid sliding model.
 
@@ -1865,9 +1947,13 @@ Enumerate `Elastic`, `SlidingPositive`, and `SlidingNegative` for each wall.
 
 Two loaded walls give at most nine tangential combinations.
 
-The current complete branch product would increase to 2,916 candidates.
+The former Cartesian estimate gave 2,916 candidates.
 
-This value includes all deck, slipmat, hand, bearing, contact, and tangential modes.
+Mask-aware enumeration gives 1,296 candidates when all hand modes are active.
+
+The four wall masks contribute `1 + 3 + 3 + 9 = 16` material-mode combinations.
+
+Recalculate this cap after the final compliance operator exists.
 
 Validate these properties before commit:
 

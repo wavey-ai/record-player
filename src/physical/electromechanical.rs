@@ -154,11 +154,11 @@ pub(crate) fn process_coupled_record_player_midpoint(
     })
 }
 
-fn transform_vector_from_coil(coil: [f64; 2]) -> [f64; 2] {
+pub(crate) fn transform_vector_from_coil(coil: [f64; 2]) -> [f64; 2] {
     matrix_vector(COIL_FROM_MECHANICAL, coil)
 }
 
-fn transform_damping_from_coil(coil: [[f64; 2]; 2]) -> [[f64; 2]; 2] {
+pub(crate) fn transform_damping_from_coil(coil: [[f64; 2]; 2]) -> [[f64; 2]; 2] {
     let mut mechanical = [[0.0; 2]; 2];
     for row in 0..2 {
         for column in 0..2 {

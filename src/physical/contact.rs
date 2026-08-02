@@ -1238,6 +1238,204 @@ const JOINT_RHS_COLUMN: usize = JOINT_MAX_VARIABLES;
 pub(crate) const MAX_MIDPOINT_CANDIDATE_BRANCHES: u32 = 1_296;
 pub(crate) const MAX_MIDPOINT_LINEAR_SOLVES: u32 = 1_296;
 
+/// Stores six dynamic equation RHS values in equation-row order.
+///
+/// The order is platter, record, tip-x, body-x, tip-z, body-z.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct JointDynamicEquationRhs {
+    platter: f64,
+    record: f64,
+    tip_x: f64,
+    body_x: f64,
+    tip_z: f64,
+    body_z: f64,
+}
+
+impl JointDynamicEquationRhs {
+    pub(crate) const fn coefficients_in_equation_row_order(self) -> [f64; JOINT_DYNAMIC_VARIABLES] {
+        [
+            self.platter,
+            self.record,
+            self.tip_x,
+            self.body_x,
+            self.tip_z,
+            self.body_z,
+        ]
+    }
+
+    fn write_contact_column(
+        self,
+        augmented: &mut [[f64; JOINT_MAX_VARIABLES + 1]; JOINT_MAX_VARIABLES],
+        column: usize,
+    ) {
+        let [_, record, tip_x, body_x, tip_z, _] = self.coefficients_in_equation_row_order();
+        // Keep the former assignment and accumulation operations. They preserve
+        // the established signed-zero patterns for inactive force components.
+        augmented[1][column] -= record;
+        augmented[2][column] = -tip_x;
+        augmented[3][column] -= body_x;
+        augmented[4][column] = -tip_z;
+    }
+
+    #[cfg(test)]
+    fn write_rhs(self, augmented: &mut [[f64; JOINT_MAX_VARIABLES + 1]; JOINT_MAX_VARIABLES]) {
+        for (row, coefficient) in self
+            .coefficients_in_equation_row_order()
+            .into_iter()
+            .enumerate()
+        {
+            augmented[row][JOINT_RHS_COLUMN] = coefficient;
+        }
+    }
+}
+
+/// Stores six gap coefficients in dynamic velocity-column order.
+///
+/// The order is platter, record, tip-x, tip-z, body-x, body-z.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct JointDynamicVelocityRow {
+    platter: f64,
+    record: f64,
+    tip_x: f64,
+    tip_z: f64,
+    body_x: f64,
+    body_z: f64,
+}
+
+impl JointDynamicVelocityRow {
+    pub(crate) const fn coefficients_in_velocity_column_order(
+        self,
+    ) -> [f64; JOINT_DYNAMIC_VARIABLES] {
+        [
+            self.platter,
+            self.record,
+            self.tip_x,
+            self.tip_z,
+            self.body_x,
+            self.body_z,
+        ]
+    }
+
+    fn write_constraint_row(self, row: &mut [f64; JOINT_MAX_VARIABLES + 1]) {
+        let [_, record, tip_x, tip_z, body_x, _] = self.coefficients_in_velocity_column_order();
+        // Keep the former assignment and accumulation operations. They preserve
+        // the established signed-zero patterns for inactive velocity components.
+        row[1] = record;
+        row[2] = tip_x;
+        row[3] = tip_z;
+        row[4] += body_x;
+    }
+
+    #[cfg(test)]
+    fn response_for_velocity(self, velocity: [f64; JOINT_MAX_VARIABLES]) -> f64 {
+        self.coefficients_in_velocity_column_order()
+            .into_iter()
+            .zip(velocity)
+            .fold(0.0, |sum, (coefficient, value)| {
+                coefficient.mul_add(value, sum)
+            })
+    }
+}
+
+/// Defines the force and gap operators for one fixed midpoint contact mode.
+///
+/// The normal-contact response is `W = H * M * G`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CoupledContactHgOperator {
+    constraint_count: usize,
+    /// Columns of `G` map projected normal force to the dynamic equation RHS.
+    normal_force_rhs: [JointDynamicEquationRhs; 2],
+    /// Rows of `H` map dynamic velocity to endpoint gap velocity.
+    normal_gap_velocity: [JointDynamicVelocityRow; 2],
+}
+
+impl CoupledContactHgOperator {
+    pub(crate) const fn constraint_count(self) -> usize {
+        self.constraint_count
+    }
+
+    pub(crate) const fn normal_force_rhs(self, constraint: usize) -> JointDynamicEquationRhs {
+        self.normal_force_rhs[constraint]
+    }
+
+    pub(crate) const fn normal_gap_velocity(self, constraint: usize) -> JointDynamicVelocityRow {
+        self.normal_gap_velocity[constraint]
+    }
+}
+
+/// Builds the exact contact operator that the midpoint branch solve uses.
+pub(crate) fn coupled_contact_hg_operator(
+    geometry: MidpointPickupGeometry,
+    dt: f64,
+    friction_coefficient: f64,
+    stylus_mode: StylusTangentialMode,
+    skating_factor: f64,
+) -> CoupledContactHgOperator {
+    let input = geometry.input;
+    let constraint_count = active_constraint_count(input);
+    let effective_slope = wall_effective_slope(input);
+    let sliding_direction = match stylus_mode {
+        StylusTangentialMode::SlidingPositive => 1.0,
+        StylusTangentialMode::SlidingNegative => -1.0,
+        StylusTangentialMode::Separated | StylusTangentialMode::Sticking => 0.0,
+    };
+    let mut normal_force_rhs = [JointDynamicEquationRhs::default(); 2];
+    let mut normal_gap_velocity = [JointDynamicVelocityRow::default(); 2];
+    for constraint in 0..constraint_count {
+        let normal = constraint_normal(input.contact_surface, constraint);
+        let tangential_force_per_projected_normal = match input.contact_surface {
+            PickupContactSurface::GrooveWalls => {
+                effective_slope[constraint] + sliding_direction * friction_coefficient
+            }
+            PickupContactSurface::RecordLand => sliding_direction * friction_coefficient,
+            PickupContactSurface::None => 0.0,
+        };
+        let wall_force_scale = if input.contact_surface == PickupContactSurface::GrooveWalls {
+            1.0 - sliding_direction * friction_coefficient * effective_slope[constraint]
+        } else {
+            1.0
+        };
+        let (sliding_record_rhs, sliding_body_x_rhs) =
+            if stylus_mode != StylusTangentialMode::Sticking {
+                (
+                    -input.groove_radius_m * tangential_force_per_projected_normal,
+                    skating_factor * tangential_force_per_projected_normal,
+                )
+            } else {
+                (0.0, 0.0)
+            };
+        normal_force_rhs[constraint] = JointDynamicEquationRhs {
+            platter: 0.0,
+            record: sliding_record_rhs,
+            tip_x: wall_force_scale * normal[0],
+            body_x: sliding_body_x_rhs,
+            tip_z: wall_force_scale * normal[1],
+            body_z: 0.0,
+        };
+
+        let mut record_gap_coefficient =
+            -normal[0] * geometry.lateral_origin_shift_per_record_velocity_m_s / dt;
+        let mut body_x_gap_coefficient = 0.0;
+        if input.contact_surface == PickupContactSurface::GrooveWalls {
+            record_gap_coefficient -= 0.5 * effective_slope[constraint] * input.groove_radius_m;
+            body_x_gap_coefficient = effective_slope[constraint] * skating_factor;
+        }
+        normal_gap_velocity[constraint] = JointDynamicVelocityRow {
+            platter: 0.0,
+            record: record_gap_coefficient,
+            tip_x: normal[0],
+            tip_z: normal[1],
+            body_x: body_x_gap_coefficient,
+            body_z: 0.0,
+        };
+    }
+    CoupledContactHgOperator {
+        constraint_count,
+        normal_force_rhs,
+        normal_gap_velocity,
+    }
+}
+
 /// Solves the frozen tangent plane, deck, pickup, and cartridge force relation.
 ///
 /// The caller must trace geometry at the explicit angular midpoint based on the
@@ -1424,13 +1622,16 @@ fn solve_joint_branch(
     attempted_linear_solves: &mut u32,
 ) -> Option<JointCandidate> {
     let input = geometry.input;
+    let stylus_body_velocity_coefficient = -2.0 * skating_factor / input.groove_radius_m;
     let static_constraints = select_independent_deck_constraints(
         deck_bearing_mode,
         slipmat_mode,
         hand_mode,
         stylus_mode,
+        pickup_bearing_mode,
         deck.hand_velocity_rad_s,
         -deck.previous_record_velocity_rad_s,
+        stylus_body_velocity_coefficient,
     )?;
     let mut augmented = [[0.0_f64; JOINT_MAX_VARIABLES + 1]; JOINT_MAX_VARIABLES];
     let mut next_column = JOINT_DYNAMIC_VARIABLES;
@@ -1487,48 +1688,33 @@ fn solve_joint_branch(
         pickup_bearing_column,
     );
 
-    let effective_slope = wall_effective_slope(input);
     let friction_coefficient = match input.contact_surface {
         PickupContactSurface::GrooveWalls => pickup.contact.groove_friction_coefficient,
         PickupContactSurface::RecordLand => pickup.contact.record_surface_friction_coefficient,
         PickupContactSurface::None => 0.0,
     };
-    let sliding_direction = match stylus_mode {
-        StylusTangentialMode::SlidingPositive => 1.0,
-        StylusTangentialMode::SlidingNegative => -1.0,
-        StylusTangentialMode::Separated | StylusTangentialMode::Sticking => 0.0,
-    };
+    let contact_operator = coupled_contact_hg_operator(
+        geometry,
+        deck.dt,
+        friction_coefficient,
+        stylus_mode,
+        skating_factor,
+    );
     if stylus_mode == StylusTangentialMode::Sticking {
         if let Some(column) = stylus_force_column {
             augmented[1][column] = -input.groove_radius_m;
             augmented[3][column] = skating_factor;
         }
-    } else {
-        for constraint in 0..active_constraint_count(input) {
-            let Some(column) = lambda_columns[constraint] else {
-                continue;
-            };
-            let tangential_force_per_projected_normal = match input.contact_surface {
-                PickupContactSurface::GrooveWalls => {
-                    effective_slope[constraint] + sliding_direction * friction_coefficient
-                }
-                PickupContactSurface::RecordLand => sliding_direction * friction_coefficient,
-                PickupContactSurface::None => 0.0,
-            };
-            augmented[1][column] += input.groove_radius_m * tangential_force_per_projected_normal;
-            augmented[3][column] -= skating_factor * tangential_force_per_projected_normal;
-        }
     }
-    for constraint in 0..active_constraint_count(input) {
-        if let Some(column) = lambda_columns[constraint] {
-            let normal = constraint_normal(input.contact_surface, constraint);
-            let wall_force_scale = if input.contact_surface == PickupContactSurface::GrooveWalls {
-                1.0 - sliding_direction * friction_coefficient * effective_slope[constraint]
-            } else {
-                1.0
-            };
-            augmented[2][column] = -wall_force_scale * normal[0];
-            augmented[4][column] = -wall_force_scale * normal[1];
+    for (constraint, lambda_column) in lambda_columns
+        .into_iter()
+        .enumerate()
+        .take(contact_operator.constraint_count())
+    {
+        if let Some(column) = lambda_column {
+            contact_operator
+                .normal_force_rhs(constraint)
+                .write_contact_column(&mut augmented, column);
         }
     }
 
@@ -1536,14 +1722,9 @@ fn solve_joint_branch(
     for &constraint in &active_constraints[..active_count] {
         let normal = constraint_normal(input.contact_surface, constraint);
         let displacement = constraint_midpoint_displacement(input, constraint);
-        augmented[next_row][1] =
-            -normal[0] * geometry.lateral_origin_shift_per_record_velocity_m_s / deck.dt;
-        if input.contact_surface == PickupContactSurface::GrooveWalls {
-            augmented[next_row][1] -= 0.5 * effective_slope[constraint] * input.groove_radius_m;
-            augmented[next_row][4] += effective_slope[constraint] * skating_factor;
-        }
-        augmented[next_row][2] = normal[0];
-        augmented[next_row][3] = normal[1];
+        contact_operator
+            .normal_gap_velocity(constraint)
+            .write_constraint_row(&mut augmented[next_row]);
         augmented[next_row][JOINT_RHS_COLUMN] = (displacement
             - dot(normal, pickup.tip_displacement_m)
             + normal[0] * geometry.lateral_origin_shift_bias_m)
@@ -1570,7 +1751,7 @@ fn solve_joint_branch(
     }
     if stylus_force_column.is_some() {
         augmented[next_row][1] = 1.0;
-        augmented[next_row][4] = -2.0 * skating_factor / input.groove_radius_m;
+        augmented[next_row][4] = stylus_body_velocity_coefficient;
         augmented[next_row][JOINT_RHS_COLUMN] = -deck.previous_record_velocity_rad_s;
         next_row += 1;
     }
@@ -1688,27 +1869,33 @@ fn tangential_mode_order(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn select_independent_deck_constraints(
     bearing_mode: CoupledDeckFrictionMode,
     slipmat_mode: CoupledDeckFrictionMode,
     hand_mode: CoupledDeckFrictionMode,
     stylus_mode: StylusTangentialMode,
+    pickup_bearing_mode: BearingMode,
     hand_velocity_rad_s: f64,
     stylus_velocity_rad_s: f64,
+    stylus_body_velocity_coefficient: f64,
 ) -> Option<[bool; 4]> {
+    let stylus_has_independent_body_velocity = stylus_mode == StylusTangentialMode::Sticking
+        && pickup_bearing_mode != BearingMode::Stick
+        && stylus_body_velocity_coefficient != 0.0;
     let requested = [
         bearing_mode.is_sticking().then_some(([1.0, 0.0], 0.0)),
         slipmat_mode.is_sticking().then_some(([1.0, -1.0], 0.0)),
         hand_mode
             .is_sticking()
             .then_some(([0.0, 1.0], hand_velocity_rad_s)),
-        (stylus_mode == StylusTangentialMode::Sticking)
+        (stylus_mode == StylusTangentialMode::Sticking && !stylus_has_independent_body_velocity)
             .then_some(([0.0, 1.0], stylus_velocity_rad_s)),
     ];
     let mut basis_vectors = [[0.0_f64; 2]; 2];
     let mut basis_rhs = [0.0_f64; 2];
     let mut rank = 0;
-    let mut selected = [false; 4];
+    let mut selected = [false, false, false, stylus_has_independent_body_velocity];
     for (index, constraint) in requested.into_iter().enumerate() {
         let Some((vector, rhs)) = constraint else {
             continue;
@@ -3413,6 +3600,479 @@ mod tests {
             192_000.0,
         )
         .unwrap()
+    }
+
+    fn assert_operator_vector_close(
+        actual: [f64; JOINT_DYNAMIC_VARIABLES],
+        expected: [f64; JOINT_DYNAMIC_VARIABLES],
+    ) {
+        for (index, (actual, expected)) in actual.into_iter().zip(expected).enumerate() {
+            let tolerance = 16.0 * f64::EPSILON * actual.abs().max(expected.abs()).max(1.0);
+            assert!(
+                (actual - expected).abs() <= tolerance,
+                "operator coefficient {index}: actual={actual:e}, expected={expected:e}"
+            );
+        }
+    }
+
+    fn probe_coupled_normal_response(
+        deck: DeckMidpointPreparation,
+        pickup: PickupMechanicalState,
+        input: PickupMechanicalInput,
+        relation: PickupElectromagneticForceRelation,
+        operator: CoupledContactHgOperator,
+    ) -> [[f64; 2]; 2] {
+        let mut mobility = [[0.0; JOINT_MAX_VARIABLES + 1]; JOINT_MAX_VARIABLES];
+        assemble_deck_dynamics(
+            &mut mobility,
+            deck,
+            CoupledDeckFrictionMode::SlidingPositive,
+            CoupledDeckFrictionMode::SlidingPositive,
+            CoupledDeckFrictionMode::Separated,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assemble_pickup_dynamics(
+            &mut mobility,
+            pickup,
+            input,
+            relation,
+            BearingMode::Stick,
+            Some(JOINT_DYNAMIC_VARIABLES),
+        );
+        mobility[JOINT_DYNAMIC_VARIABLES][4] = 1.0;
+        for row in &mut mobility {
+            row[JOINT_RHS_COLUMN] = 0.0;
+        }
+
+        let mut response = [[0.0; 2]; 2];
+        for source in 0..operator.constraint_count() {
+            let mut augmented = mobility;
+            operator.normal_force_rhs(source).write_rhs(&mut augmented);
+            let velocity =
+                solve_joint_linear_system(&mut augmented, JOINT_DYNAMIC_VARIABLES + 1).unwrap();
+            for (target, target_response) in response
+                .iter_mut()
+                .enumerate()
+                .take(operator.constraint_count())
+            {
+                target_response[source] = operator
+                    .normal_gap_velocity(target)
+                    .response_for_velocity(velocity);
+            }
+        }
+        response
+    }
+
+    fn explicit_hand_stylus_sticking_branch(
+        previous_record_velocity_rad_s: f64,
+        hand_velocity_rad_s: f64,
+        pickup_bearing_mode: BearingMode,
+    ) -> (JointCandidate, DeckMidpointPreparation, f64) {
+        let sample_rate_hz = 192_000.0;
+        let dt = 1.0 / sample_rate_hz;
+        let deck_config = crate::PhysicalDeckConfig::default();
+        let mut deck = DeckMechanicalState::new(deck_config).unwrap();
+        deck.reset(
+            1.0,
+            previous_record_velocity_rad_s / deck_config.nominal_angular_velocity_rad_s(),
+            0.0,
+            0.0,
+        )
+        .unwrap();
+        let preparation = deck
+            .prepare_midpoint_step(
+                dt,
+                crate::DeckMechanicalControl {
+                    hand_contact: true,
+                    hand_target_angular_velocity_rad_s: hand_velocity_rad_s,
+                    hand_normal_force_n: 100.0,
+                    hand_contact_radius_m: 0.20,
+                    ..crate::DeckMechanicalControl::default()
+                },
+            )
+            .unwrap();
+        let pickup = PickupMechanicalState::new(
+            StylusContactConfig {
+                record_surface_friction_coefficient: 2.0,
+                ..StylusContactConfig::default()
+            },
+            TonearmConfig::default(),
+            sample_rate_hz,
+        )
+        .unwrap();
+        let input = PickupMechanicalInput {
+            land_displacement_m: 1.0e-8,
+            contact_surface: PickupContactSurface::RecordLand,
+            ..PickupMechanicalInput::default()
+        };
+        let geometry = MidpointPickupGeometry {
+            input,
+            lateral_origin_shift_bias_m: 0.0,
+            lateral_origin_shift_per_record_velocity_m_s: 0.0,
+        };
+        let skating_factor = pickup
+            .tonearm
+            .geometry
+            .equivalent_radial_force_n(input.groove_radius_m, 1.0)
+            .unwrap();
+        let mut attempted_linear_solves = 0;
+        let candidate = solve_joint_branch(
+            preparation,
+            pickup,
+            geometry,
+            PickupElectromagneticForceRelation::constant([0.0; 2]).unwrap(),
+            CoupledDeckFrictionMode::SlidingPositive,
+            CoupledDeckFrictionMode::SlidingPositive,
+            CoupledDeckFrictionMode::Sticking,
+            pickup_bearing_mode,
+            0b01,
+            [0, 0],
+            1,
+            StylusTangentialMode::Sticking,
+            skating_factor,
+            &mut attempted_linear_solves,
+        );
+        assert_eq!(attempted_linear_solves, 1);
+        (
+            candidate.unwrap_or_else(|| {
+                panic!(
+                    "expected hand/stylus sticking branch: previous={previous_record_velocity_rad_s:e}, hand={hand_velocity_rad_s:e}, bearing={pickup_bearing_mode:?}"
+                )
+            }),
+            preparation,
+            skating_factor,
+        )
+    }
+
+    #[test]
+    fn midpoint_contact_operator_matches_the_branch_equations() {
+        let dt = 1.0 / 192_000.0;
+        let skating_factor = 0.23;
+        let friction_coefficient = 0.25;
+        let input = PickupMechanicalInput {
+            wall_contacts: test_single_wall_contacts([0.0; 2], [0.35, -0.20]),
+            ..PickupMechanicalInput::default()
+        };
+        let geometry = MidpointPickupGeometry {
+            input,
+            lateral_origin_shift_bias_m: 0.0,
+            lateral_origin_shift_per_record_velocity_m_s: -1.5e-10,
+        };
+        let operator = coupled_contact_hg_operator(
+            geometry,
+            dt,
+            friction_coefficient,
+            StylusTangentialMode::SlidingNegative,
+            skating_factor,
+        );
+        assert_eq!(operator.constraint_count(), 2);
+        for (wall, slope) in [0.35, -0.20].into_iter().enumerate() {
+            let normal = WALL_NORMALS[wall];
+            let tangential_scale = slope - friction_coefficient;
+            let wall_force_scale = 1.0 + friction_coefficient * slope;
+            assert_operator_vector_close(
+                operator
+                    .normal_force_rhs(wall)
+                    .coefficients_in_equation_row_order(),
+                [
+                    0.0,
+                    -input.groove_radius_m * tangential_scale,
+                    wall_force_scale * normal[0],
+                    skating_factor * tangential_scale,
+                    wall_force_scale * normal[1],
+                    0.0,
+                ],
+            );
+            assert_operator_vector_close(
+                operator
+                    .normal_gap_velocity(wall)
+                    .coefficients_in_velocity_column_order(),
+                [
+                    0.0,
+                    -normal[0] * geometry.lateral_origin_shift_per_record_velocity_m_s / dt
+                        - 0.5 * slope * input.groove_radius_m,
+                    normal[0],
+                    normal[1],
+                    slope * skating_factor,
+                    0.0,
+                ],
+            );
+        }
+
+        let land_input = PickupMechanicalInput {
+            contact_surface: PickupContactSurface::RecordLand,
+            ..input
+        };
+        let land_operator = coupled_contact_hg_operator(
+            MidpointPickupGeometry {
+                input: land_input,
+                ..geometry
+            },
+            dt,
+            friction_coefficient,
+            StylusTangentialMode::SlidingPositive,
+            skating_factor,
+        );
+        assert_eq!(land_operator.constraint_count(), 1);
+        assert_operator_vector_close(
+            land_operator
+                .normal_force_rhs(0)
+                .coefficients_in_equation_row_order(),
+            [
+                0.0,
+                -input.groove_radius_m * friction_coefficient,
+                0.0,
+                skating_factor * friction_coefficient,
+                1.0,
+                0.0,
+            ],
+        );
+        assert_operator_vector_close(
+            land_operator
+                .normal_gap_velocity(0)
+                .coefficients_in_velocity_column_order(),
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        );
+
+        let sticking_operator = coupled_contact_hg_operator(
+            geometry,
+            dt,
+            friction_coefficient,
+            StylusTangentialMode::Sticking,
+            skating_factor,
+        );
+        for (wall, normal) in WALL_NORMALS.into_iter().enumerate() {
+            assert_operator_vector_close(
+                sticking_operator
+                    .normal_force_rhs(wall)
+                    .coefficients_in_equation_row_order(),
+                [0.0, 0.0, normal[0], 0.0, normal[1], 0.0],
+            );
+        }
+    }
+
+    #[test]
+    fn contact_operator_writers_preserve_the_signed_zero_layout() {
+        let dt = 1.0 / 192_000.0;
+        let input = PickupMechanicalInput {
+            contact_surface: PickupContactSurface::RecordLand,
+            ..PickupMechanicalInput::default()
+        };
+        let operator = coupled_contact_hg_operator(
+            MidpointPickupGeometry {
+                input,
+                lateral_origin_shift_bias_m: 0.0,
+                lateral_origin_shift_per_record_velocity_m_s: 0.0,
+            },
+            dt,
+            StylusContactConfig::default().record_surface_friction_coefficient,
+            StylusTangentialMode::Sticking,
+            0.25,
+        );
+        let mut augmented = [[0.0; JOINT_MAX_VARIABLES + 1]; JOINT_MAX_VARIABLES];
+        operator
+            .normal_force_rhs(0)
+            .write_contact_column(&mut augmented, JOINT_DYNAMIC_VARIABLES);
+        let force_column_bits =
+            [0, 1, 2, 3, 4, 5].map(|row| augmented[row][JOINT_DYNAMIC_VARIABLES].to_bits());
+        assert_eq!(
+            force_column_bits,
+            [0.0, 0.0, -0.0, 0.0, -1.0, 0.0].map(f64::to_bits),
+        );
+
+        operator
+            .normal_gap_velocity(0)
+            .write_constraint_row(&mut augmented[JOINT_DYNAMIC_VARIABLES]);
+        let gap_row: [f64; JOINT_DYNAMIC_VARIABLES] = augmented[JOINT_DYNAMIC_VARIABLES]
+            [..JOINT_DYNAMIC_VARIABLES]
+            .try_into()
+            .unwrap();
+        let gap_row_bits = gap_row.map(f64::to_bits);
+        assert_eq!(
+            gap_row_bits,
+            [0.0, -0.0, 0.0, 1.0, 0.0, 0.0].map(f64::to_bits),
+        );
+    }
+
+    #[test]
+    fn admitted_midpoint_configuration_has_a_negative_normal_minor() {
+        let sample_rate_hz = 192_000.0;
+        let dt = 1.0 / sample_rate_hz;
+        let deck_config = crate::PhysicalDeckConfig {
+            record_inertia_kg_m2: 1.0e-7,
+            ..crate::PhysicalDeckConfig::default()
+        };
+        let mut deck = DeckMechanicalState::new(deck_config).unwrap();
+        deck.reset(1.0, 1.0, 0.0, 0.0).unwrap();
+        let preparation = deck
+            .prepare_midpoint_step(dt, crate::DeckMechanicalControl::default())
+            .unwrap();
+
+        let contact = StylusContactConfig {
+            moving_mass_kg: 1.0e-2,
+            ..StylusContactConfig::default()
+        };
+        let pickup =
+            PickupMechanicalState::new(contact, TonearmConfig::default(), sample_rate_hz).unwrap();
+        let input = PickupMechanicalInput {
+            wall_contacts: test_single_wall_contacts([0.0; 2], [-0.125; 2]),
+            ..PickupMechanicalInput::default()
+        };
+        validate_input(input).unwrap();
+        validate_friction_geometry(contact, input).unwrap();
+        assert!(groove_friction_geometry_is_well_conditioned(
+            contact.groove_friction_coefficient,
+            0.125,
+        ));
+
+        let geometry = MidpointPickupGeometry {
+            input,
+            lateral_origin_shift_bias_m: 0.0,
+            lateral_origin_shift_per_record_velocity_m_s: -125.0e-6 * 0.5 * dt
+                / std::f64::consts::TAU,
+        };
+        let skating_factor = pickup
+            .tonearm
+            .geometry
+            .equivalent_radial_force_n(input.groove_radius_m, 1.0)
+            .unwrap();
+        let operator = coupled_contact_hg_operator(
+            geometry,
+            dt,
+            contact.groove_friction_coefficient,
+            StylusTangentialMode::SlidingPositive,
+            skating_factor,
+        );
+        let cartridge_config = crate::physical::MovingMagnetCartridgeConfig {
+            generator_coefficient_v_s_per_m: 1.0e-12,
+            generator_coefficient_source: crate::physical::GeneratorCoefficientSource::UserSupplied,
+            ..crate::physical::MovingMagnetCartridgeConfig::default()
+        };
+        let cartridge = crate::physical::MovingMagnetCartridge::new(cartridge_config).unwrap();
+        let affine = cartridge.prepare_affine_step(dt).unwrap();
+        let mechanical_bias = crate::physical::electromechanical::transform_vector_from_coil(
+            affine.reaction_force_bias_n(),
+        );
+        let mechanical_damping = crate::physical::electromechanical::transform_damping_from_coil(
+            affine.reciprocal_damping_n_s_per_m(),
+        );
+        let relation =
+            PickupElectromagneticForceRelation::new(mechanical_bias, mechanical_damping).unwrap();
+        assert_eq!(relation.force_bias_n(), mechanical_bias);
+        assert_eq!(relation.reciprocal_damping_n_s_per_m(), mechanical_damping,);
+        assert!(mechanical_damping[0][0] > 0.0);
+        assert!(mechanical_damping[1][1] > 0.0);
+        assert!(
+            mechanical_damping[0][0] * mechanical_damping[1][1]
+                - mechanical_damping[0][1] * mechanical_damping[1][0]
+                >= 0.0
+        );
+        let response =
+            probe_coupled_normal_response(preparation, pickup, input, relation, operator);
+
+        assert!(
+            response[0][0] < 0.0,
+            "expected a negative principal minor, W={response:?}"
+        );
+        assert!(
+            (response[0][0] + 0.007_329_826_622_361_105).abs() < 1.0e-12,
+            "unexpected witness response, W={response:?}"
+        );
+    }
+
+    #[test]
+    fn hand_and_stylus_sticking_keep_the_independent_body_constraint() {
+        let selected = select_independent_deck_constraints(
+            CoupledDeckFrictionMode::SlidingPositive,
+            CoupledDeckFrictionMode::SlidingPositive,
+            CoupledDeckFrictionMode::Sticking,
+            StylusTangentialMode::Sticking,
+            BearingMode::Positive,
+            0.25,
+            -0.50,
+            -1.0,
+        )
+        .unwrap();
+        assert_eq!(selected, [false, false, true, true]);
+
+        assert_eq!(
+            select_independent_deck_constraints(
+                CoupledDeckFrictionMode::SlidingPositive,
+                CoupledDeckFrictionMode::SlidingPositive,
+                CoupledDeckFrictionMode::Sticking,
+                StylusTangentialMode::Sticking,
+                BearingMode::Stick,
+                0.25,
+                -0.50,
+                -1.0,
+            ),
+            None,
+        );
+        assert_eq!(
+            select_independent_deck_constraints(
+                CoupledDeckFrictionMode::SlidingPositive,
+                CoupledDeckFrictionMode::SlidingPositive,
+                CoupledDeckFrictionMode::Sticking,
+                StylusTangentialMode::Sticking,
+                BearingMode::Positive,
+                0.25,
+                -0.50,
+                0.0,
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn joint_branch_enforces_independent_and_dependent_sticking_equalities() {
+        let groove_radius_m = PickupMechanicalInput::default().groove_radius_m;
+        let target_body_velocity_m_s = 1.0e-8;
+        let skating_factor = TonearmConfig::default()
+            .geometry
+            .equivalent_radial_force_n(groove_radius_m, 1.0)
+            .unwrap();
+        let hand_velocity_rad_s = 2.0 * skating_factor * target_body_velocity_m_s / groove_radius_m;
+        let (independent, independent_deck, _) =
+            explicit_hand_stylus_sticking_branch(0.0, hand_velocity_rad_s, BearingMode::Positive);
+        assert!(independent.pickup_solution.body_velocity_m_s[0] > 0.0);
+        assert!(
+            (independent.deck_solution.record_velocity_rad_s
+                - independent_deck.hand_velocity_rad_s)
+                .abs()
+                < 1.0e-12
+        );
+        assert!(
+            (0.5 * groove_radius_m
+                * (independent_deck.previous_record_velocity_rad_s
+                    + independent.deck_solution.record_velocity_rad_s)
+                - skating_factor * independent.pickup_solution.body_velocity_m_s[0])
+                .abs()
+                < 1.0e-12
+        );
+
+        let (dependent, dependent_deck, dependent_skating_factor) =
+            explicit_hand_stylus_sticking_branch(
+                -hand_velocity_rad_s,
+                hand_velocity_rad_s,
+                BearingMode::Stick,
+            );
+        assert_eq!(dependent.pickup_solution.body_velocity_m_s[0], 0.0);
+        assert!(
+            (dependent.deck_solution.record_velocity_rad_s - dependent_deck.hand_velocity_rad_s)
+                .abs()
+                < 1.0e-12
+        );
+        assert!(
+            (0.5 * groove_radius_m
+                * (dependent_deck.previous_record_velocity_rad_s
+                    + dependent.deck_solution.record_velocity_rad_s)
+                - dependent_skating_factor * dependent.pickup_solution.body_velocity_m_s[0])
+                .abs()
+                < 1.0e-12
+        );
     }
 
     #[test]

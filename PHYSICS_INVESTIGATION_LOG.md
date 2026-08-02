@@ -611,7 +611,7 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Limit**: This scalar condition is not a coupled Painlevé well-posedness proof.
 - **Reason**: The coupled response also depends on arm geometry, mass, damping, deck inertia, and both contacts.
 - **Requirement**: Prove the active Delassus matrix is a P-matrix over the admitted profile domain.
-- **Provisional calculation**: The current admitted domain contains a negative one-contact principal minor.
+- **Confirmed calculation**: The current admitted domain contains a negative one-contact principal minor.
 - **Witness**: Use record inertia `1e-7 kg m^2` and stylus moving mass `0.01 kg`.
 - **Witness**: Use friction `0.25`, wall slope `-0.125`, and radius `0.14605 m`.
 - **Witness**: Use the default tonearm and a small valid positive generator coefficient.
@@ -619,12 +619,50 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Scalar result**: The current test accepts `mu * abs(p) = 0.03125`.
 - **Calculated result**: The deck contribution is `-0.007866686227009534`.
 - **Calculated result**: The pickup contribution is `0.000536859604648429`.
-- **Provisional result**: The one-wall minor is `-0.007329826622361105`.
+- **Confirmed result**: The one-wall minor is `-0.007329826622361105`.
 - **Consequence**: The current scalar condition does not prove existence or uniqueness.
-- **Requirement**: Certify every profile and source against all 48 sliding Delassus families.
+- **Production parity**: Playback and the witness now use one canonical midpoint `H` and `G` builder.
+- **Order protection**: Typed vectors separate equation-row order from velocity-column order.
+- **Bit protection**: Production writers retain the former signed-zero coefficient layout.
+- **Permanent test**: `admitted_midpoint_configuration_has_a_negative_normal_minor` reproduces the negative minor.
+- **Family correction**: The former 48-family count covers groove-wall sliding only.
+- **Family basis**: There are 24 nominal mechanical mobility classes and two sliding signs.
+- **Additional surfaces**: Record-land sliding adds another 48 labeled families.
+- **Additional modes**: Groove and land sticking add 24 labeled families for each surface.
+- **Origin regimes**: Interior spiral motion and a held program boundary use different groove rows.
+- **Separated mode**: Zero-friction separation can duplicate a sliding operator with a different mode label.
+- **Labeled catalog**: Groove contact has 192 families across four stylus labels and two origin laws.
+- **Labeled catalog**: Record-land contact adds 96 families across four stylus labels.
+- **Mask catalog**: Principal-minor coverage reduces the structurally distinct mode-mask catalog to 768 entries.
+- **Runtime count**: One hand-active groove sample evaluates at most 1,053 current branches.
+- **Bound correction**: The registered 1,296 limit is safe, but it is not the exact fallback count.
+- **Implementation requirement**: Generate the versioned family catalog from production logic.
+- **Requirement**: Certify every permitted contact family for each profile and source.
 - **Requirement**: Reject an unproved operator before playback changes state.
-- **Verification gap**: This witness does not yet have a permanent production-builder parity test.
-- **Disproof test**: Rebuild the witness through the canonical production matrix builder.
+- **Theorem scope**: A P-matrix proves uniqueness only for one fixed linear complementarity problem.
+- **Hybrid limit**: It does not prove that two different discrete modes cannot both pass.
+- **Exact overlap**: At zero stylus friction, loaded positive sliding and separation can use the same system.
+- **Deck overlap**: Static-to-kinetic force gaps can also make stick and slide branches both feasible.
+- **Exact deck witness**: A `0.00020 N m` motor torque permits both default bearing modes from rest.
+- **Sliding witness result**: The alternate platter speed is `3.88313554466e-9 rad/s`.
+- **Mask overlap**: Contact tolerances can accept both active and inactive masks near zero gap.
+- **Clamp overlap**: A small negative multiplier can pass the force tolerance and then clamp to zero.
+- **Theorem mismatch**: These tolerance bands are outside the exact LCP covered by the P-matrix theorem.
+- **Selection result**: The current branch order gives a deterministic result, not a unique physical mode.
+- **Claim limit**: Do not describe fixed-mode certification as complete hybrid uniqueness.
+- **Reference**: Murty proves the fixed-LCP P-matrix equivalence at <https://doi.org/10.1137/0120041>.
+- **Reference**: Frictional rigid contact can remain indeterminate; see <https://arxiv.org/abs/1601.03545>.
+- **Former defect**: The constraint selector projected stylus sticking onto record velocity only.
+- **Effect**: It could discard the independent lateral body term from the full sticking equality.
+- **Correction**: The selector now retains that term when the pickup bearing permits lateral body motion.
+- **Permanent test**: `hand_and_stylus_sticking_keep_the_independent_body_constraint` covers the rank decision.
+- **Permanent test**: `joint_branch_enforces_independent_and_dependent_sticking_equalities` covers complete branch solves.
+- **Direct-path gap**: The public standalone pickup solver still has a separate contact-operator assembly.
+- **Requirement**: Give that path its own canonical operator and bounded admission proof.
+- **Resolution option**: Add a measured transition law with mutually exclusive stick, slide, and release guards.
+- **Resolution option**: Prove one global mixed complementarity problem is strongly monotone.
+- **Resolution option**: Compare all valid candidates and reject materially different results.
+- **Common requirement**: Use outward-certified complementarity tests and a rule for redundant static multipliers.
 - **Finding**: The general trace slope cap is `16`.
 - **Finding**: The default groove friction coefficient is `0.25`.
 - **Consequence**: Those two general limits do not prove the friction condition.
@@ -654,7 +692,10 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Claim limit**: Sliding geometry is corrected, but rapid reversal fidelity is not complete.
 - **Working hypothesis**: Use one passive Jenkins tangential element for each unique wall contact.
 - **Working hypothesis**: Enumerate elastic and two sliding branches independently for both walls.
-- **Calculated cap**: The complete current mode product would contain 2,916 candidate branches.
+- **Former loose cap**: The Cartesian estimate was 2,916 candidate branches.
+- **Corrected cap**: Mask-aware two-wall Jenkins enumeration gives 1,296 candidates with active hand modes.
+- **Reason**: The four wall masks have `1 + 3 + 3 + 9 = 16` material-mode combinations.
+- **Open count**: Recalculate the cap after the final compliance equations and production enumeration exist.
 - **Identity requirement**: Key material state by source, generation, wall, and canonical groove cell.
 - **Rejected identity**: Do not key material state by contact-array order or floating-point midpoint bits.
 - **Persistence limit**: A finite state bank cannot retain energetic cells for unlimited playback.
