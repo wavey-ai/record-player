@@ -34,7 +34,7 @@ Each case must contain these items:
 | `PVC-004` | `RP-009`, `RP-013`, `RP-023`, `RP-033` | One wall has two separated near-equal envelope maxima | Confirmed; tracer rejects unresolved height order |
 | `PVC-005` | `RP-003`, `RP-005`, `RP-034` | Named scratch presets do not match their intended technique topology | Replacement topology passes; human timing calibration remains open |
 | `PVC-006` | `RP-008`, `RP-020`, `RP-024` | Passive cartridge magnetic-loss invariants | Implemented and green; cartridge measurement remains open |
-| `PVC-007` | `RP-008`, `RP-013`, `RP-026`, `RP-033`, `RP-035`, `RP-036`, `RP-038` | Passive groove compliance, coupled patches, and vector friction | Sliding vector correction passes; sloped sticking, compliance, and measurements remain open |
+| `PVC-007` | `RP-008`, `RP-013`, `RP-026`, `RP-033`, `RP-035`, `RP-036`, `RP-038` | Passive groove compliance, coupled patches, and vector friction | Certified coordinates pass; continuous state, sloped sticking, compliance, and measurements remain open |
 
 ## PVC-001: Spherical Envelope Global-Maximum Failure
 
@@ -1673,6 +1673,40 @@ The response also depends on skating geometry, masses, damping, deck inertia, an
 
 The accepted profile domain needs a P-matrix proof or an equivalent bounded proof.
 
+### Coupled Uniqueness Counterexample
+
+- **Observation date**: 2026-08-02.
+- **Status**: The current scalar friction gate does not prove the admitted operator.
+- **Timestep**: Use `1 / 192000` seconds.
+- **Record inertia**: Use `1e-7` kilogram square meters.
+- **Stylus moving mass**: Use `0.01` kilograms.
+- **Friction coefficient**: Use `0.25`.
+- **Wall slope**: Use `-0.125`.
+- **Groove radius**: Use `0.14605` meters.
+- **Groove pitch**: Use `125e-6` meters per revolution.
+- **Tonearm**: Use the default tonearm geometry and axis values.
+- **Generator coefficient**: Use a small valid positive value, such as `1e-12` volt seconds per meter.
+- **Deck mode**: The deck bearing and slipmat slide.
+- **Hand mode**: The hand is separated.
+- **Pickup mode**: The pickup bearing sticks.
+- **Tangential mode**: The stylus uses positive sliding.
+- **Scalar admission**: `mu * abs(p)` is `0.03125`.
+- **Deck contribution**: The value is `-0.007866686227009534`.
+- **Pickup contribution**: The value is `0.000536859604648429`.
+- **One-wall minor**: `W_00` is `-0.007329826622361105`.
+- **Conclusion**: The one-contact Delassus operator is not positive for this admitted witness.
+- **Physical effect**: A one-dimensional complementarity problem can have two solutions or no solution.
+- **Mode count**: The current midpoint solver has 24 mobility classes and 48 signed sliding families.
+- **Required proof**: Prove both diagonal minors and the determinant for every family.
+- **Required domain**: Bind radius, both slopes, pitch, tonearm geometry, damping, profile, source, and generation.
+- **Required failure**: Reject an uncertified operator before any state change.
+- **Current uncertainty**: The calculated witness does not yet use a permanent production matrix-builder test.
+- **Disproof test**: Reproduce every value through one canonical builder shared by playback and certification.
+
+This result concerns the reduced rigid sliding model.
+
+It does not resolve sloped sticking or measured material behavior.
+
 ### Exact-Zero Sloped Sticking Blocker
 
 - **Status**: Confirmed model gap.
@@ -1867,11 +1901,11 @@ Reject an interval that cannot isolate all required cell weights.
 
 Use the typed error `TangentialContactIdentityNotIsolated` for that case.
 
-The current certified algorithms already calculate outward coordinate intervals.
+The certified algorithms now return their outward coordinate intervals.
 
-Production result types currently discard those intervals.
+The result uses an exact `u64` origin and two local `f64` bounds.
 
-Translate the interval to the absolute base-source coordinate with outward arithmetic.
+This split preserves large origins without one lossy floating-point addition.
 
 Do not reconstruct it from a midpoint, slope, page, or travel direction.
 
@@ -1885,6 +1919,12 @@ This grid does not claim a measured physical footprint.
 
 Both closed interval bounds must select the same cell.
 
+The final record coordinate belongs to the last real spline cell.
+
+The provisional resolver rejects forged, nonordered, outside-source, and multiple-contact input.
+
+Deserialization removes the private live-trace seal.
+
 Keep the state bank outside `PickupMechanicalState`.
 
 The solver receives only prior values and proposed updates for the two walls.
@@ -1896,6 +1936,123 @@ Use fixed page-aligned or set-associative state slots.
 Do not evict a slot that contains recoverable energy.
 
 Return `TangentialStateCapacityExceeded` before any state change.
+
+### Certified Identity Plumbing Checkpoint
+
+- **Observation date**: 2026-08-02.
+- **Schema version**: `TANGENTIAL_CONTACT_IDENTITY_VERSION` is `1`.
+- **Trace coverage**: Class A, Class B, exhaustive, scalar, and multiresolution paths retain certified bounds.
+- **Path coverage**: Immutable pages, real-time pages, player transforms, pickup input, and telemetry preserve the bounds.
+- **Large-origin result**: An exactly representable center above `2^53` preserves its `u64` origin.
+- **Large-origin limit**: General unrepresentable centers above `2^53` are not supported.
+- **Cell rule**: An exact singleton at an internal join selects the right cell.
+- **End rule**: Exact frame `N - 1` selects cell `N - 2`.
+- **Edge blocker**: Actual outward record-edge intervals still extend outside the source and reject.
+- **Seam result**: Page and whole-record traces resolve the same cell at both seam sides.
+- **Direction result**: The cell remains equal for advances of `-20` and `+20` frames.
+- **Raw-bounds result**: Valid page and whole-record enclosures can have different origins and widths.
+- **Test rule**: Compare certified trace limits and the resolved key across representations.
+- **Rejected rule**: Do not require raw bound bits to match across different coordinate origins.
+- **Allocation result**: Live tracing and key resolution do not allocate memory.
+- **Snapshot versions**: Pickup is `5`, player is `10`, and renderer is `4`.
+
+Reproduction commands:
+
+```text
+cargo test --lib physical::stylus::tests
+cargo test --lib physical::tangential_identity::tests
+cargo test --lib physical::paged_groove::tests::bounded_cache_matches_a_monolithic_groove_asset -- --exact
+cargo test --lib physical::realtime_paged_groove::tests::traces_match_immutable_pages_at_seams_in_both_directions_and_twenty_times -- --exact
+```
+
+### Hard-Cell Liveness Counterexample
+
+- **Input**: Use a flat Class A wall and center the stylus at source frame `64`.
+- **Certified result**: The lower bound is below `64`, and the upper bound is above `64`.
+- **Cell result**: The interval covers base spline cells `63` and `64`.
+- **Resolver result**: The resolver returns `TangentialContactIdentityNotIsolated`.
+- **Phase A result**: Rigid playback continues because it does not request a material key.
+- **General result**: A continuous trace must cross every finite hard cell boundary.
+- **Consequence**: A hard one-cell key cannot guarantee uninterrupted rapid scratching.
+- **Rejected workaround**: Do not select a cell from the interval midpoint or travel direction.
+- **Requirement**: Add a continuous partition of unity with the same transpose force map.
+- **Claim limit**: The current key proves identity plumbing only.
+
+Permanent test:
+
+```text
+physical::stylus::tests::class_a_flat_integer_contact_remains_fail_closed_at_a_cell_join
+```
+
+### Continuous Material-Map Hypothesis
+
+- **Status**: Design hypothesis only. Production does not use this map.
+- **Selected coordinate**: Let `x = k + u`, where `0 <= u <= 1`.
+- **Normalization**: Let `d = (1 - u)^2 + u^2`.
+- **Left amplitude**: Let `a_0 = (1 - u) / sqrt(d)`.
+- **Right amplitude**: Let `a_1 = u / sqrt(d)`.
+- **Identity rule**: Derive possible keys from the certified interval only.
+- **Weight rule**: Derive amplitudes from a tracer-selected coordinate inside that interval.
+- **Boundary capacity**: A narrow interval can require three possible coefficient keys.
+- **Reciprocity rule**: Use the same amplitude bits for state scatter and force gather.
+
+The normalized amplitudes satisfy:
+
+```text
+a_0^2 + a_1^2 = 1
+```
+
+Raw linear amplitudes do not satisfy this condition.
+
+Their effective self stiffness is:
+
+```text
+k * ((1 - u)^2 + u^2)
+```
+
+This value falls from `k` at a node to `k / 2` at a cell center.
+
+Therefore, raw linear amplitudes are rejected for the uniform Jenkins seed.
+
+Use one scalar Jenkins yield surface for each wall.
+
+For coefficient state `q`, use:
+
+```text
+q_trial = q_0 + a * DeltaGamma
+f_trial = a dot (-k * q_trial)
+DeltaGamma_pl = (f_target - f_trial) / (k * (a dot a))
+q_1 = q_trial - a * DeltaGamma_pl
+```
+
+The proposed backward-Euler energy identity is:
+
+```text
+f * DeltaGamma
+  = -(E_1 - E_0)
+    - 0.5 * k * norm_squared(Deltaq)
+    - D_pl
+```
+
+Require `D_pl = -f * DeltaGamma_pl >= 0`.
+
+### Rapid-Sweep Material-State Blocker
+
+- **Admission limit**: One physics sample can advance by `-20` or `+20` source frames.
+- **Center-sweep capacity**: A 20-frame move can require at least 23 possible coefficient keys.
+- **Root-motion risk**: Contact offset can move within the spherical support during that sample.
+- **Branch risk**: The global contact can change envelope branches during that sample.
+- **Certificate gap**: No current certificate bounds contact-root travel between physics samples.
+- **Consequence**: One midpoint stencil can skip material state during intensive scratching.
+- **Requirement**: Add a certified contact-trajectory bound.
+- **Requirement**: Use deterministic event substeps or a proved swept return map.
+- **Requirement**: Register a fixed work cap for the complete sweep.
+- **Reference gate**: Compare against converged microsteps at `+20`, `-20`, stop, and one-sample reversals.
+- **Claim limit**: Do not activate Jenkins state until these tests pass.
+
+Cache generation also fails to identify one physical record instance.
+
+Add `GrooveMaterialInstanceId` before state can survive representation changes correctly.
 
 ### Tangential-State Persistence Limit
 

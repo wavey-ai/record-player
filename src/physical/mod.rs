@@ -13,6 +13,7 @@ pub mod renderer;
 pub mod riaa;
 pub mod streaming_cutter;
 pub mod stylus;
+pub(crate) mod tangential_identity;
 pub mod tonearm;
 pub mod trace_admission;
 
@@ -40,8 +41,9 @@ pub use stylus::{
     trace_spherical_45_45_wall_blended_uniform_contacts,
     trace_spherical_45_45_wall_multiresolution_contacts, trace_spherical_45_45_wall_uniform,
     trace_spherical_45_45_wall_uniform_contacts, trace_spherical_uniform,
-    trace_spherical_uniform_contacts, StylusGeometry, StylusTraceContact, StylusTraceContactSet,
-    StylusTraceError, StylusTraceSample, MAX_SPHERICAL_TRACE_CONTACTS_PER_WALL,
+    trace_spherical_uniform_contacts, CertifiedContactPositionInterval, StylusGeometry,
+    StylusTraceContact, StylusTraceContactSet, StylusTraceError, StylusTraceSample,
+    MAX_SPHERICAL_TRACE_CONTACTS_PER_WALL,
 };
 pub use tonearm::*;
 pub use trace_admission::{

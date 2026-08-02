@@ -2415,6 +2415,65 @@ mod tests {
         }
     }
 
+    fn trace_without_certified_position_intervals(
+        mut trace: StylusTraceContactSet,
+    ) -> StylusTraceContactSet {
+        for contact in &mut trace.contacts[..usize::from(trace.contact_count)] {
+            contact.certified_position_interval = None;
+        }
+        trace
+    }
+
+    fn assert_same_trace_and_material_cell(
+        actual: StylusTraceContactSet,
+        expected: StylusTraceContactSet,
+        generation: GrooveGenerationId,
+        wall: usize,
+    ) {
+        assert_eq!(
+            actual.center_displacement_m.to_bits(),
+            expected.center_displacement_m.to_bits()
+        );
+        assert_eq!(actual.contact_count, expected.contact_count);
+        let count = usize::from(actual.contact_count);
+        for (actual, expected) in actual.contacts[..count]
+            .iter()
+            .zip(&expected.contacts[..count])
+        {
+            assert_eq!(
+                actual.groove_displacement_m.to_bits(),
+                expected.groove_displacement_m.to_bits()
+            );
+            assert_eq!(
+                actual.groove_slope.to_bits(),
+                expected.groove_slope.to_bits()
+            );
+            assert!(
+                (actual.contact_offset_m - expected.contact_offset_m).abs()
+                    <= super::super::stylus::SPHERICAL_TRACE_CONTACT_POSITION_ERROR_BOUND_M
+            );
+            assert!(
+                (actual.tangent_residual - expected.tangent_residual).abs()
+                    <= super::super::stylus::SPHERICAL_TRACE_TANGENT_RESIDUAL_ERROR_BOUND
+            );
+        }
+        assert_eq!(
+            trace_without_certified_position_intervals(actual).contacts[count..],
+            trace_without_certified_position_intervals(expected).contacts[count..]
+        );
+        let resolve = |contacts| {
+            super::super::tangential_identity::resolve_tangential_contact_identity(
+                source_content_identity(),
+                generation.get(),
+                TOTAL_FRAMES,
+                wall,
+                contacts,
+            )
+            .unwrap()
+        };
+        assert_eq!(resolve(actual), resolve(expected));
+    }
+
     #[test]
     fn forward_and_reverse_lookup_are_identical_across_the_seam() {
         let asset = complete_asset();
@@ -2529,22 +2588,22 @@ mod tests {
             (
                 SEAM_FRAME as f64 - 0.25,
                 GrooveTravelDirection::Forward,
-                10.0,
+                20.0,
             ),
             (
                 SEAM_FRAME as f64 - 0.25,
                 GrooveTravelDirection::Reverse,
-                -10.0,
+                -20.0,
             ),
             (
                 SEAM_FRAME as f64 + 0.25,
                 GrooveTravelDirection::Forward,
-                10.0,
+                20.0,
             ),
             (
                 SEAM_FRAME as f64 + 0.25,
                 GrooveTravelDirection::Reverse,
-                -10.0,
+                -20.0,
             ),
         ] {
             let page_view = asset
@@ -2565,13 +2624,11 @@ mod tests {
                     .unwrap(),
                 position,
             );
-            assert_eq!(
-                page_trace.center_displacement_m.to_bits(),
-                contiguous_trace.center_displacement_m.to_bits()
-            );
-            assert_eq!(
-                page_trace.contacts[0].groove_slope.to_bits(),
-                contiguous_trace.contacts[0].groove_slope.to_bits()
+            assert_same_trace_and_material_cell(
+                page_trace,
+                contiguous_trace,
+                asset.metadata().generation(),
+                0,
             );
         }
     }
@@ -3037,10 +3094,7 @@ mod tests {
                     }
                     .unwrap();
                     let actual = cached.wall_contacts[wall];
-                    assert_eq!(
-                        actual, expected,
-                        "position {position}, source advance {source_frame_advance}, wall {wall}"
-                    );
+                    assert_same_trace_and_material_cell(actual, expected, cache.generation(), wall);
                 }
             }
         }

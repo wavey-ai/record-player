@@ -3858,6 +3858,22 @@ mod tests {
                 super::super::PagedGrooveTraceResolution::Miss(miss) => panic!("miss: {miss:?}"),
             };
             assert_eq!(actual.wall_contacts, expected.wall_contacts);
+            for wall in 0..2 {
+                let resolve = |contacts| {
+                    super::super::tangential_identity::resolve_tangential_contact_identity(
+                        metadata().source_content_identity(),
+                        generation().get(),
+                        TOTAL_FRAMES,
+                        wall,
+                        contacts,
+                    )
+                    .unwrap()
+                };
+                assert_eq!(
+                    resolve(actual.wall_contacts[wall]),
+                    resolve(expected.wall_contacts[wall])
+                );
+            }
             assert_eq!(
                 actual.spatial_filter_lower_step_frames,
                 expected.spatial_filter_lower_step_frames

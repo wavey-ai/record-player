@@ -40,7 +40,7 @@ use crate::{
     DeckMechanicalError, DeckMechanicalSnapshot, DeckMechanicalState, DeckMechanicalTelemetry,
 };
 
-const PHYSICAL_RECORD_PLAYER_SNAPSHOT_VERSION: u32 = 9;
+const PHYSICAL_RECORD_PLAYER_SNAPSHOT_VERSION: u32 = 10;
 const MAX_EXACT_GROOVE_FRAME_COUNT: u64 = 1_u64 << 53;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1780,6 +1780,39 @@ mod tests {
         volts_per_full_scale: 10.0,
     };
 
+    #[test]
+    fn transform_wall_contact_set_preserves_certified_material_lineage() {
+        let samples = [0.0_f32; 128];
+        let original = crate::physical::trace_spherical_uniform_contacts(
+            &samples,
+            64.375,
+            2.0e-6,
+            StylusGeometry::default(),
+        )
+        .unwrap();
+        let transformed = transform_wall_contact_set(original, 7.0e-6, true);
+        assert_eq!(
+            transformed.contacts[0].certified_position_interval,
+            original.contacts[0].certified_position_interval
+        );
+        assert_eq!(
+            transformed.center_displacement_m,
+            original.center_displacement_m + 7.0e-6
+        );
+        assert_eq!(transformed.contacts[0].groove_slope, 0.0);
+        let resolve = |contacts| {
+            super::super::tangential_identity::resolve_tangential_contact_identity(
+                GrooveContentIdentity::from_sha256([0x63; 32]),
+                0,
+                samples.len() as u64,
+                0,
+                contacts,
+            )
+            .unwrap()
+        };
+        assert_eq!(resolve(transformed), resolve(original));
+    }
+
     fn sine_groove(profile: &PhysicalProfile, frequency_hz: f64) -> Arc<GrooveAsset> {
         stereo_sine_groove(profile, frequency_hz, 1.0)
     }
@@ -2543,7 +2576,9 @@ mod tests {
 
         let mut preroll = vec![0.0_f32; 2 * 256];
         player.render_internal_interleaved(&mut preroll).unwrap();
-        let json = serde_json::to_string(&player.snapshot()).unwrap();
+        let snapshot = player.snapshot();
+        assert_eq!(snapshot.version, 10);
+        let json = serde_json::to_string(&snapshot).unwrap();
         let checkpoint: PhysicalRecordPlayerSnapshot = serde_json::from_str(&json).unwrap();
 
         let mut expected = vec![0.0_f32; 2 * 768];
@@ -2836,6 +2871,23 @@ mod tests {
                 paged_telemetry.spatial_filter_upper_step_frames,
                 contiguous_telemetry.spatial_filter_upper_step_frames
             );
+            for wall in 0..2 {
+                let resolve = |contacts| {
+                    super::super::tangential_identity::resolve_tangential_contact_identity(
+                        groove.provenance().content_identity(),
+                        cache.generation().get(),
+                        groove.frame_count() as u64,
+                        wall,
+                        contacts,
+                    )
+                    .unwrap()
+                };
+                assert_eq!(
+                    resolve(paged_telemetry.pickup.wall_longitudinal_contact[wall].geometry),
+                    resolve(contiguous_telemetry.pickup.wall_longitudinal_contact[wall].geometry),
+                    "rate {rate}, wall {wall}"
+                );
+            }
             assert!(
                 (paged_telemetry.pickup.tip_displacement_m[0]
                     - contiguous_telemetry.pickup.tip_displacement_m[0])

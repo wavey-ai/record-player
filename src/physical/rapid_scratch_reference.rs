@@ -867,6 +867,7 @@ fn outward_interval_trace_spherical_uniform_in_domain(
             groove_displacement_m,
             groove_slope,
             tangent_residual: groove_slope - circle_slope,
+            certified_position_interval: None,
         },
         height_error_bound_m,
         contact_offset_enclosure_m: [enclosure.left_m, enclosure.right_m],

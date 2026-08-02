@@ -71,7 +71,7 @@ Use this ledger to track requirements across the chronological findings.
 - **RP-035 — Non-smooth contact**: Reject unresolved normal cones until the contact solve represents their complete force set. **Status**: In progress.
 - **RP-036 — Surface friction geometry**: Resolve friction in the complete local surface basis. Couple all components in the same contact solve. **Status**: Sliding surface and skating-port coupling are implemented. Sloped sticking, coupled uniqueness proof, and measurements remain open.
 - **RP-037 — Trace asset admission**: Bind fixed trace work, representation bytes, page identity, geometry, and actual wall-slope bounds. **Status**: Implemented. An authoritative full-record catalog remains open.
-- **RP-038 — Tangential contact memory**: Add identified along-groove pickup motion and local tangential material state. Preserve that state through reversals. **Status**: Required for sloped sticking.
+- **RP-038 — Tangential contact memory**: Add identified along-groove pickup motion and local tangential material state. Preserve that state through reversals. **Status**: Certified coordinate plumbing is implemented. Continuous state mapping and sloped sticking remain open.
 
 ## 2026-08-01: Repository and History Investigation
 
@@ -611,6 +611,20 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Limit**: This scalar condition is not a coupled Painlevé well-posedness proof.
 - **Reason**: The coupled response also depends on arm geometry, mass, damping, deck inertia, and both contacts.
 - **Requirement**: Prove the active Delassus matrix is a P-matrix over the admitted profile domain.
+- **Audit result**: The current admitted domain contains a negative one-contact principal minor.
+- **Witness**: Use record inertia `1e-7 kg m^2` and stylus moving mass `0.01 kg`.
+- **Witness**: Use friction `0.25`, wall slope `-0.125`, and radius `0.14605 m`.
+- **Witness**: Use the default tonearm and a small valid positive generator coefficient.
+- **Witness modes**: Deck and slipmat slide, the hand separates, and the pickup bearing sticks.
+- **Scalar result**: The current test accepts `mu * abs(p) = 0.03125`.
+- **Calculated result**: The deck contribution is `-0.007866686227009534`.
+- **Calculated result**: The pickup contribution is `0.000536859604648429`.
+- **Calculated result**: The one-wall minor is `-0.007329826622361105`.
+- **Consequence**: The current scalar condition does not prove existence or uniqueness.
+- **Requirement**: Certify every profile and source against all 48 sliding Delassus families.
+- **Requirement**: Reject an unproved operator before playback changes state.
+- **Possible error**: This witness does not yet have a permanent production-builder parity test.
+- **Disproof test**: Rebuild the witness through the canonical production matrix builder.
 - **Finding**: The general trace slope cap is `16`.
 - **Finding**: The default groove friction coefficient is `0.25`.
 - **Consequence**: Those two general limits do not prove the friction condition.
@@ -650,21 +664,53 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 
 ### Certified contact identity audit
 
-- **Status**: Design complete. Production propagation is not implemented.
-- **Finding**: Certified tracers already calculate outward contact-coordinate intervals.
-- **Finding**: Current result types discard those intervals.
-- **Requirement**: Preserve each interval and translate it to the absolute base-source coordinate.
+- **Status**: Certified interval propagation and a fail-closed cell resolver are implemented.
+- **Finding**: Class A now returns its final outward root interval.
+- **Finding**: Class B and exhaustive tracing return each selected or merged contender interval.
+- **Coordinate form**: One exact `u64` origin and two local `f64` bounds define the absolute interval.
+- **Reason**: Converting a large source origin to `f64` can remove the certified interval width.
+- **Production bound**: The player still limits absolute floating-point addressing to `2^53` frames.
+- **Test limit**: The large-origin trace test uses an exactly representable center above `2^53`.
+- **Open limit**: General odd origins above `2^53` need a split addressing API.
+- **Propagation**: Paged, real-time, player, transform, input, and telemetry paths preserve the interval.
+- **Trust rule**: Deserialization removes the private live-trace seal.
+- **Result**: Forged or nonordered bounds cannot authorize a material key.
+- **Authority limit**: The provisional resolver is crate-private and has no production caller.
+- **Lineage gap**: The resolver does not bind one interval to its supplied source, generation, or wall.
+- **Requirement**: A production capability must bind trace admission, lineage, and material instance.
 - **Material key**: Use source identity, generation, wall, and canonical cell index.
 - **Exclusion**: Do not include page, direction, representation kind, contact order, or midpoint bits.
 - **Isolation rule**: Both closed interval bounds must select one versioned canonical cell.
 - **Failure**: Return `TangentialContactIdentityNotIsolated` before state changes when the interval straddles a cell boundary.
-- **First implementation grid**: Use base spline cells only for deterministic plumbing tests.
+- **Endpoint rule**: The final coordinate maps to the last real spline cell.
+- **Endpoint blocker**: Actual outward edge intervals extend beyond the source and still reject.
+- **Requirement**: Future edge clipping must use trace-domain provenance.
+- **Seam result**: Paged and whole-record bounds can use different valid decompositions.
+- **Seam result**: Their physical trace and resolved material cell agree in both directions at plus or minus 20x.
+- **Rejected test rule**: Do not require raw interval-bit equality across different coordinate origins.
+- **First implementation grid**: Base spline cells support deterministic plumbing tests only.
 - **Claim limit**: Base spline cells do not prove a physical contact footprint.
+- **Liveness counterexample**: A flat Class A trace at integer frame 64 straddles cells 63 and 64.
+- **Result**: The resolver returns `TangentialContactIdentityNotIsolated` for that valid trace.
+- **General result**: Every finite hard cell partition has a non-isolating boundary neighborhood.
+- **Consequence**: The hard cell resolver cannot support uninterrupted scratching or activate Jenkins state.
+- **Requirement**: Use certified continuous weights and the transpose force map for production material state.
+- **Continuous-map hypothesis**: Use two normalized linear-hat amplitudes for one selected coordinate.
+- **Boundary capacity**: One narrow certified interval can require three possible coefficient keys.
+- **Rejected map**: Raw linear amplitudes change self stiffness by a factor of two across one cell.
+- **Power rule**: Use the same amplitude bits for state scatter and force gather.
+- **Yield rule**: Use one Jenkins yield surface per wall, not one slider per coefficient.
+- **Identity gap**: Cache generation does not identify one physical record instance.
+- **Requirement**: Add `GrooveMaterialInstanceId` before material-state activation.
+- **Rapid-sweep blocker**: A 20-frame endpoint move can cross at least 23 possible coefficient keys.
+- **Stronger blocker**: The certificate does not bound contact-root travel between physics samples.
+- **Requirement**: Certify root travel and use bounded event substeps or a proved swept return map.
 - **State placement**: Keep the material bank outside the copied pickup candidate state.
 - **Commit rule**: Commit at most two material updates after the complete coupled candidate passes.
 - **Capacity rule**: Prefer an exact key, then an empty slot, then a measured recovered slot.
 - **Rejected policy**: Do not evict energetic state by proximity, direction, page, or recency.
-- **Snapshot effect**: Persistent Jenkins state requires new pickup, player, and renderer snapshot versions.
+- **Snapshot result**: Contact, player, and renderer snapshot versions are now 5, 10, and 4.
+- **Rollback requirement**: A persistent bank needs a bounded block undo journal before activation.
 - **Trust limit**: The key lineage still depends on the page producer until a full-record root exists.
 
 ### Non-smooth contact normal

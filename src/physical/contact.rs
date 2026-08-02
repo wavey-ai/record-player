@@ -8,7 +8,7 @@ use crate::mechanics::{
     DeckMidpointPreparation, DeckMidpointSolution,
 };
 
-const SNAPSHOT_VERSION: u32 = 4;
+const SNAPSHOT_VERSION: u32 = 5;
 const MIN_SAMPLE_RATE_HZ: f64 = 44_100.0;
 const MAX_SAMPLE_RATE_HZ: f64 = 768_000.0;
 const MIN_MOVING_MASS_KG: f64 = 1.0e-9;
@@ -3349,6 +3349,7 @@ mod tests {
                 groove_displacement_m: center_displacement_m,
                 groove_slope,
                 tangent_residual: 0.0,
+                ..super::super::stylus::StylusTraceContact::default()
             };
         }
         set
@@ -4246,6 +4247,7 @@ mod tests {
         assert_eq!(state, before);
 
         let mut snapshot = state.snapshot();
+        assert_eq!(snapshot.version, 5);
         snapshot.tip_velocity_m_s[0] = f64::INFINITY;
         assert_eq!(
             state.restore(snapshot),

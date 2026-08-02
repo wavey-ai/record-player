@@ -149,6 +149,8 @@ pub struct StylusTraceSample {
     pub groove_displacement_m: f64,
     pub groove_slope: f64,
     pub tangent_residual: f64,
+    /// This is the closed, outward contact-position interval from the tracer.
+    pub certified_position_interval: Option<CertifiedContactPositionInterval>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -158,6 +160,78 @@ pub struct StylusTraceContact {
     pub groove_displacement_m: f64,
     pub groove_slope: f64,
     pub tangent_residual: f64,
+    /// This is the closed, outward contact-position interval from the tracer.
+    pub certified_position_interval: Option<CertifiedContactPositionInterval>,
+}
+
+/// Preserves one closed contact-position interval without losing a large source origin.
+///
+/// Add each relative bound to `source_frame_origin` conceptually. Do not convert the
+/// origin to `f64`. The relative bounds can be negative at a record or page edge.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CertifiedContactPositionInterval {
+    source_frame_origin: u64,
+    lower_relative_source_frame: f64,
+    upper_relative_source_frame: f64,
+    #[serde(skip)]
+    tracer_produced: bool,
+}
+
+impl CertifiedContactPositionInterval {
+    pub const fn source_frame_origin(self) -> u64 {
+        self.source_frame_origin
+    }
+
+    pub const fn lower_relative_source_frame(self) -> f64 {
+        self.lower_relative_source_frame
+    }
+
+    pub const fn upper_relative_source_frame(self) -> f64 {
+        self.upper_relative_source_frame
+    }
+
+    fn from_outward_interval(interval: OutwardInterval) -> Self {
+        debug_assert!(interval.lower.is_finite());
+        debug_assert!(interval.upper.is_finite());
+        debug_assert!(interval.lower <= interval.upper);
+        Self {
+            source_frame_origin: 0,
+            lower_relative_source_frame: interval.lower,
+            upper_relative_source_frame: interval.upper,
+            tracer_produced: true,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_closed_relative_bounds(
+        source_frame_origin: u64,
+        lower_relative_source_frame: f64,
+        upper_relative_source_frame: f64,
+    ) -> Option<Self> {
+        if !lower_relative_source_frame.is_finite()
+            || !upper_relative_source_frame.is_finite()
+            || lower_relative_source_frame > upper_relative_source_frame
+        {
+            return None;
+        }
+        Some(Self {
+            source_frame_origin,
+            lower_relative_source_frame,
+            upper_relative_source_frame,
+            tracer_produced: true,
+        })
+    }
+
+    pub(crate) const fn is_tracer_produced(self) -> bool {
+        self.tracer_produced
+    }
+
+    fn with_source_frame_origin(mut self, source_frame_origin: u64) -> Self {
+        debug_assert_eq!(self.source_frame_origin, 0);
+        self.source_frame_origin = source_frame_origin;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -180,6 +254,17 @@ impl Default for StylusTraceContactSet {
 }
 
 impl StylusTraceContactSet {
+    fn with_source_frame_origin(mut self, source_frame_origin: u64) -> Self {
+        for contact in &mut self.contacts[..usize::from(self.contact_count)] {
+            debug_assert!(contact.certified_position_interval.is_some());
+            if let Some(interval) = contact.certified_position_interval {
+                contact.certified_position_interval =
+                    Some(interval.with_source_frame_origin(source_frame_origin));
+            }
+        }
+        self
+    }
+
     fn into_single_sample(self) -> Result<StylusTraceSample, StylusTraceError> {
         if self.contact_count != 1 {
             return Err(StylusTraceError::GlobalContactNotIsolated);
@@ -191,6 +276,7 @@ impl StylusTraceContactSet {
             groove_displacement_m: contact.groove_displacement_m,
             groove_slope: contact.groove_slope,
             tangent_residual: contact.tangent_residual,
+            certified_position_interval: contact.certified_position_interval,
         })
     }
 }
@@ -706,7 +792,7 @@ fn trace_spherical_45_45_wall_multiresolution_contacts_with_proof(
     )
     .unwrap_or(usize::MAX);
     let local_center_frame = absolute_center_frame - domain_first_source_frame as f64;
-    trace_spherical_piecewise_contacts_with_proof(
+    let contacts = trace_spherical_piecewise_contacts_with_proof(
         domain_sample_count,
         local_center_frame,
         meters_per_source_frame,
@@ -736,7 +822,8 @@ fn trace_spherical_45_45_wall_multiresolution_contacts_with_proof(
                 .scale(1.0 - upper_level_blend)
                 .add(upper_wall.scale(upper_level_blend))
         },
-    )
+    )?;
+    Ok(contacts.with_source_frame_origin(domain_first_source_frame))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -760,7 +847,7 @@ fn trace_spherical_45_45_wall_level_contacts_with_proof(
     )
     .unwrap_or(usize::MAX);
     let local_center_frame = absolute_center_frame - first_source_frame as f64;
-    trace_spherical_piecewise_contacts_with_proof(
+    let contacts = trace_spherical_piecewise_contacts_with_proof(
         domain_sample_count,
         local_center_frame,
         meters_per_source_frame,
@@ -777,7 +864,8 @@ fn trace_spherical_45_45_wall_level_contacts_with_proof(
                 first_source_frame as f64 + local_segment_start,
             )
         },
-    )
+    )?;
+    Ok(contacts.with_source_frame_origin(first_source_frame))
 }
 
 fn wall_normal(wall_index: usize) -> Result<(f64, f64), StylusTraceError> {
@@ -1159,6 +1247,7 @@ impl CertifiedContender {
             groove_displacement_m: 0.0,
             groove_slope: 0.0,
             tangent_residual: 0.0,
+            certified_position_interval: None,
         },
     };
 }
@@ -1437,6 +1526,9 @@ where
         groove_displacement_m,
         groove_slope,
         tangent_residual,
+        certified_position_interval: Some(CertifiedContactPositionInterval::from_outward_interval(
+            root,
+        )),
     };
     Ok(StylusTraceContactSet {
         center_displacement_m: height_m - radius,
@@ -2127,6 +2219,9 @@ fn insert_global_contact(
             .tangent_residual
             .upper
             .max(contender.tangent_residual.upper);
+        existing.contact.certified_position_interval = Some(
+            CertifiedContactPositionInterval::from_outward_interval(existing.frame),
+        );
         if interval_error_from_value(existing.groove_slope, existing.contact.groove_slope)
             > groove_slope_error_bound
         {
@@ -2529,9 +2624,10 @@ fn certified_contender(
     } else {
         contact_offset_m.signum() * f64::INFINITY
     };
+    let frame = OutwardInterval::point(candidate.segment_start).add(candidate.fraction);
     CertifiedContender {
         segment_start: candidate.segment_start,
-        frame: OutwardInterval::point(candidate.segment_start).add(candidate.fraction),
+        frame,
         height: candidate_height_bounds(candidate, center_frame, meters_per_frame, radius),
         offset_m,
         groove_slope,
@@ -2541,6 +2637,9 @@ fn certified_contender(
             groove_displacement_m,
             groove_slope: point_groove_slope,
             tangent_residual: point_groove_slope - point_circle_slope,
+            certified_position_interval: Some(
+                CertifiedContactPositionInterval::from_outward_interval(frame),
+            ),
         },
     }
 }
@@ -2876,6 +2975,15 @@ mod tests {
             certified.contacts[0].tangent_residual.abs()
                 <= SPHERICAL_TRACE_TANGENT_RESIDUAL_ERROR_BOUND
         );
+        for traced in [certified, exhaustive] {
+            let interval = traced.contacts[0]
+                .certified_position_interval
+                .expect("production tracing must preserve its certified position interval");
+            assert!(interval.is_tracer_produced());
+            assert!(
+                interval.lower_relative_source_frame() <= interval.upper_relative_source_frame()
+            );
+        }
     }
 
     #[test]
@@ -2952,6 +3060,91 @@ mod tests {
             .unwrap();
             assert_trace_sets_within_declared_bounds(certified, exhaustive);
         }
+    }
+
+    #[test]
+    fn all_trace_classes_and_the_scalar_wrapper_preserve_position_bounds() {
+        let flat = vec![0.0_f32; 128];
+        let class_a =
+            trace_uniform_certified_concave(&flat, 64.375, 2.0e-6, StylusGeometry::default())
+                .unwrap();
+        let scalar =
+            trace_spherical_uniform(&flat, 64.375, 2.0e-6, StylusGeometry::default()).unwrap();
+        for interval in [
+            class_a.contacts[0].certified_position_interval,
+            scalar.certified_position_interval,
+        ] {
+            let interval = interval.unwrap();
+            assert_eq!(interval.source_frame_origin(), 0);
+            assert!(interval.lower_relative_source_frame() <= 64.375);
+            assert!(interval.upper_relative_source_frame() >= 64.375);
+        }
+
+        let varied = PVC_001_BITS.map(f32::from_bits);
+        let class_b =
+            trace_uniform_certified_piecewise(&varied, 16.37, 1.5e-6, StylusGeometry::default())
+                .unwrap();
+        let exhaustive =
+            trace_spherical_uniform_contacts(&varied, 16.37, 1.5e-6, StylusGeometry::default())
+                .unwrap();
+        for traced in [class_b, exhaustive] {
+            let interval = traced.contacts[0].certified_position_interval.unwrap();
+            assert_eq!(interval.source_frame_origin(), 0);
+            assert!(interval.is_tracer_produced());
+            assert!(
+                interval.lower_relative_source_frame() <= interval.upper_relative_source_frame()
+            );
+        }
+    }
+
+    #[test]
+    fn class_a_flat_integer_contact_remains_fail_closed_at_a_cell_join() {
+        let samples = vec![0.0_f32; 128];
+        let traced =
+            trace_uniform_certified_concave(&samples, 64.0, 2.0e-6, StylusGeometry::default())
+                .unwrap();
+        let interval = traced.contacts[0].certified_position_interval.unwrap();
+        assert!(interval.lower_relative_source_frame() < 64.0);
+        assert!(interval.upper_relative_source_frame() > 64.0);
+        assert_eq!(
+            super::super::tangential_identity::resolve_tangential_contact_identity(
+                super::super::groove::GrooveContentIdentity::from_sha256([0x41; 32]),
+                0,
+                samples.len() as u64,
+                0,
+                traced,
+            ),
+            Err(
+                super::super::tangential_identity::TangentialContactIdentityError::TangentialContactIdentityNotIsolated
+            )
+        );
+    }
+
+    #[test]
+    fn multiresolution_trace_preserves_a_large_exact_source_origin() {
+        let samples = [0.0_f32; 128];
+        let origin = (1_u64 << 53) + 1_024;
+        let center = origin as f64 + 64.0;
+        let traced = trace_spherical_45_45_wall_multiresolution_contacts(
+            &samples,
+            &samples,
+            origin,
+            1,
+            &samples,
+            &samples,
+            origin,
+            1,
+            0.0,
+            0,
+            center,
+            2.0e-6,
+            StylusGeometry::default(),
+        )
+        .unwrap();
+        let interval = traced.contacts[0].certified_position_interval.unwrap();
+        assert_eq!(interval.source_frame_origin(), origin);
+        assert!(interval.lower_relative_source_frame() <= 64.0);
+        assert!(interval.upper_relative_source_frame() >= 64.0);
     }
 
     #[test]

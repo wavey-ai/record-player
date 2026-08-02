@@ -19,7 +19,7 @@ use super::{
 use crate::spsc::TimedPlayerControlConsumer;
 use crate::timed_control::TimedPlayerControl;
 
-pub const PHYSICAL_HOST_RENDERER_SNAPSHOT_VERSION: u32 = 3;
+pub const PHYSICAL_HOST_RENDERER_SNAPSHOT_VERSION: u32 = 4;
 pub const MAXIMUM_HOST_VOLTS_PER_FULL_SCALE: f64 = 1_000.0;
 
 /// Defines the explicit boundary between phono volts and host full scale.
@@ -838,6 +838,7 @@ mod tests {
         prepare_moving_player(&mut original, Arc::clone(&groove));
         render_blocks(&mut original, &[337]);
         let snapshot = original.snapshot();
+        assert_eq!(snapshot.version, 4);
         let expected = render_blocks(&mut original, &[29, 701, 3]);
 
         let mut restored = PhysicalHostRenderer::new(profile, 88_200, TEST_HOST_OUTPUT).unwrap();
@@ -849,7 +850,11 @@ mod tests {
 
         let json = serde_json::to_string(&snapshot).unwrap();
         let decoded: PhysicalHostRendererSnapshot = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded, snapshot);
+        assert_ne!(decoded, snapshot);
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), json);
+        restored.restore(&decoded).unwrap();
+        let decoded_actual = render_blocks(&mut restored, &[29, 701, 3]);
+        assert_eq!(decoded_actual, expected);
     }
 
     #[test]

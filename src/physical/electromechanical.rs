@@ -273,12 +273,14 @@ mod tests {
             groove_displacement_m: center_displacement_m,
             groove_slope: slope,
             tangent_residual: 0.0,
+            ..StylusTraceContact::default()
         };
         contacts[1] = StylusTraceContact {
             contact_offset_m: 1.754_028e-6,
             groove_displacement_m: center_displacement_m,
             groove_slope: -slope,
             tangent_residual: 0.0,
+            ..StylusTraceContact::default()
         };
         StylusTraceContactSet {
             center_displacement_m,
