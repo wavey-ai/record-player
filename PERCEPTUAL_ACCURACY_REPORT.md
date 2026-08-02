@@ -48,6 +48,8 @@ Therefore, this work does not yet improve production failure handling or rendere
 | Has an A/B render shown a clear full-output improvement? | No |
 | Has a controlled listening test shown a perceptual improvement? | No |
 | Are the Rust scratch presets active in native Swift? | Yes |
+| Does the iOS decoded-audio cache preserve exact PCM? | Yes in app commit `c320e5b` |
+| Does the active iOS app use the full physical 45/45 renderer? | No |
 | Do corrected Stab and Chirp gates change physical phono voltage? | Yes |
 | Can the product claim the most accurate recreation? | No |
 
@@ -72,6 +74,35 @@ This architecture is more physically causal than the previous acoustic approxima
 The seed parameters are not hardware-calibrated.
 
 Therefore, architecture alone does not prove a more accurate perceived result.
+
+The picture-record spiral stores encoded digital bytes.
+
+The physical engine does not interpret its visible pixels as micrometer wall displacement.
+
+The host must recover ECDC, decode stereo PCM, and then make the virtual 45/45 groove.
+
+### Exact Decoded-Programme Cache
+
+- **Output-changing**: Yes on repeated iOS programme loads.
+- **Default active**: Yes in app commit `c320e5b`.
+- **Expected relevance**: Medium to high for source consistency.
+- **Listening evidence**: None.
+
+The former iOS cache encoded direct ECDC output as 68-kilobit-per-second Opus.
+
+Later loads could therefore use different samples from the first direct decode.
+
+The replacement cache stores 32-bit floating-point PCM.
+
+Its test requires exact left and right samples after storage and restoration.
+
+This removes one lossy generation before groove construction and scratch playback.
+
+It does not remove losses already present in the ECDC programme.
+
+The cache uses approximately 23.04 megabytes for each stereo programme minute.
+
+The product cache-size and eviction policy remain unverified.
 
 ### Certified Global Stylus Tracing
 
@@ -548,6 +579,10 @@ It does not model a measured crossfader curve, cut-in, latency, bleed, bounce, o
 `ScratchPerformance` now has physical-player, renderer, C ABI, and native Swift call sites.
 
 Swift contains adapter code and no technique equation.
+
+Native commit `b86dc4f` reads preset identifiers and metadata from canonical Rust.
+
+App commit `c320e5b` verifies all eight presets through the iOS binary.
 
 The integration changes actual phono output samples.
 

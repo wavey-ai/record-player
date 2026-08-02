@@ -17,6 +17,12 @@ The canonical player uses one coupled signal path:
 7. Convert the 192 kHz physical output to the host rate.
 8. Return groove reaction torque to the record mechanics.
 
+A picture record can store encoded programme bytes in its visible spiral.
+
+The engine does not treat those pixels as physical wall displacement.
+
+The host must recover the bytes and decode PCM before it creates the virtual 45/45 groove.
+
 The deck model contains separate platter and record bodies. It also contains motor, bearing, slipmat, and hand-contact states.
 
 Control events use absolute 192 kHz sample times. The bounded control mailbox does not use locks.

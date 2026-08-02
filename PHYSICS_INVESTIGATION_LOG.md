@@ -67,13 +67,17 @@ Use this ledger to track requirements across the chronological findings.
 - **RP-031 — Three-dimensional contact reduction**: State when independent 45/45 wall envelopes are exact. Add longitudinal and rotational dynamics when profiles require them. **Status**: Reduced rigid-sphere geometry verified; finite-patch and extra dynamics remain open.
 - **RP-032 — Host voltage calibration**: Keep phono output in volts inside physics. Convert volts through an explicit host full-scale boundary. **Status**: Boundary implemented in Rust, C, WASM, and native Swift. Product calibration evidence remains open.
 - **RP-033 — Same-wall multiple contact**: Detect separated possible global positions. Do not treat interval overlap as equality. **Status**: Contact sets propagate through production paths. Unqualified sets reject safely. Certified equality and measured compliance remain open.
-- **RP-034 — Canonical scratch techniques**: Keep the catalog, prediction, and automatic crossfader policy in Rust. Use exact same-sample physical travel. **Status**: Rust uses direction-specific stroke learning. Native integration passes. Calibration and browser integration remain open.
+- **RP-034 — Canonical scratch techniques**: Keep the catalog, prediction, and automatic crossfader policy in Rust. Use exact same-sample physical travel. **Status**: Rust uses direction-specific stroke learning. Native and iOS integration pass. Calibration and browser integration remain open.
 - **RP-035 — Non-smooth contact**: Reject unresolved normal cones until the contact solve represents their complete force set. **Status**: In progress.
 - **RP-036 — Surface friction geometry**: Resolve friction in the complete local surface basis. Couple all components in the same contact solve. **Status**: Sliding coupling and bounded zero-speed regularization are implemented. Identified sloped sticking and measurements remain open.
 - **RP-037 — Trace asset admission**: Bind fixed trace work, representation bytes, page identity, geometry, and actual wall-slope bounds. **Status**: Implemented. An authoritative full-record catalog remains open.
 - **RP-038 — Tangential contact memory**: Add identified along-groove pickup motion and local tangential material state. Preserve that state through reversals. **Status**: Certified coordinate plumbing is implemented. Continuous state mapping and sloped sticking remain open.
 - **RP-039 — Fixed-mode admission**: Certify each fixed normal-contact operator over its complete profile and source domain.
   **Status**: Bounded algebraic evaluation is implemented. Production-scaled adaptive admission remains open.
+- **RP-040 — Programme source lineage**: Recover encoded record bytes before the virtual cut. Use exact decoded PCM for all physical playback loads.
+  **Status**: The iOS app removes its lossy decoded-audio cache. Full physical-player activation remains open.
+- **RP-041 — Visual groove claim**: Do not describe visible encoded pixels as measured groove-wall displacement.
+  **Status**: Required.
 
 ## 2026-08-01: Repository and History Investigation
 
@@ -2346,6 +2350,9 @@ It is not a measured product calibration value.
 - Player checkpoints contain the complete scratch state.
 - The C ABI exposes controls and scratch telemetry.
 - Native Swift uses the C ABI and contains no technique equation.
+- Native commit `b86dc4f` removes its separate preset string catalog.
+- iOS commit `c320e5b` reads click defaults and click-use policy from Rust.
+- An iOS test selects all eight canonical presets through the built Rust library.
 - A native test proves that Rust manual gain changes rendered audio.
 - The focused `scratch_gate` suite passes 60 tests.
 - The wider scratch-filtered suite passes 89 tests with two offline reports ignored.
@@ -2734,3 +2741,65 @@ The needle-lift foley uses estimated gains and the existing surface asset.
 It has no identified hardware recording or listening result.
 
 Do not treat this migration as evidence of hardware accuracy.
+
+## 2026-08-02: Visible Spiral and 45/45 Source Boundary
+
+### Observed Data Path
+
+The picture record stores ordered ECDC header and frame bytes in the visible spiral.
+
+The product recovers those bytes before it decodes the stereo programme.
+
+The visible pixels are a digital data carrier.
+
+They are not calibrated micrometer wall heights.
+
+The physical engine receives decoded stereo PCM.
+
+It then creates a deterministic virtual 45/45 cut for stylus and cartridge playback.
+
+The 45/45 model remains physically relevant after digital recovery.
+
+It controls stereo wall motion during speed changes, reversals, tracing error, contact loss, and crosstalk.
+
+### Rejected Interpretation
+
+The current stylus does not extract programme audio by tracing the visible spiral pixels as physical wall geometry.
+
+The renderer does not define a measured mapping from pixel values to groove displacement.
+
+Do not claim that the simulated stylus physically reads the image pixels.
+
+Describe the system as physical playback of recovered audio on a virtual record.
+
+### Lossy Cache Finding
+
+The iOS integrity path required a direct ECDC decode.
+
+A later playback path could instead load a 68-kilobit-per-second Opus CAF cache.
+
+That cache could change decoded samples between the first load and later loads.
+
+It could also change any virtual groove made from those samples.
+
+The app now uses 32-bit floating-point PCM for this cache.
+
+A test requires bit-exact left and right samples after a cache round trip.
+
+App commit `c320e5b` contains this replacement and its iOS tests.
+
+This change does not recover information already lost during ECDC encoding.
+
+It prevents an additional lossy conversion before physical playback.
+
+The exact stereo cache uses approximately 23.04 megabytes for each programme minute.
+
+The product cache-size and eviction policy remain unverified.
+
+### Activation Limit
+
+The active iOS app builds the canonical Rust scratch-preset engine.
+
+The app does not yet render its complete programme through the full physical 45/45 C interface.
+
+Therefore, the 45/45 work is valid but does not yet provide its complete product benefit on iOS.
