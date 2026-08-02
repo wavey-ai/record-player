@@ -125,6 +125,21 @@ pub(crate) fn adaptive_sample(channel: &[f32], position: f64, source_step: f64) 
 mod tests {
     use super::*;
 
+    fn vocal_like_sample(position: f64) -> f64 {
+        [
+            (110.0, 0.38),
+            (220.0, 0.24),
+            (770.0, 0.18),
+            (1_200.0, 0.12),
+            (2_400.0, 0.08),
+        ]
+        .into_iter()
+        .map(|(frequency, gain)| {
+            gain * (std::f64::consts::TAU * frequency * position / 48_000.0).sin()
+        })
+        .sum()
+    }
+
     fn sine(frames: usize, cycles_per_frame: f64) -> Vec<f32> {
         (0..frames)
             .map(|frame| (std::f64::consts::TAU * cycles_per_frame * frame as f64).sin() as f32)
@@ -269,5 +284,59 @@ mod tests {
                 assert!((forward - reverse).abs() < 1e-12);
             }
         }
+    }
+
+    #[test]
+    fn vocal_like_waveform_is_only_time_scaled_at_odd_signed_speeds() {
+        let channel = (0..65_536)
+            .map(|frame| vocal_like_sample(frame as f64) as f32)
+            .collect::<Vec<_>>();
+        for source_step in [
+            0.125_f64, 0.37, 0.70, 1.0, 1.35, 2.0, -0.125, -0.37, -0.70, -1.35, -2.0,
+        ] {
+            let mut position = if source_step > 0.0 {
+                8_192.375
+            } else {
+                57_343.625
+            };
+            let mut error_energy = 0.0;
+            let mut reference_energy = 0.0;
+            for _ in 0..8_192 {
+                let rendered = adaptive_sample(&channel, position, source_step).unwrap();
+                let reference = vocal_like_sample(position);
+                error_energy += (rendered - reference).powi(2);
+                reference_energy += reference.powi(2);
+                position += source_step;
+            }
+            let normalized_error = (error_energy / reference_energy).sqrt();
+            assert!(
+                normalized_error < 0.006,
+                "{source_step}x vocal time scaling had {normalized_error} normalized RMS error",
+            );
+        }
+    }
+
+    #[test]
+    fn accelerating_hand_path_preserves_vocal_waveform_phase() {
+        let channel = (0..65_536)
+            .map(|frame| vocal_like_sample(frame as f64) as f32)
+            .collect::<Vec<_>>();
+        let mut position = 24_000.375;
+        let mut error_energy = 0.0;
+        let mut reference_energy = 0.0;
+        for frame in 0..12_000 {
+            let progress = frame as f64 / 11_999.0;
+            let source_step = -0.8 + 2.4 * progress;
+            let rendered = adaptive_sample(&channel, position, source_step).unwrap();
+            let reference = vocal_like_sample(position);
+            error_energy += (rendered - reference).powi(2);
+            reference_energy += reference.powi(2);
+            position += source_step;
+        }
+        let normalized_error = (error_energy / reference_energy).sqrt();
+        assert!(
+            normalized_error < 0.006,
+            "accelerating vocal path had {normalized_error} normalized RMS error",
+        );
     }
 }

@@ -4,6 +4,10 @@ use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 
 use crate::{
+    mechanics::{
+        DeckMechanicalControl, DeckMechanicalState, MotorMode, NormalizedDeckControl,
+        PhysicalDeckConfig,
+    },
     mixer::{sharp_crossfader_gains, DEFAULT_SHARP_CROSSFADER_WIDTH},
     resampler::adaptive_sample,
     scratch_gate::{ScratchGate, ScratchPreset},
@@ -12,23 +16,14 @@ use crate::{
 const OUTPUT_GAIN: f64 = 1.0;
 const MAX_FINAL_OUTPUT_GAIN: f64 = 4.0;
 const MAX_FINAL_OUTPUT_GAIN_RAMP_MS: f64 = 60_000.0;
-const RATE_SPRING_OMEGA: f64 = 70.0;
-const RATE_SPRING_ZETA: f64 = 0.85;
 const POSITION_CATCHUP_SECONDS: f64 = 0.28;
 const MOTION_HOLD_SECONDS: f64 = 0.05;
 const MOTION_HOLD_RELEASE_SECONDS: f64 = 0.06;
 const GRIP_ATTACK_SECONDS: f64 = 0.012;
 const GRIP_RELEASE_SECONDS: f64 = 0.045;
-const MOTOR_SPINUP_SECONDS: f64 = 0.3;
-const MOTOR_BRAKE_SECONDS: f64 = 0.32;
 const GRIP_OWNERSHIP: f64 = 0.5;
-const STILL_SNAP_SECONDS: f64 = 0.03;
 const DEADZONE_RATE: f64 = 0.006;
 const STOP_GAIN_FULL_RATE: f64 = 0.10;
-const PLATTER_LOCK_CENTER_RATE: f64 = 1.0;
-const PLATTER_LOCK_WIDTH: f64 = 0.42;
-const PLATTER_LOCK_STRENGTH: f64 = 0.68;
-const BEARING_THROW_DECAY_SECONDS: f64 = 0.85;
 const DRAG_LOWPASS_MAX_HZ: f64 = 19_000.0;
 const DRAG_LOWPASS_RATE_KNEE: f64 = 0.95;
 const TRACING_LOSS_START_RATE: f64 = 2.5;
@@ -43,6 +38,8 @@ const PROGRAMME_LIMITER_ATTACK_SECONDS: f64 = 0.00012;
 const PROGRAMME_LIMITER_RELEASE_SECONDS: f64 = 0.032;
 const WOW_REV_SECONDS: f64 = 1.8;
 const FLUTTER_HZ: f64 = 6.4;
+const FREE_PLAYBACK_WOW_DEPTH: f64 = 0.000_24;
+const HAND_SLIP_WOW_DEPTH: f64 = 0.000_18;
 const CONTACT_NOISE_GAIN: f64 = 0.00008;
 const SOURCE_TEXTURE_GAIN: f64 = 0.00018;
 const DUST_FLECK_GAIN: f64 = 0.000045;
@@ -50,6 +47,7 @@ const CONTACT_IMPULSE_DECAY: f64 = 0.985;
 const WINDOW_REQUEST_MARGIN_SECONDS: f64 = 0.75;
 const WINDOW_REQUEST_PROJECT_SECONDS: f64 = 0.18;
 const WINDOW_MISS_FADE_SECONDS: f64 = 0.006;
+const PROGRAMME_END_POSITION_EPSILON_FRAMES: f64 = 1.0e-7;
 const DEFAULT_REPLAY_NOISE_SEED: u32 = 0x9e37_79b9;
 
 // Needle-surface bed and needle-drop foley (original: player.js 3915–4249).
@@ -341,6 +339,7 @@ struct AcousticReplaySnapshot {
     restore_pending: bool,
     config: AcousticConfig,
     native_rpm: f64,
+    deck_state: DeckMechanicalState,
     position: f64,
     target_position: f64,
     rate: f64,
@@ -386,6 +385,7 @@ pub struct ScratchAcousticDsp {
     output_sample_rate: f64,
     source_sample_rate: f64,
     native_rpm: f64,
+    deck_state: DeckMechanicalState,
     channels: Arc<Vec<Vec<f32>>>,
     total_frames: usize,
     window_start: usize,
@@ -467,11 +467,15 @@ impl ScratchAcousticDsp {
 
     fn new_internal(output_sample_rate: f64, config: AcousticConfig) -> Self {
         let native_rpm = (60.0 / config.wow_rev_seconds.max(1e-6)).clamp(16.0, 90.0);
+        let deck_state =
+            DeckMechanicalState::new(production_deck_config(output_sample_rate, native_rpm))
+                .expect("production deck configuration must be valid");
         Self {
             config,
             output_sample_rate,
             source_sample_rate: 48_000.0,
             native_rpm,
+            deck_state,
             channels: Arc::new(Vec::new()),
             total_frames: 0,
             window_start: 0,
@@ -631,6 +635,10 @@ impl ScratchAcousticDsp {
         self.rate_velocity = 0.0;
         self.target_rate = 0.0;
         self.last_effective_rate = 0.0;
+        let turns = self.platter_rotation_turns;
+        self.deck_state
+            .reset(0.0, 0.0, turns, turns)
+            .expect("zero deck reset must be valid");
         self.frames_since_motion = 0;
         self.contact_impulse = 0.0;
         self.last_output_samples.clear();
@@ -731,6 +739,7 @@ impl ScratchAcousticDsp {
         if let Some(snapshot) = self.replay_snapshot.as_mut() {
             snapshot.config = self.config;
             snapshot.native_rpm = self.native_rpm;
+            snapshot.deck_state = self.deck_state;
             snapshot.position = self.position;
             snapshot.target_position = self.target_position;
             snapshot.rate = self.rate;
@@ -782,6 +791,7 @@ impl ScratchAcousticDsp {
             restore_pending: true,
             config: self.config,
             native_rpm: self.native_rpm,
+            deck_state: self.deck_state,
             position: self.position,
             target_position: self.target_position,
             rate: self.rate,
@@ -840,6 +850,7 @@ impl ScratchAcousticDsp {
         }
         swap_replay_field!(config);
         swap_replay_field!(native_rpm);
+        swap_replay_field!(deck_state);
         swap_replay_field!(position);
         swap_replay_field!(target_position);
         swap_replay_field!(rate);
@@ -919,6 +930,9 @@ impl ScratchAcousticDsp {
         self.ended = false;
         self.contact_impulse = 0.0;
         self.last_effective_rate = 0.0;
+        self.deck_state
+            .reset(0.0, 0.0, rotation_turns, rotation_turns)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
         self.noise_seed = if replay_seed == 0 {
             DEFAULT_REPLAY_NOISE_SEED
         } else {
@@ -1045,7 +1059,24 @@ impl ScratchAcousticDsp {
         if !native_rpm.is_finite() || native_rpm <= 0.0 {
             return Err(JsValue::from_str("nativeRpm must be positive"));
         }
-        self.native_rpm = native_rpm.clamp(16.0, 90.0);
+        let native_rpm = native_rpm.clamp(16.0, 90.0);
+        let telemetry = self.deck_state.telemetry();
+        let mut deck_config = self.deck_state.config();
+        deck_config.nominal_rpm = native_rpm;
+        deck_config.hand_max_position_correction_rad_s =
+            0.12 * deck_config.nominal_angular_velocity_rad_s();
+        self.deck_state
+            .reconfigure(deck_config)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        self.deck_state
+            .reset(
+                telemetry.platter_rate,
+                telemetry.record_rate,
+                telemetry.platter_angle_turns,
+                telemetry.record_angle_turns,
+            )
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        self.native_rpm = native_rpm;
         Ok(())
     }
 
@@ -1162,19 +1193,14 @@ impl ScratchAcousticDsp {
         self.drag_lowpass_state.resize(output_channel_count, 0.0);
         self.last_output_samples.resize(output_channel_count, 0.0);
         let dt = 1.0 / self.output_sample_rate;
-        let catchup_frames = (self.source_sample_rate * POSITION_CATCHUP_SECONDS).max(1.0);
         let hold_frames = (self.output_sample_rate * MOTION_HOLD_SECONDS).max(1.0) as usize;
         let hold_release_frames = (self.output_sample_rate * MOTION_HOLD_RELEASE_SECONDS).max(1.0);
-        let still_snap_alpha = 1.0 - (-1.0 / (self.output_sample_rate * STILL_SNAP_SECONDS)).exp();
         let grip_seconds = if self.grip_target > self.grip {
             GRIP_ATTACK_SECONDS
         } else {
             GRIP_RELEASE_SECONDS
         };
         let grip_alpha = 1.0 - (-1.0 / (self.output_sample_rate * grip_seconds)).exp();
-        let motor_spin_alpha =
-            1.0 - (-1.0 / (self.output_sample_rate * MOTOR_SPINUP_SECONDS)).exp();
-        let motor_brake_step = 1.0 / (self.output_sample_rate * MOTOR_BRAKE_SECONDS);
         let rate_scale = self.source_sample_rate / self.output_sample_rate;
         let miss_fade_frames = (self.output_sample_rate * WINDOW_MISS_FADE_SECONDS)
             .round()
@@ -1185,33 +1211,6 @@ impl ScratchAcousticDsp {
         for frame in 0..frame_count {
             self.frames_since_motion = self.frames_since_motion.saturating_add(1);
             self.grip += (self.grip_target - self.grip) * grip_alpha;
-            if self.motor_rate.abs() > self.motor_delivered_rate.abs() {
-                self.motor_delivered_rate +=
-                    (self.motor_rate - self.motor_delivered_rate) * motor_spin_alpha;
-            } else if self.motor_delivered_rate > self.motor_rate {
-                self.motor_delivered_rate =
-                    (self.motor_delivered_rate - motor_brake_step).max(self.motor_rate);
-            } else {
-                self.motor_delivered_rate =
-                    (self.motor_delivered_rate + motor_brake_step).min(self.motor_rate);
-            }
-            if !self.hand_contact
-                && self.motor_rate.abs() < DEADZONE_RATE
-                && self.unpowered_throw_rate.abs() >= DEADZONE_RATE
-            {
-                self.unpowered_throw_rate *= (-dt / BEARING_THROW_DECAY_SECONDS).exp();
-                if self.unpowered_throw_rate.abs() < DEADZONE_RATE {
-                    self.unpowered_throw_rate = 0.0;
-                }
-            }
-            let free_platter_rate = if !self.hand_contact
-                && self.motor_rate.abs() < DEADZONE_RATE
-                && self.unpowered_throw_rate.abs() >= DEADZONE_RATE
-            {
-                self.unpowered_throw_rate
-            } else {
-                self.motor_delivered_rate
-            };
             let hand_rate = if self.frames_since_motion > hold_frames {
                 self.target_rate
                     * (-((self.frames_since_motion - hold_frames) as f64) / hold_release_frames)
@@ -1219,23 +1218,14 @@ impl ScratchAcousticDsp {
             } else {
                 self.target_rate
             };
-            let held_target_rate = free_platter_rate + self.grip * (hand_rate - free_platter_rate);
-            self.rate_velocity +=
-                (((held_target_rate - self.rate) * RATE_SPRING_OMEGA * RATE_SPRING_OMEGA)
-                    - (2.0 * RATE_SPRING_ZETA * RATE_SPRING_OMEGA * self.rate_velocity))
-                    * dt;
-            self.rate += self.rate_velocity * dt;
-            let position_error = self.target_position - self.position;
-            let mut correction_rate =
-                ((position_error / catchup_frames) * self.grip).clamp(-0.12, 0.12);
-            if self.grip > GRIP_OWNERSHIP
-                && hand_rate.abs() < DEADZONE_RATE
-                && self.rate.abs() < DEADZONE_RATE
-            {
-                self.position += position_error * still_snap_alpha;
-                correction_rate = 0.0;
-            }
-            let corrected_rate = self.rate + correction_rate;
+            let held_target_rate = if self.hand_contact {
+                hand_rate
+            } else if self.motor_rate.abs() >= DEADZONE_RATE {
+                self.motor_rate
+            } else {
+                self.unpowered_throw_rate
+            };
+            let corrected_rate = self.advance_deck_mechanics(hand_rate);
             let abs_rate = corrected_rate.abs();
             let effective_rate = if self.config.acoustic_enabled {
                 corrected_rate
@@ -1244,8 +1234,6 @@ impl ScratchAcousticDsp {
             } else {
                 corrected_rate
             };
-            self.platter_rotation_turns +=
-                effective_rate * self.native_rpm / (60.0 * self.output_sample_rate);
             self.scratch_gate_trace[frame] =
                 self.scratch_gate
                     .process(dt, self.hand_contact, hand_rate, effective_rate)
@@ -1371,7 +1359,8 @@ impl ScratchAcousticDsp {
                 if !physical_surface_region_active
                     && !self.ended
                     && self.motor_rate > 0.0
-                    && self.position >= self.total_frames.saturating_sub(3) as f64
+                    && self.position + PROGRAMME_END_POSITION_EPSILON_FRAMES
+                        >= self.total_frames.saturating_sub(3) as f64
                 {
                     self.ended = true;
                     self.motor_rate = 0.0;
@@ -1455,26 +1444,9 @@ impl ScratchAcousticDsp {
         }
 
         let dt = 1.0 / self.output_sample_rate;
-        let motor_spin_alpha =
-            1.0 - (-1.0 / (self.output_sample_rate * MOTOR_SPINUP_SECONDS)).exp();
-        let motor_brake_step = 1.0 / (self.output_sample_rate * MOTOR_BRAKE_SECONDS);
         let rate_scale = self.source_sample_rate / self.output_sample_rate;
         for frame in 0..frame_count {
-            if self.motor_rate.abs() > self.motor_delivered_rate.abs() {
-                self.motor_delivered_rate +=
-                    (self.motor_rate - self.motor_delivered_rate) * motor_spin_alpha;
-            } else if self.motor_delivered_rate > self.motor_rate {
-                self.motor_delivered_rate =
-                    (self.motor_delivered_rate - motor_brake_step).max(self.motor_rate);
-            } else {
-                self.motor_delivered_rate =
-                    (self.motor_delivered_rate + motor_brake_step).min(self.motor_rate);
-            }
-            self.rate_velocity +=
-                (((self.motor_delivered_rate - self.rate) * RATE_SPRING_OMEGA * RATE_SPRING_OMEGA)
-                    - (2.0 * RATE_SPRING_ZETA * RATE_SPRING_OMEGA * self.rate_velocity))
-                    * dt;
-            self.rate += self.rate_velocity * dt;
+            self.advance_deck_mechanics(0.0);
             let abs_rate = self.rate.abs();
             self.last_effective_rate = if self.config.acoustic_enabled {
                 self.rate
@@ -1483,8 +1455,6 @@ impl ScratchAcousticDsp {
             } else {
                 self.rate
             };
-            self.platter_rotation_turns +=
-                self.last_effective_rate * self.native_rpm / (60.0 * self.output_sample_rate);
             self.scratch_gate_trace[frame] = self.scratch_gate.process(dt, false, 0.0, 0.0) as f32;
         }
         self.mix_foley(frame_count, output_channel_count);
@@ -2173,6 +2143,10 @@ impl ScratchAcousticDsp {
         self.motor_delivered_rate = 0.0;
         self.unpowered_throw_rate = 0.0;
         self.last_effective_rate = 0.0;
+        let turns = self.platter_rotation_turns;
+        self.deck_state
+            .reset(0.0, 0.0, turns, turns)
+            .expect("zero deck reset must be valid");
         self.frames_since_motion = 0;
         self.last_output_samples.clear();
         self.high_frequency_acceleration_limiter.reset();
@@ -2184,13 +2158,7 @@ impl ScratchAcousticDsp {
         if !rate.is_finite() || rate.abs() < DEADZONE_RATE {
             0.0
         } else {
-            let direction = rate.signum();
-            let magnitude = rate.abs();
-            let lock_distance = (magnitude - PLATTER_LOCK_CENTER_RATE).abs();
-            let lock_amount =
-                (-(lock_distance / PLATTER_LOCK_WIDTH).powi(2)).exp() * PLATTER_LOCK_STRENGTH;
-            let stabilized = magnitude + (PLATTER_LOCK_CENTER_RATE - magnitude) * lock_amount;
-            (direction * stabilized).clamp(-self.config.max_rate, self.config.max_rate)
+            rate.clamp(-self.config.max_rate, self.config.max_rate)
         }
     }
 
@@ -2289,6 +2257,88 @@ impl ScratchAcousticDsp {
         Some((sample, slope, curvature))
     }
 
+    fn advance_deck_mechanics(&mut self, hand_rate: f64) -> f64 {
+        let before = self.deck_state.telemetry();
+        if !self.hand_contact
+            && self.motor_rate.abs() >= DEADZONE_RATE
+            && before.platter_rate == self.motor_rate
+            && before.record_rate == self.motor_rate
+        {
+            let turn_step = self.motor_rate * self.native_rpm / (60.0 * self.output_sample_rate);
+            self.deck_state
+                .reset(
+                    self.motor_rate,
+                    self.motor_rate,
+                    before.platter_angle_turns + turn_step,
+                    before.record_angle_turns + turn_step,
+                )
+                .expect("locked servo deck step must be valid");
+            self.rate_velocity = 0.0;
+            self.rate = self.motor_rate;
+            self.motor_delivered_rate = self.motor_rate;
+            self.platter_rotation_turns = before.record_angle_turns + turn_step;
+            return self.motor_rate;
+        }
+        let hand_target_angle_turns = if self.hand_contact && self.grip > 0.0 {
+            let frames_per_turn =
+                self.source_sample_rate * 60.0 / self.native_rpm.max(f64::EPSILON);
+            Some(
+                before.record_angle_turns
+                    + (self.target_position - self.position) / frames_per_turn,
+            )
+        } else {
+            None
+        };
+        let motor_mode = if self.motor_rate.abs() >= DEADZONE_RATE {
+            MotorMode::Servo
+        } else if self.hand_contact || self.unpowered_throw_rate.abs() >= DEADZONE_RATE {
+            MotorMode::Off
+        } else {
+            MotorMode::Brake
+        };
+        let normalized = NormalizedDeckControl {
+            motor_mode,
+            motor_rate: self.motor_rate,
+            hand_contact: self.hand_contact,
+            hand_target_angle_turns,
+            hand_rate,
+            grip: self.grip,
+            stylus_torque_nm: 0.0,
+        };
+        let control = DeckMechanicalControl::from_normalized(self.deck_state.config(), normalized);
+        let mut telemetry = self
+            .deck_state
+            .advance(1.0 / self.output_sample_rate, control)
+            .expect("validated production deck controls must advance");
+        let servo_capture_error = 1.0e-5;
+        if !self.hand_contact
+            && self.motor_rate.abs() >= DEADZONE_RATE
+            && (telemetry.platter_rate - self.motor_rate).abs() < servo_capture_error
+            && (telemetry.record_rate - self.motor_rate).abs() < servo_capture_error
+        {
+            self.deck_state
+                .reset(
+                    self.motor_rate,
+                    self.motor_rate,
+                    telemetry.platter_angle_turns,
+                    telemetry.record_angle_turns,
+                )
+                .expect("captured servo deck reset must be valid");
+            telemetry = self.deck_state.telemetry();
+        }
+        self.rate_velocity = (telemetry.record_rate - self.rate) * self.output_sample_rate;
+        self.rate = telemetry.record_rate;
+        self.motor_delivered_rate = telemetry.platter_rate;
+        self.platter_rotation_turns = telemetry.record_angle_turns;
+        if self.unpowered_throw_rate.abs() >= DEADZONE_RATE {
+            self.unpowered_throw_rate = telemetry.record_rate;
+            if self.unpowered_throw_rate.abs() < DEADZONE_RATE {
+                self.unpowered_throw_rate = 0.0;
+            }
+        }
+        telemetry.record_rate
+    }
+
     fn advance_wow_flutter(&mut self, corrected_rate: f64, rate_scale: f64, abs_rate: f64) -> f64 {
         if self.source_sample_rate <= 0.0 {
             return 0.0;
@@ -2300,7 +2350,13 @@ impl ScratchAcousticDsp {
         if abs_rate <= 0.18 {
             return 0.0;
         }
-        let depth = abs_rate.clamp(0.0, 1.2) * 0.0012;
+        let free_depth = abs_rate.clamp(0.0, 1.2) * FREE_PLAYBACK_WOW_DEPTH;
+        let hand_slip = if self.hand_contact {
+            self.grip * (self.motor_delivered_rate - corrected_rate).abs().min(2.0)
+        } else {
+            0.0
+        };
+        let depth = free_depth + hand_slip * HAND_SLIP_WOW_DEPTH;
         (self.wow_phase * std::f64::consts::TAU).sin() * depth
             + (self.flutter_phase * std::f64::consts::TAU).sin() * depth * 0.22
     }
@@ -2367,6 +2423,15 @@ fn finite_or_zero(value: f64) -> f64 {
     } else {
         0.0
     }
+}
+
+fn production_deck_config(output_sample_rate: f64, native_rpm: f64) -> PhysicalDeckConfig {
+    let mut config = PhysicalDeckConfig::high_torque_dj_seed();
+    config.nominal_rpm = native_rpm.clamp(16.0, 90.0);
+    config.integration_hz = output_sample_rate.clamp(1_000.0, 768_000.0);
+    config.hand_position_stabilization_seconds = POSITION_CATCHUP_SECONDS;
+    config.hand_max_position_correction_rad_s = 0.12 * config.nominal_angular_velocity_rad_s();
+    config
 }
 
 fn valid_unit_interval(value: f64) -> bool {
@@ -2453,6 +2518,22 @@ fn compute_source_texture_gain(abs_rate: f64, rate_delta: f64) -> f64 {
 mod tests {
     use super::*;
 
+    fn seed_deck_rates(
+        dsp: &mut ScratchAcousticDsp,
+        platter_rate: f64,
+        record_rate: f64,
+        turns: f64,
+    ) {
+        dsp.deck_state
+            .reset(platter_rate, record_rate, turns, turns)
+            .unwrap();
+        dsp.motor_delivered_rate = platter_rate;
+        dsp.rate = record_rate;
+        dsp.rate_velocity = 0.0;
+        dsp.last_effective_rate = record_rate;
+        dsp.platter_rotation_turns = turns;
+    }
+
     fn simulation_dsp() -> ScratchAcousticDsp {
         let mut config = AcousticConfig::default();
         config.acoustic_enabled = true;
@@ -2482,8 +2563,7 @@ mod tests {
         dsp.set_transport(true, 0.0, rate, 1.0);
         dsp.set_motion(24_000.0, rate, 0.0);
         dsp.grip = 1.0;
-        dsp.rate = rate;
-        dsp.rate_velocity = 0.0;
+        seed_deck_rates(&mut dsp, rate, rate, 0.0);
         dsp
     }
 
@@ -2753,14 +2833,17 @@ mod tests {
             dsp.set_position(2_400_000.0, 0.0);
             let initial_turns = dsp.platter_rotation_turns;
             dsp.set_transport(false, direction, 0.0, 0.0);
-            dsp.render(14_400, 1);
+            dsp.render(9_600, 1);
             let spinup_rate = dsp.last_effective_rate;
             let spinup_turns = dsp.platter_rotation_turns - initial_turns;
             assert_eq!(spinup_rate.signum(), direction);
-            assert!((0.55..0.70).contains(&spinup_rate.abs()));
+            assert!(
+                (0.99..1.015).contains(&spinup_rate.abs()),
+                "200 ms startup rate was {spinup_rate}",
+            );
             assert_eq!(spinup_turns.signum(), direction);
 
-            dsp.render(33_600, 1);
+            dsp.render(38_400, 1);
             let steady_rate = dsp.last_effective_rate;
             assert_eq!(steady_rate.signum(), direction);
             assert!(steady_rate.abs() > 0.94);
@@ -2771,13 +2854,19 @@ mod tests {
             dsp.render(2_400, 1);
             let grabbed_rate = dsp.last_effective_rate;
             assert!(dsp.grip > 0.98);
-            assert!(grabbed_rate.abs() < steady_rate.abs() * 0.20);
+            assert!(
+                grabbed_rate.abs() < steady_rate.abs() * 0.20,
+                "50 ms full grab retained rate {grabbed_rate}",
+            );
 
             dsp.set_transport(false, direction, 0.0, 0.0);
             dsp.render(4_800, 1);
             let caught_rate = dsp.last_effective_rate;
             assert_eq!(caught_rate.signum(), direction);
-            assert!(caught_rate.abs() > 0.75);
+            assert!(
+                caught_rate.abs() > 0.75,
+                "100 ms motor recovery reached only {caught_rate}",
+            );
             traces.push((
                 spinup_rate,
                 spinup_turns,
@@ -2801,6 +2890,49 @@ mod tests {
                 "directional mechanics differed: reverse {reverse_value}, forward {forward_value}",
             );
         }
+    }
+
+    #[test]
+    fn powered_start_uses_a_high_torque_ramp_before_servo_capture() {
+        let mut dsp = simulation_dsp();
+        dsp.set_effects(false, false);
+        dsp.start();
+        dsp.set_position(2_400_000.0, 0.0);
+        dsp.set_transport(false, 1.0, 0.0, 0.0);
+        let mut rates = Vec::new();
+        for _ in 0..4 {
+            dsp.render(2_400, 1);
+            rates.push(dsp.last_effective_rate);
+        }
+        assert!((0.22..0.34).contains(&rates[0]), "50 ms: {}", rates[0]);
+        assert!((0.48..0.64).contains(&rates[1]), "100 ms: {}", rates[1]);
+        assert!((0.75..0.91).contains(&rates[2]), "150 ms: {}", rates[2]);
+        assert!((0.99..1.015).contains(&rates[3]), "200 ms: {}", rates[3]);
+        let first_increment = rates[1] - rates[0];
+        let second_increment = rates[2] - rates[1];
+        assert!((first_increment - second_increment).abs() < 0.04);
+    }
+
+    #[test]
+    fn partial_pressure_changes_takeover_acceleration() {
+        fn rate_after_grab(grip: f64) -> f64 {
+            let mut dsp = simulation_dsp();
+            dsp.set_effects(false, false);
+            dsp.start();
+            dsp.set_position(2_400_000.0, 0.0);
+            dsp.set_transport(false, 1.0, 0.0, 0.0);
+            dsp.render(48_000, 1);
+            dsp.set_transport(true, 1.0, -1.0, grip);
+            dsp.set_motion(dsp.position - 2_400.0, -1.0, 0.0);
+            dsp.render(2_400, 1);
+            dsp.last_effective_rate
+        }
+
+        let partial = rate_after_grab(0.45);
+        let full = rate_after_grab(1.0);
+        assert!(partial > 0.75, "partial pressure reached {partial}");
+        assert!(full < 0.35, "full pressure reached {full}");
+        assert!(partial - full > 0.5);
     }
 
     #[test]
@@ -2838,13 +2970,13 @@ mod tests {
     }
 
     #[test]
-    fn hand_rate_uses_reference_deadzone_and_gaussian_one_x_lock() {
+    fn hand_rate_uses_only_the_stop_deadzone_and_safety_limit() {
         let dsp = simulation_dsp();
         assert_eq!(dsp.map_rate(DEADZONE_RATE * 0.5), 0.0);
         assert_eq!(dsp.map_rate(1.0), 1.0);
         assert_eq!(dsp.map_rate(-1.0), -1.0);
-        assert!(dsp.map_rate(0.70) > 0.70);
-        assert!(dsp.map_rate(-0.70) < -0.70);
+        assert_eq!(dsp.map_rate(0.70), 0.70);
+        assert_eq!(dsp.map_rate(-0.70), -0.70);
         assert_eq!(dsp.map_rate(100.0), dsp.config.max_rate);
     }
 
@@ -2859,8 +2991,7 @@ mod tests {
             thrown.set_transport(true, 0.0, direction, 1.0);
             thrown.set_motion(thrown.position + direction * 24_000.0, direction, 0.0);
             thrown.grip = 1.0;
-            thrown.rate = direction;
-            thrown.last_effective_rate = direction;
+            seed_deck_rates(&mut thrown, direction, direction, 0.0);
             let throw_turns = thrown.platter_rotation_turns;
             thrown.set_transport(false, 0.0, 0.0, 0.0);
             thrown.render(9_600, 1);
@@ -2915,6 +3046,43 @@ mod tests {
     }
 
     #[test]
+    fn residual_wow_flutter_is_subtle_and_hand_slip_can_increase_it() {
+        fn peak_modulation(dsp: &mut ScratchAcousticDsp, rate: f64) -> f64 {
+            let mut peak = 0.0_f64;
+            for _ in 0..96_000 {
+                peak = peak.max(dsp.advance_wow_flutter(rate, 1.0, rate.abs()).abs());
+            }
+            peak
+        }
+
+        let mut free = simulation_dsp();
+        free.hand_contact = false;
+        free.motor_delivered_rate = 1.0;
+        let free_peak = peak_modulation(&mut free, 1.0);
+        assert!((0.000_20..0.000_31).contains(&free_peak), "{free_peak}");
+
+        let mut slipping = simulation_dsp();
+        slipping.hand_contact = true;
+        slipping.grip = 1.0;
+        slipping.motor_delivered_rate = 2.0;
+        let slip_peak = peak_modulation(&mut slipping, 1.0);
+        assert!(slip_peak > free_peak * 1.5, "{free_peak} -> {slip_peak}");
+        assert!(slip_peak < 0.000_55, "{slip_peak}");
+    }
+
+    #[test]
+    fn needle_interaction_texture_is_quiet_at_one_x_and_rises_during_drag() {
+        let one_x_contact = compute_contact_noise_gain(1.0);
+        let slow_contact = compute_contact_noise_gain(0.20);
+        let one_x_texture = compute_source_texture_gain(1.0, 0.0);
+        let slow_drag_texture = compute_source_texture_gain(0.20, 0.04);
+        assert!(slow_contact > one_x_contact * 8.0);
+        assert!(slow_drag_texture > one_x_texture * 4.0);
+        assert!(one_x_contact < 2.0e-6);
+        assert!(one_x_texture < 2.0e-5);
+    }
+
+    #[test]
     fn surface_only_render_spins_platter_without_advancing_or_leaking_programme() {
         let mut dsp = scratch_signal_dsp(ScratchPreset::Baby, 0.0);
         dsp.set_transport(false, 1.0, 0.0, 0.0);
@@ -2932,8 +3100,7 @@ mod tests {
         dsp.set_effects(false, false);
         dsp.hand_contact = false;
         dsp.motor_rate = 1.0;
-        dsp.motor_delivered_rate = 1.0;
-        dsp.rate = 1.0;
+        seed_deck_rates(&mut dsp, 1.0, 1.0, 0.0);
         dsp.render_surface(48_000, 1);
         assert!(
             (dsp.platter_rotation_turns() - 0.75).abs() < 1e-6,
@@ -3054,10 +3221,7 @@ mod tests {
         dsp.grip = 0.0;
         dsp.grip_target = 0.0;
         dsp.motor_rate = 1.0;
-        dsp.motor_delivered_rate = 1.0;
-        dsp.rate = 1.0;
-        dsp.rate_velocity = 0.0;
-        dsp.last_effective_rate = 1.0;
+        seed_deck_rates(&mut dsp, 1.0, 1.0, 0.0);
 
         assert_eq!(dsp.render(FRAMES as u32, 2), FRAMES as u32);
 
@@ -3330,9 +3494,7 @@ mod tests {
         dsp.start();
         dsp.set_position(472.0, 0.0);
         dsp.set_transport(false, 1.0, 0.0, 0.0);
-        dsp.motor_delivered_rate = 1.0;
-        dsp.rate = 1.0;
-        dsp.rate_velocity = 0.0;
+        seed_deck_rates(&mut dsp, 1.0, 1.0, 0.0);
         let quantum_ramp_ms = 128.0 * 1_000.0 / dsp.output_sample_rate;
         dsp.set_output_gain(0.0, quantum_ramp_ms).unwrap();
 
@@ -3363,10 +3525,7 @@ mod tests {
         dsp.start();
         dsp.set_position(2_400_000.0, 0.0);
         dsp.set_transport(false, 1.0, 0.0, 0.0);
-        dsp.motor_delivered_rate = 1.0;
-        dsp.rate = 1.0;
-        dsp.last_effective_rate = 1.0;
-        dsp.platter_rotation_turns = 12.5;
+        seed_deck_rates(&mut dsp, 1.0, 1.0, 12.5);
         dsp.manual_fader_gain = 0.73;
         dsp.window_miss_frames = 17;
         dsp.window_programme_gain = 0.42;
@@ -3795,14 +3954,14 @@ mod tests {
         assert!(dsp.last_effective_rate > 0.0);
 
         let mut confirmation_frames = 0;
-        while dsp.scratch_direction() > 0 && confirmation_frames < 4_800 {
+        while dsp.scratch_direction() > 0 && confirmation_frames < 24_000 {
             dsp.render(1, 1);
             confirmation_frames += 1;
         }
         assert_eq!(dsp.scratch_direction(), -1);
         assert!(dsp.last_effective_rate < 0.0);
         assert!(dsp.scratch_gate_phase() > 0.0);
-        assert!(confirmation_frames < 4_800);
+        assert!(confirmation_frames < 24_000);
     }
 
     #[test]

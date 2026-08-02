@@ -78,6 +78,12 @@ Use this ledger to track requirements across the chronological findings.
   **Status**: The iOS app removes its lossy decoded-audio cache. Full physical-player activation remains open.
 - **RP-041 — Visual groove claim**: Do not describe visible encoded pixels as measured groove-wall displacement.
   **Status**: Required.
+- **RP-042 — Production deck dynamics**: Use torque, separate inertia, and friction for motor, grip, and release motion.
+  **Status**: Implemented with an uncalibrated high-torque seed.
+- **RP-043 — Manual waveform fidelity**: Advance decoded PCM through one signed source-position path. Do not pull hand speed toward nominal speed.
+  **Status**: Implemented with automated vocal-like waveform tests.
+- **RP-044 — Interaction cues**: Keep bounded wow, flutter, and needle texture when they respond to physical motion.
+  **Status**: Implemented as an optional estimated profile. Hardware calibration remains open.
 
 ## 2026-08-01: Repository and History Investigation
 
@@ -2822,3 +2828,177 @@ The active iOS app builds the canonical Rust scratch-preset engine.
 The app does not yet render its complete programme through the full physical 45/45 C interface.
 
 Therefore, the 45/45 work is valid but does not yet provide its complete product benefit on iOS.
+
+## 2026-08-02: Production Motor, Hand, and Record Coupling
+
+### Product Requirement
+
+The production engine must reproduce record motion before it reproduces cartridge details.
+
+The decoded waveform must follow one signed, continuous source-position path.
+
+Slow motion must lengthen the waveform and lower its frequencies.
+
+Fast motion must shorten the waveform and raise its frequencies.
+
+Reverse motion must read the same waveform in the reverse direction.
+
+Grip pressure must change record acceleration through friction.
+
+Grip pressure must not apply an unrelated filter or gain change.
+
+### Rejected Production Model
+
+The former motor used a `0.3` second exponential rate ramp.
+
+It reached only approximately 63 percent after `0.3` seconds.
+
+It reached approximately 90 percent after `0.69` seconds.
+
+This curve did not represent constant starting torque.
+
+The former grip equation blended hand and platter rates directly.
+
+It did not solve separate platter and record inertia.
+
+The former hand-rate map also pulled rates near 1x toward 1x.
+
+That map changed a measured `0.70x` command into a different waveform rate.
+
+The production engine now removes this rate correction.
+
+### Selected Hardware Scale
+
+Reloop publishes a maximum starting torque of `4.5 kg/cm` for the RP-8000 MK2.
+
+This value is approximately `0.4413 N m`.
+
+Reloop publishes a `1.5 kg` platter and a startup time below `0.2` seconds.
+
+Source: <https://www.reloop.com/reloop-rp-8000-mk2>
+
+Technics publishes `0.18 N m` and `0.7` seconds for the SL-1200MK7.
+
+Source: <https://www.technics.com/au/products/dj-equipment/sl-1200mk7.specs.html>
+
+The production profile selects the current high-torque scale.
+
+It does not claim calibration to one RP-8000 MK2 unit.
+
+### Production Model
+
+`ScratchAcousticDsp` now calls `DeckMechanicalState` for each changing-motion sample.
+
+The model has separate platter and record inertia.
+
+The motor applies bounded torque through a PI servo.
+
+The slipmat applies static, kinetic, and viscous friction.
+
+The hand applies bounded static, kinetic, and viscous friction.
+
+The normalized grip uses a square-law transfer into a maximum `5 N` normal force.
+
+This transfer preserves a light-slip region and a firm-ownership region.
+
+The `5 N` limit and square-law transfer are estimates.
+
+No identified force measurement supports them yet.
+
+The production slipmat limits are `0.075 N m` static and `0.060 N m` kinetic.
+
+These values are estimates that satisfy startup and release requirements.
+
+### Automated Motion Results
+
+The powered record reaches more than `0.99x` by `0.2` seconds.
+
+Tests check the torque-ramp shape at `50`, `100`, `150`, and `200` milliseconds.
+
+A full grip nearly stops a nominal record within `50` milliseconds.
+
+The released record recovers above `0.75x` within `100` milliseconds.
+
+A `0.20` grip lets the powered platter continue below the record.
+
+A full grip reverses the record while the powered platter continues forward.
+
+A `0.45` grip has lower takeover acceleration than a full grip.
+
+All signed startup, grab, and release tests run in both directions.
+
+### Waveform Fidelity Results
+
+The resampler now has vocal-like waveform tests at unusual signed rates.
+
+The rates include `0.125x`, `0.37x`, `0.70x`, `1.35x`, and `2x`.
+
+The tests include the matching reverse rates.
+
+The normalized RMS waveform error must remain below `0.006`.
+
+A separate path accelerates continuously from `-0.8x` to `1.6x`.
+
+That path must meet the same waveform-error limit.
+
+These tests check time scaling and phase continuity.
+
+They do not apply formant correction or a pitch-shifting effect.
+
+### Wow, Flutter, and Needle Texture
+
+The optional acoustic path keeps a small deterministic speed variation.
+
+The free-playback wow depth is `0.00024` before the flutter contribution.
+
+The automated free-playback peak must stay below `0.00031` rate.
+
+Hand and slipmat speed difference can increase this variation.
+
+The automated interaction peak must stay below `0.00055` rate.
+
+These limits keep the variation small, but they do not prove a weighted hardware result.
+
+The optional surface path keeps needle texture during hand interaction.
+
+The slow-drag contact texture is more than eight times its nominal 1x value.
+
+The nominal contact noise stays below `2e-6` gain in the tested function.
+
+The iOS host enables the optional acoustic and surface groups.
+
+The canonical default remains transparent for hosts that do not enable them.
+
+### Callback Result
+
+The release WASM test uses stereo 128-frame blocks at 48 kilohertz.
+
+Normal playback measured `0.0164` milliseconds at p95.
+
+This value is `0.61` percent of the callback period.
+
+Reversing positive and negative `8x` motion measured `0.1173` milliseconds at p95.
+
+This value is `4.40` percent of the callback period.
+
+The steady motor state uses an exact quartz-lock fast path.
+
+The changing-motion path uses the torque and friction solver.
+
+### Confidence and Open Work
+
+Confidence is high that the old exponential startup and 1x hand lock were incorrect.
+
+Confidence is high that the new path preserves the declared waveform tests.
+
+Confidence is medium that the selected torque scale represents current turntablist hardware.
+
+Confidence is low for the exact grip-force and slipmat-friction values.
+
+Measure startup, grip takeover, slip, and release on identified current hardware.
+
+Measure the audio during slow drags, accelerations, stops, and reversals.
+
+Run level-matched listening tests with vocal material.
+
+Do not claim hardware calibration before these tests pass.

@@ -384,3 +384,75 @@ This is a 53.9-fold reduction and an approximately 34.6-decibel reduction.
 This result is a direct perceptual stability improvement.
 
 Hardware measurements must identify any future speed-dependent level profile.
+
+## Production Mechanics Extraction
+
+### Decision
+
+Keep `ScratchAcousticDsp` as the only production programme renderer.
+
+Move the validated deck state into that renderer.
+
+Do not activate `PhysicalHostRenderer` for programme playback.
+
+### Selected Components
+
+`ScratchAcousticDsp` now owns one `DeckMechanicalState`.
+
+The state provides motor torque, platter inertia, record inertia, slipmat friction, and hand friction.
+
+Replay snapshots now include the complete deck state.
+
+Native RPM changes preserve normalized rates and independent platter and record phase.
+
+Stable powered playback uses an exact servo-lock fast path.
+
+Changing motion uses the physical torque and friction solver.
+
+### Replaced Components
+
+Remove the `0.3` second exponential motor ramp from production rendering.
+
+Remove the second-order rate spring from production rendering.
+
+Remove direct linear blending between platter rate and hand rate.
+
+Remove the Gaussian hand-rate pull toward `1x`.
+
+Keep the bounded source-position correction as a hand target inside the deck state.
+
+### Audio Rule
+
+Use the solved record rate to advance the decoded source position.
+
+Do not add a voice processor, time stretcher, or formant correction.
+
+Use band-limited resampling when high speed could alias.
+
+Preserve exact source samples at aligned 1x playback.
+
+Pressure changes friction and acceleration only.
+
+Optional wow, flutter, and needle texture remain separate audible cues.
+
+### Performance Decision
+
+Keep the physical deck state in production.
+
+Normal release-WASM playback measured `0.0164` milliseconds at p95.
+
+Reversing positive and negative `8x` motion measured `0.1173` milliseconds at p95.
+
+Both results are below five percent of the applicable callback period.
+
+The full stylus, cartridge, phono, and swept-contact renderer remains outside production.
+
+Its callback result still fails the declared deadline.
+
+### Calibration Limit
+
+The motor torque uses a published current high-torque value.
+
+The grip transfer and slipmat friction remain estimates.
+
+Do not describe this seed as a calibrated hardware profile.

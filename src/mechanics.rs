@@ -99,6 +99,28 @@ impl PhysicalDeckConfig {
         }
     }
 
+    /// This seed represents a current high-torque DJ turntable.
+    /// Published values come from the Reloop RP-8000 MK2 specification.
+    /// Friction and servo values remain engineering estimates.
+    pub fn high_torque_dj_seed() -> Self {
+        let mut config = Self::sl_1200mk7_seed();
+        // Reloop publishes a 1.5 kg platter and a 332 mm diameter.
+        config.platter_inertia_kg_m2 = 0.5 * 1.5 * 0.166 * 0.166;
+        // Reloop publishes a maximum starting torque of 4.5 kg/cm.
+        config.motor_starting_torque_nm = 4.5 * 0.098_066_5;
+        // These values target the published startup time below 0.2 seconds.
+        config.motor_servo_kp_nm_per_rad_s = 0.80;
+        config.motor_servo_ki_nm_per_rad = 20.0;
+        config.motor_integral_limit_nm = 0.12;
+        config.motor_brake_torque_nm = 0.20;
+        config.motor_brake_gain_nm_per_rad_s = 0.80;
+        // These estimates keep the record coupled during motor startup.
+        // They also give a short, continuous take-up after hand release.
+        config.slipmat_static_torque_nm = 0.075;
+        config.slipmat_kinetic_torque_nm = 0.060;
+        config
+    }
+
     pub fn validate(self) -> Result<Self, PhysicalDeckConfigError> {
         validate_positive("nominalRpm", self.nominal_rpm)?;
         validate_minimum(
@@ -235,6 +257,7 @@ pub struct NormalizedDeckControl {
 impl DeckMechanicalControl {
     pub fn from_normalized(config: PhysicalDeckConfig, input: NormalizedDeckControl) -> Self {
         let nominal = config.nominal_angular_velocity_rad_s();
+        let normalized_grip = finite_or_zero(input.grip).clamp(0.0, 1.0);
         Self {
             motor_mode: input.motor_mode,
             motor_target_angular_velocity_rad_s: finite_or_zero(input.motor_rate)
@@ -248,7 +271,9 @@ impl DeckMechanicalControl {
             hand_target_angular_velocity_rad_s: finite_or_zero(input.hand_rate)
                 .clamp(-MAXIMUM_DECK_RATE, MAXIMUM_DECK_RATE)
                 * nominal,
-            hand_normal_force_n: finite_or_zero(input.grip).clamp(0.0, 1.0) * 5.0,
+            // Touch pressure has little useful resolution near zero.
+            // The square law preserves light slip and firm record ownership.
+            hand_normal_force_n: normalized_grip * normalized_grip * 5.0,
             hand_contact_radius_m: 0.12,
             stylus_torque_nm: finite_or_zero(input.stylus_torque_nm)
                 .clamp(-MAXIMUM_STYLUS_TORQUE_NM, MAXIMUM_STYLUS_TORQUE_NM),
@@ -1715,6 +1740,16 @@ mod tests {
         assert!(at_700_ms.platter_rate > 0.99, "{}", at_700_ms.platter_rate);
         assert!(at_700_ms.record_rate > 0.99, "{}", at_700_ms.record_rate);
         assert!((at_700_ms.platter_rate - at_700_ms.record_rate).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn high_torque_seed_reaches_nominal_speed_within_two_hundred_ms() {
+        let config = PhysicalDeckConfig::high_torque_dj_seed();
+        let mut state = DeckMechanicalState::new(config).unwrap();
+        let at_200_ms = advance_seconds(&mut state, 0.2, running_motor(config, 1.0));
+        assert!(at_200_ms.platter_rate > 0.99, "{at_200_ms:?}");
+        assert!(at_200_ms.record_rate > 0.99, "{}", at_200_ms.record_rate);
+        assert!(at_200_ms.platter_rate < 1.015, "{}", at_200_ms.platter_rate);
     }
 
     #[test]

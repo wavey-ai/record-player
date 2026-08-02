@@ -742,3 +742,79 @@ The permanent test requires a maximum step below `0.01` full scale.
 This correction changes production audio and can remove an audible reversal click.
 
 It does not prove complete agreement with reference hardware.
+
+## Motor and Hand-Motion Perceptual Update
+
+The production renderer now uses the canonical deck torque and friction state.
+
+This change replaces the former exponential motor ramp and direct rate blend.
+
+### Direct Perceptual Wins
+
+The motor reaches nominal speed within `0.2` seconds.
+
+The startup follows a torque-limited ramp before servo capture.
+
+This change addresses the previously audible slow startup.
+
+Full grip can stop or reverse the record while the platter remains powered.
+
+Partial grip changes takeover acceleration through friction.
+
+Release uses slipmat torque to recover powered motion without resetting source phase.
+
+The hand-rate path no longer pulls `0.70x` motion toward `1x`.
+
+This correction directly improves pitch and timing during manual rotation.
+
+### Vocal and Programme Fidelity
+
+The renderer does not use a voice effect or formant correction.
+
+It reads the decoded waveform along one signed source-position path.
+
+Automated tests cover unusual forward and reverse rates from `0.125x` through `2x`.
+
+The tests require less than `0.006` normalized RMS waveform error.
+
+An acceleration test crosses zero from `-0.8x` to `1.6x`.
+
+It uses the same error limit.
+
+Stable aligned 1x playback remains sample-exact when optional effects are disabled.
+
+### Retained Physical Cues
+
+The iOS host still enables the optional acoustic and surface groups.
+
+The work did not remove needle-drop, needle-lift, surface, or hand-interaction texture.
+
+The free-playback speed variation now uses a smaller top-tier scale.
+
+Hand and slipmat speed difference can increase that variation during interaction.
+
+Slow-drag needle texture remains stronger than its nominal 1x value.
+
+These cues remain estimates and need hardware recordings.
+
+### Performance Result
+
+Normal release-WASM playback measured `0.0164` milliseconds at p95.
+
+This value uses `0.61` percent of a 128-frame callback period at 48 kilohertz.
+
+Reversing positive and negative `8x` scratch measured `0.1173` milliseconds at p95.
+
+This value uses `4.40` percent of the callback period.
+
+The new mechanics are viable for the production callback.
+
+### Conclusion
+
+This pass makes the first motor start, hand rotation, grip takeover, and release more authentic.
+
+It also removes a direct hand-speed error that changed vocal pitch and duration.
+
+These are meaningful perceptual improvements.
+
+The work still does not prove superiority to identified hardware.
