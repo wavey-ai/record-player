@@ -17,6 +17,7 @@ use super::stylus::{
     trace_spherical_uniform_contacts, StylusGeometry, StylusTraceError, StylusTraceSample,
 };
 use super::tonearm::{SuspensionAxisConfig, TonearmConfig};
+use super::trace_admission::GrooveTraceAdmissionClass;
 
 const OUTPUT_SAMPLE_RATE_HZ: f64 = 192_000.0;
 const OUTPUT_DT_SECONDS: f64 = 1.0 / OUTPUT_SAMPLE_RATE_HZ;
@@ -883,7 +884,7 @@ struct VerticalReferenceState {
 
 #[derive(Debug, Clone, Copy)]
 struct VerticalReferenceOutput {
-    vertical_normal_force_n: f64,
+    projected_vertical_normal_force_n: f64,
     wall_normal_force_sum_n: f64,
     record_reaction_torque_nm: f64,
     contact: bool,
@@ -955,8 +956,6 @@ impl VerticalReferenceState {
         self.body_displacement_m += body_velocity_m_s * dt_seconds;
 
         let wall_slope = vertical_wall_slope * WALL_SCALE;
-        let wall_normal_force_sum_n =
-            std::f64::consts::SQRT_2 * vertical_normal_force_n * wall_slope.hypot(1.0);
         let direction = if tangential_velocity_m_s > 0.0 {
             1.0
         } else if tangential_velocity_m_s < 0.0 {
@@ -964,14 +963,19 @@ impl VerticalReferenceState {
         } else {
             0.0
         };
+        let wall_force_scale = 1.0 - direction * contact.groove_friction_coefficient * wall_slope;
+        let projected_vertical_normal_force_n = vertical_normal_force_n / wall_force_scale;
+        let projected_wall_force_sum_n =
+            std::f64::consts::SQRT_2 * projected_vertical_normal_force_n;
+        let wall_normal_force_sum_n = projected_wall_force_sum_n * wall_slope.hypot(1.0);
         let coulomb_force_n =
-            -direction * contact.groove_friction_coefficient * wall_normal_force_sum_n;
-        let modulation_force_n = -vertical_normal_force_n * vertical_wall_slope;
+            -direction * contact.groove_friction_coefficient * projected_wall_force_sum_n;
+        let modulation_force_n = -projected_vertical_normal_force_n * vertical_wall_slope;
         VerticalReferenceOutput {
-            vertical_normal_force_n,
+            projected_vertical_normal_force_n,
             wall_normal_force_sum_n,
             record_reaction_torque_nm: (coulomb_force_n + modulation_force_n) * GROOVE_RADIUS_M,
-            contact: vertical_normal_force_n > 0.0,
+            contact: projected_vertical_normal_force_n > 0.0,
         }
     }
 }
@@ -1389,19 +1393,20 @@ fn assert_trace_artifact_matches(
     replacement: StylusTraceSample,
     reference: OutwardIntervalTrace,
 ) {
-    for (field, expected) in [
+    let replacement_fields = [
         ("centerDisplacementM", replacement.center_displacement_m),
         ("contactOffsetM", replacement.contact_offset_m),
         ("grooveDisplacementM", replacement.groove_displacement_m),
         ("grooveSlope", replacement.groove_slope),
         ("tangentResidual", replacement.tangent_residual),
-    ] {
-        assert_eq!(
-            artifact["replacement"][field].as_f64().unwrap().to_bits(),
-            expected.to_bits(),
-            "replacement.{field}",
-        );
-    }
+    ];
+    let recorded_replacement_bits = replacement_fields
+        .map(|(field, _)| artifact["replacement"][field].as_f64().unwrap().to_bits());
+    let exact_replacement_bits = replacement_fields.map(|(_, expected)| expected.to_bits());
+    assert_eq!(
+        recorded_replacement_bits, exact_replacement_bits,
+        "replacement output: {replacement:?}"
+    );
     let recorded_reference = &artifact["outwardIntervalReference"];
     for (field, expected) in [
         (
@@ -1940,6 +1945,28 @@ fn pvc_004_inner_groove_sine_has_unresolved_separated_height_candidates() {
 }
 
 #[test]
+fn trace_admission_classifies_seed_and_pvc_004_without_rejecting_asset_construction() {
+    let seed = seed_domain_asset();
+    let (pvc_004_wall, _) = pvc_004_inner_groove_sine();
+    let pvc_004 = spatial_asset_for_wall(&pvc_004_wall);
+    let seed_certificate = seed.trace_admission_certificate();
+    let pvc_004_certificate = pvc_004.trace_admission_certificate();
+
+    assert_eq!(
+        seed_certificate.admission_class(),
+        GrooveTraceAdmissionClass::FixedCapPiecewise
+    );
+    assert_eq!(
+        pvc_004_certificate.admission_class(),
+        GrooveTraceAdmissionClass::FixedCapPiecewise
+    );
+    assert!(
+        pvc_004_certificate.maximum_wall_curvature_per_m()
+            > 1.0 / StylusGeometry::default().tracing_radius_m
+    );
+}
+
+#[test]
 #[ignore = "prints the PVC-004 unresolved height-order evidence"]
 fn report_pvc_004_unresolved_height_order() {
     let (samples, meters_per_frame) = pvc_004_inner_groove_sine();
@@ -2088,7 +2115,8 @@ fn vertical_reference_reduces_the_symmetric_two_wall_contact_equations() {
             / (1.0 + 0.5 * slope * slope).sqrt()
             * WALL_SCALE;
     assert!(
-        (production_vertical_normal_force_n - reference_output.vertical_normal_force_n).abs()
+        (production_vertical_normal_force_n - reference_output.projected_vertical_normal_force_n)
+            .abs()
             < 1.0e-12
     );
     assert!(

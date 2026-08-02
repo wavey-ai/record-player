@@ -1,7 +1,13 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::{RiaaConfig, RiaaRecordFilter};
+use super::trace_admission::{
+    certify_groove_trace_representation, GrooveTraceAdmissionBinding,
+    GrooveTraceAdmissionCertificate, GrooveTraceAdmissionError, GrooveTraceAdmissionLevel,
+    GrooveTraceEdgeCoverage, GrooveTraceRepresentationKind,
+    ValidatedGrooveTraceAdmissionCertificate, CONTIGUOUS_TRACE_REPRESENTATION_FORMAT_VERSION,
+};
+use super::{RiaaConfig, RiaaRecordFilter, StylusGeometry};
 use crate::resampler::adaptive_sample;
 
 const MIN_RADIUS_M: f64 = 0.03;
@@ -14,8 +20,8 @@ const MIN_CUTTER_DIMENSION_M: f64 = 1.0e-6;
 const MAX_CUTTER_DIMENSION_M: f64 = 500.0e-6;
 const SQRT_2: f64 = std::f64::consts::SQRT_2;
 
-pub const GROOVE_ASSET_FORMAT_VERSION: u32 = 3;
-pub const GROOVE_CONTENT_IDENTITY_VERSION: u32 = 3;
+pub const GROOVE_ASSET_FORMAT_VERSION: u32 = CONTIGUOUS_TRACE_REPRESENTATION_FORMAT_VERSION;
+pub const GROOVE_CONTENT_IDENTITY_VERSION: u32 = 4;
 pub const GROOVE_SPATIAL_PYRAMID_FORMAT_VERSION: u32 = 1;
 pub const GROOVE_SPATIAL_PYRAMID_LEVELS: usize = 4;
 const GROOVE_SPATIAL_DECIMATION_FILTER_RADIUS: u32 = 32;
@@ -684,6 +690,9 @@ pub struct GrooveAsset {
     lateral_displacement_m: Vec<f32>,
     vertical_displacement_m: Vec<f32>,
     spatial_pyramid: GrooveSpatialPyramid,
+    trace_admission_certificate: Option<GrooveTraceAdmissionCertificate>,
+    #[serde(skip)]
+    validated_trace_admission: Option<ValidatedGrooveTraceAdmissionCertificate>,
     report: GrooveCutReport,
     provenance: GrooveCutProvenance,
 }
@@ -974,6 +983,8 @@ impl GrooveAsset {
             lateral_displacement_m,
             vertical_displacement_m,
             spatial_pyramid,
+            trace_admission_certificate: None,
+            validated_trace_admission: None,
             report,
             provenance: GrooveCutProvenance {
                 source,
@@ -985,7 +996,9 @@ impl GrooveAsset {
             },
         };
         asset.provenance.content_identity = asset.calculate_content_identity();
+        asset.trace_admission_certificate = Some(asset.calculate_trace_admission_certificate()?);
         asset.validate_with_pyramid_check(false)?;
+        asset.validated_trace_admission = Some(asset.validated_trace_admission()?);
         Ok(asset)
     }
 
@@ -1029,6 +1042,10 @@ impl GrooveAsset {
                 &self.vertical_displacement_m,
             )?;
         }
+        let certificate = self
+            .trace_admission_certificate
+            .ok_or(GrooveError::MissingTraceAdmissionCertificate)?;
+        certificate.validate_recomputed(self.calculate_trace_admission_certificate()?)?;
         validate_cut_report(self.report, &self.lateral_displacement_m, layout, cut)?;
         if self.provenance.content_identity.identity_version != GROOVE_CONTENT_IDENTITY_VERSION
             || self.provenance.content_identity != self.calculate_content_identity()
@@ -1047,6 +1064,48 @@ impl GrooveAsset {
             self.report,
             &self.lateral_displacement_m,
             &self.vertical_displacement_m,
+        )
+    }
+
+    fn calculate_trace_admission_certificate(
+        &self,
+    ) -> Result<GrooveTraceAdmissionCertificate, GrooveTraceAdmissionError> {
+        let levels = self.spatial_pyramid.levels();
+        if levels.len() != GROOVE_SPATIAL_PYRAMID_LEVELS {
+            return Err(GrooveTraceAdmissionError::InvalidRepresentation);
+        }
+        let spatial_levels = std::array::from_fn(|index| GrooveTraceAdmissionLevel {
+            first_source_frame: levels[index].first_source_frame,
+            source_frame_step: levels[index].source_frame_step,
+            lateral_displacement_m: &levels[index].lateral_displacement_m,
+            vertical_displacement_m: &levels[index].vertical_displacement_m,
+        });
+        let final_frame = self.lateral_displacement_m.len().saturating_sub(1) as f64;
+        certify_groove_trace_representation(
+            GrooveTraceAdmissionBinding {
+                representation_kind: GrooveTraceRepresentationKind::Contiguous,
+                representation_format_version: GROOVE_ASSET_FORMAT_VERSION,
+                source_content_identity: self.provenance.content_identity,
+                generation: 0,
+                core_start_frame: 0,
+                core_end_frame_exclusive: self.lateral_displacement_m.len() as u64,
+                stored_start_frame: 0,
+                stored_end_frame_exclusive: self.lateral_displacement_m.len() as u64,
+                record_end_frame_exclusive: self.lateral_displacement_m.len() as u64,
+                minimum_meters_per_source_frame: self.layout.meters_per_frame_at(
+                    final_frame,
+                    self.provenance.cut.groove_pitch_m_per_revolution,
+                ),
+                maximum_geometry: StylusGeometry::default(),
+                edge_coverage: GrooveTraceEdgeCoverage::contiguous(),
+            },
+            GrooveTraceAdmissionLevel {
+                first_source_frame: 0,
+                source_frame_step: 1,
+                lateral_displacement_m: &self.lateral_displacement_m,
+                vertical_displacement_m: &self.vertical_displacement_m,
+            },
+            &spatial_levels,
         )
     }
 
@@ -1080,6 +1139,28 @@ impl GrooveAsset {
 
     pub fn spatial_pyramid(&self) -> &GrooveSpatialPyramid {
         &self.spatial_pyramid
+    }
+
+    pub fn trace_admission_certificate(&self) -> GrooveTraceAdmissionCertificate {
+        self.trace_admission_certificate
+            .expect("a validated groove asset has a trace-admission certificate")
+    }
+
+    pub fn trace_admission_identity(&self) -> GrooveContentIdentity {
+        let mut hash = GrooveContentHasher::new(b"record-player-trace-admitted-source-v1\0");
+        hash.identity(self.provenance.content_identity);
+        hash.identity(self.trace_admission_certificate().certificate_identity());
+        hash.finish()
+    }
+
+    pub(crate) fn validated_trace_admission(
+        &self,
+    ) -> Result<ValidatedGrooveTraceAdmissionCertificate, GrooveTraceAdmissionError> {
+        if let Some(validated) = self.validated_trace_admission {
+            return Ok(validated);
+        }
+        self.trace_admission_certificate()
+            .validate_recomputed(self.calculate_trace_admission_certificate()?)
     }
 
     /// Selects two immutable levels for one render-step source advance.
@@ -1121,8 +1202,8 @@ struct GrooveAssetWire {
     layout: GrooveLayout,
     lateral_displacement_m: Vec<f32>,
     vertical_displacement_m: Vec<f32>,
-    #[serde(default)]
-    spatial_pyramid: Option<GrooveSpatialPyramid>,
+    spatial_pyramid: GrooveSpatialPyramid,
+    trace_admission_certificate: GrooveTraceAdmissionCertificate,
     report: GrooveCutReport,
     provenance: GrooveCutProvenance,
 }
@@ -1133,81 +1214,25 @@ impl<'de> Deserialize<'de> for GrooveAsset {
         D: serde::Deserializer<'de>,
     {
         let wire = GrooveAssetWire::deserialize(deserializer)?;
-        if wire.format_version == 1 && wire.spatial_pyramid.is_none() {
-            validate_legacy_asset(&wire).map_err(serde::de::Error::custom)?;
-            let spatial_pyramid = GrooveSpatialPyramid::build(
-                &wire.lateral_displacement_m,
-                &wire.vertical_displacement_m,
-            )
-            .map_err(serde::de::Error::custom)?;
-            let mut asset = Self {
-                format_version: GROOVE_ASSET_FORMAT_VERSION,
-                layout: wire.layout,
-                lateral_displacement_m: wire.lateral_displacement_m,
-                vertical_displacement_m: wire.vertical_displacement_m,
-                spatial_pyramid,
-                report: wire.report,
-                provenance: wire.provenance,
-            };
-            asset.provenance.content_identity = asset.calculate_content_identity();
-            asset
-                .validate_with_pyramid_check(false)
-                .map_err(serde::de::Error::custom)?;
-            return Ok(asset);
-        }
-        let asset = Self {
+        let mut asset = Self {
             format_version: wire.format_version,
             layout: wire.layout,
             lateral_displacement_m: wire.lateral_displacement_m,
             vertical_displacement_m: wire.vertical_displacement_m,
-            spatial_pyramid: wire
-                .spatial_pyramid
-                .ok_or_else(|| serde::de::Error::custom("groove spatial pyramid is missing"))?,
+            spatial_pyramid: wire.spatial_pyramid,
+            trace_admission_certificate: Some(wire.trace_admission_certificate),
+            validated_trace_admission: None,
             report: wire.report,
             provenance: wire.provenance,
         };
         asset.validate().map_err(serde::de::Error::custom)?;
+        asset.validated_trace_admission = Some(
+            asset
+                .validated_trace_admission()
+                .map_err(serde::de::Error::custom)?,
+        );
         Ok(asset)
     }
-}
-
-fn validate_legacy_asset(wire: &GrooveAssetWire) -> Result<(), GrooveError> {
-    let layout = wire.layout.validate()?;
-    let cut = wire.provenance.cut.validate(layout.groove_sample_rate_hz)?;
-    let lateral = &wire.lateral_displacement_m;
-    let vertical = &wire.vertical_displacement_m;
-    if lateral.len() != vertical.len() {
-        return Err(GrooveError::ChannelLengthMismatch);
-    }
-    if lateral.len() < 4 {
-        return Err(GrooveError::InsufficientFrames);
-    }
-    if lateral
-        .iter()
-        .chain(vertical)
-        .any(|sample| !sample.is_finite())
-    {
-        return Err(GrooveError::NonfiniteDisplacement);
-    }
-    wire.provenance
-        .source
-        .validate(lateral.len(), layout.groove_sample_rate_hz)?;
-    validate_cut_report(wire.report, lateral, layout, cut)?;
-    let expected = compute_legacy_content_identity(
-        1,
-        layout,
-        wire.provenance.source,
-        cut,
-        wire.report,
-        lateral,
-        vertical,
-        None,
-        1,
-    );
-    if wire.provenance.content_identity != expected {
-        return Err(GrooveError::ContentIdentityMismatch);
-    }
-    Ok(())
 }
 
 pub fn encode_45_45(left: f64, right: f64) -> (f64, f64) {
@@ -1252,12 +1277,16 @@ pub enum GrooveError {
     InvalidProvenance,
     #[error("groove content identity does not match the asset")]
     ContentIdentityMismatch,
+    #[error("groove asset has no trace-admission certificate")]
+    MissingTraceAdmissionCertificate,
     #[error("spatial groove pyramid is invalid")]
     InvalidSpatialPyramid,
     #[error("spatial groove pyramid does not match the source groove")]
     SpatialPyramidMismatch,
     #[error("source-frame advance must be finite")]
     InvalidSourceFrameAdvance,
+    #[error(transparent)]
+    TraceAdmission(#[from] GrooveTraceAdmissionError),
 }
 
 fn validate_groove_pitch(value: f64) -> Result<(), GrooveError> {
@@ -1515,125 +1544,6 @@ pub(crate) fn finalize_groove_content_identity(
     hash.identity(lateral_content_identity);
     hash.identity(vertical_content_identity);
     hash.finish()
-}
-
-#[allow(clippy::too_many_arguments)]
-fn compute_legacy_content_identity(
-    format_version: u32,
-    layout: GrooveLayout,
-    source: GrooveSourceProvenance,
-    cut: RecordCutConfig,
-    report: GrooveCutReport,
-    lateral_displacement_m: &[f32],
-    vertical_displacement_m: &[f32],
-    spatial_pyramid: Option<&GrooveSpatialPyramid>,
-    identity_version: u32,
-) -> GrooveContentIdentity {
-    let mut hash = Sha256::new();
-    hash.update(b"record-player-groove-asset\0");
-    hash_u32(&mut hash, format_version);
-    for value in [
-        layout.outer_program_radius_m,
-        layout.inner_program_radius_m,
-        layout.nominal_rpm,
-        layout.groove_sample_rate_hz,
-    ] {
-        hash_f64(&mut hash, value);
-    }
-    hash.update(&[match source.kind {
-        GrooveSourceKind::Pcm => 0,
-        GrooveSourceKind::StereoWallVelocity => 1,
-        GrooveSourceKind::SpatialDisplacement => 2,
-    }]);
-    hash_optional_f64(&mut hash, source.source_sample_rate_hz);
-    match source.source_channel_count {
-        Some(channel_count) => hash.update(&[1, channel_count]),
-        None => hash.update(&[0]),
-    }
-    hash_u64(&mut hash, source.source_frame_count);
-    for value in [
-        cut.full_scale_sine_velocity_rms_m_s,
-        cut.cutter_highpass_hz,
-        cut.cutter_bandwidth_hz,
-        cut.groove_pitch_m_per_revolution,
-        cut.groove_top_width_m,
-        cut.minimum_land_width_m,
-        report.peak_left_velocity_m_s,
-        report.peak_right_velocity_m_s,
-        report.rms_left_velocity_m_s,
-        report.rms_right_velocity_m_s,
-        report.peak_lateral_displacement_m,
-        report.peak_vertical_displacement_m,
-        report.final_lateral_drift_m,
-        report.final_vertical_drift_m,
-        report.groove_pitch_m_per_revolution,
-        report.final_program_radius_m,
-    ] {
-        hash_f64(&mut hash, value);
-    }
-    hash.update(&[
-        u8::from(report.programme_exceeds_available_radius),
-        u8::from(report.adjacent_turn_clearance_failed),
-    ]);
-    hash_optional_f64(&mut hash, report.minimum_adjacent_turn_clearance_m);
-    match report.first_failing_clearance_frame_pair {
-        Some(pair) => {
-            hash.update(&[1]);
-            hash_u64(&mut hash, pair.outer_frame);
-            hash_u64(&mut hash, pair.inner_frame);
-        }
-        None => hash.update(&[0]),
-    }
-    hash_u64(&mut hash, lateral_displacement_m.len() as u64);
-    for sample in lateral_displacement_m {
-        hash.update(&sample.to_bits().to_le_bytes());
-    }
-    hash_u64(&mut hash, vertical_displacement_m.len() as u64);
-    for sample in vertical_displacement_m {
-        hash.update(&sample.to_bits().to_le_bytes());
-    }
-    if let Some(spatial_pyramid) = spatial_pyramid {
-        hash_u32(&mut hash, spatial_pyramid.format_version);
-        hash_u32(&mut hash, spatial_pyramid.levels.len() as u32);
-        for level in &spatial_pyramid.levels {
-            hash_u64(&mut hash, level.first_source_frame);
-            hash_u32(&mut hash, level.source_frame_step);
-            hash_u64(&mut hash, level.lateral_displacement_m.len() as u64);
-            for sample in &level.lateral_displacement_m {
-                hash.update(&sample.to_bits().to_le_bytes());
-            }
-            hash_u64(&mut hash, level.vertical_displacement_m.len() as u64);
-            for sample in &level.vertical_displacement_m {
-                hash.update(&sample.to_bits().to_le_bytes());
-            }
-        }
-    }
-    GrooveContentIdentity {
-        identity_version,
-        sha256: hash.finalize(),
-    }
-}
-
-fn hash_u32(hash: &mut Sha256, value: u32) {
-    hash.update(&value.to_le_bytes());
-}
-
-fn hash_u64(hash: &mut Sha256, value: u64) {
-    hash.update(&value.to_le_bytes());
-}
-
-fn hash_f64(hash: &mut Sha256, value: f64) {
-    hash_u64(hash, value.to_bits());
-}
-
-fn hash_optional_f64(hash: &mut Sha256, value: Option<f64>) {
-    match value {
-        Some(value) => {
-            hash.update(&[1]);
-            hash_f64(hash, value);
-        }
-        None => hash.update(&[0]),
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2174,7 +2084,7 @@ mod tests {
     }
 
     #[test]
-    fn deserialization_validates_and_migrates_a_version_one_asset() {
+    fn deserialization_requires_the_current_pyramid_and_trace_certificate() {
         let velocity = vec![0.01_f32; 512];
         let asset = GrooveAsset::from_stereo_wall_velocity_m_s(
             &velocity,
@@ -2182,33 +2092,23 @@ mod tests {
             GrooveLayout::default(),
         )
         .unwrap();
-        let version_one_identity = compute_legacy_content_identity(
-            1,
-            asset.layout,
-            asset.provenance.source,
-            asset.provenance.cut,
-            asset.report,
-            &asset.lateral_displacement_m,
-            &asset.vertical_displacement_m,
-            None,
-            1,
-        );
         let mut value = serde_json::to_value(&asset).unwrap();
         value["formatVersion"] = serde_json::json!(1);
-        value.as_object_mut().unwrap().remove("spatialPyramid");
-        value["provenance"]["contentIdentity"] =
-            serde_json::to_value(version_one_identity).unwrap();
+        assert!(serde_json::from_value::<GrooveAsset>(value).is_err());
 
-        let migrated: GrooveAsset = serde_json::from_value(value).unwrap();
-        assert_eq!(migrated.format_version(), GROOVE_ASSET_FORMAT_VERSION);
-        assert_eq!(
-            migrated.provenance().content_identity().identity_version(),
-            GROOVE_CONTENT_IDENTITY_VERSION
-        );
-        assert_eq!(
-            migrated.spatial_pyramid().levels().len(),
-            GROOVE_SPATIAL_PYRAMID_LEVELS
-        );
+        let mut missing_pyramid = serde_json::to_value(&asset).unwrap();
+        missing_pyramid
+            .as_object_mut()
+            .unwrap()
+            .remove("spatialPyramid");
+        assert!(serde_json::from_value::<GrooveAsset>(missing_pyramid).is_err());
+
+        let mut missing_certificate = serde_json::to_value(&asset).unwrap();
+        missing_certificate
+            .as_object_mut()
+            .unwrap()
+            .remove("traceAdmissionCertificate");
+        assert!(serde_json::from_value::<GrooveAsset>(missing_certificate).is_err());
     }
 
     fn sample_level_at(level: GrooveSpatialLevelView<'_>, absolute_frame: f64) -> f64 {

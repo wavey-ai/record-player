@@ -4,24 +4,28 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::groove::GrooveContentIdentity;
-use super::stylus::{trace_spherical_45_45_wall_multiresolution_contacts, StylusTraceContactSet};
+use super::stylus::{
+    trace_spherical_45_45_wall_multiresolution_contacts_certified_concave,
+    trace_spherical_45_45_wall_multiresolution_contacts_certified_piecewise, StylusTraceContactSet,
+};
 use super::{
     contact::{
-        MidpointPickupGeometry, MAX_MIDPOINT_CANDIDATE_BRANCHES, MAX_MIDPOINT_LINEAR_SOLVES,
+        groove_friction_geometry_is_well_conditioned, MidpointPickupGeometry,
+        MAX_MIDPOINT_CANDIDATE_BRANCHES, MAX_MIDPOINT_LINEAR_SOLVES,
     },
     electromechanical::{process_coupled_record_player_midpoint, CoupledRecordPlayerStepError},
 };
 use super::{
     GrooveAsset, GrooveCutReport, GrooveError, GrooveGenerationId, GrooveLayout,
-    MovingMagnetCartridge, MovingMagnetCartridgeSnapshot, MovingMagnetCartridgeTelemetry,
-    PagedGrooveCache, PagedGrooveError, PagedGroovePrefetchPlan, PagedGrooveRenderMiss,
-    PagedGrooveRenderRequest, PagedGrooveTraceResolution, PhysicalPhonoStage,
-    PhysicalPhonoStageSnapshot, PhysicalPhonoStageTelemetry, PhysicalPlaybackConfig,
-    PhysicalProfile, PickupContactSurface, PickupMechanicalInput, PickupMechanicalSnapshot,
-    PickupMechanicalState, PickupMechanicalTelemetry, RadialContactRegion, RadialTrackingInput,
-    RadialTrackingObservation, RadialTrackingSnapshot, RadialTrackingState,
-    RadialTrackingTelemetry, RealtimePagedGrooveCache, RealtimePagedGrooveError,
-    RealtimePagedGrooveTraceResolution, RecordCutConfig, StylusGeometry,
+    GrooveTraceAdmissionClass, GrooveTraceAdmissionError, MovingMagnetCartridge,
+    MovingMagnetCartridgeSnapshot, MovingMagnetCartridgeTelemetry, PagedGrooveCache,
+    PagedGrooveError, PagedGroovePrefetchPlan, PagedGrooveRenderMiss, PagedGrooveRenderRequest,
+    PagedGrooveTraceResolution, PhysicalPhonoStage, PhysicalPhonoStageSnapshot,
+    PhysicalPhonoStageTelemetry, PhysicalPlaybackConfig, PhysicalProfile, PickupContactSurface,
+    PickupMechanicalInput, PickupMechanicalSnapshot, PickupMechanicalState,
+    PickupMechanicalTelemetry, RadialContactRegion, RadialTrackingInput, RadialTrackingObservation,
+    RadialTrackingSnapshot, RadialTrackingState, RadialTrackingTelemetry, RealtimePagedGrooveCache,
+    RealtimePagedGrooveError, RealtimePagedGrooveTraceResolution, RecordCutConfig, StylusGeometry,
     MAX_ABS_PHYSICAL_OUTPUT_SAMPLE, MAX_PAGED_GROOVE_PREFETCH_CANDIDATES,
     MAX_PAGED_GROOVE_RENDER_SPEED,
 };
@@ -36,7 +40,7 @@ use crate::{
     DeckMechanicalError, DeckMechanicalSnapshot, DeckMechanicalState, DeckMechanicalTelemetry,
 };
 
-const PHYSICAL_RECORD_PLAYER_SNAPSHOT_VERSION: u32 = 8;
+const PHYSICAL_RECORD_PLAYER_SNAPSHOT_VERSION: u32 = 9;
 const MAX_EXACT_GROOVE_FRAME_COUNT: u64 = 1_u64 << 53;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +57,7 @@ pub enum PhysicalGrooveSourceKind {
 pub struct PhysicalGrooveSourceIdentity {
     pub kind: PhysicalGrooveSourceKind,
     pub canonical_content_identity: GrooveContentIdentity,
+    pub trace_admitted_representation_identity: GrooveContentIdentity,
     pub paged_metadata_identity: Option<GrooveContentIdentity>,
     pub cached_generation: Option<GrooveGenerationId>,
     pub requested_generation: Option<GrooveGenerationId>,
@@ -142,6 +147,7 @@ impl PhysicalGrooveSource {
             PhysicalGrooveSourceInner::Contiguous(groove) => PhysicalGrooveSourceIdentity {
                 kind: PhysicalGrooveSourceKind::Contiguous,
                 canonical_content_identity: groove.provenance().content_identity(),
+                trace_admitted_representation_identity: groove.trace_admission_identity(),
                 paged_metadata_identity: None,
                 cached_generation: None,
                 requested_generation: None,
@@ -152,6 +158,8 @@ impl PhysicalGrooveSource {
             } => PhysicalGrooveSourceIdentity {
                 kind: PhysicalGrooveSourceKind::Paged,
                 canonical_content_identity: cache.metadata().source_content_identity(),
+                trace_admitted_representation_identity: cache
+                    .trace_admitted_representation_identity(),
                 paged_metadata_identity: Some(cache.content_identity()),
                 cached_generation: Some(cache.generation()),
                 requested_generation: Some(*requested_generation),
@@ -162,6 +170,8 @@ impl PhysicalGrooveSource {
             } => PhysicalGrooveSourceIdentity {
                 kind: PhysicalGrooveSourceKind::RealtimePaged,
                 canonical_content_identity: cache.metadata().source_content_identity(),
+                trace_admitted_representation_identity: cache
+                    .trace_admitted_representation_identity(),
                 paged_metadata_identity: Some(cache.content_identity()),
                 cached_generation: Some(cache.generation()),
                 requested_generation: Some(*requested_generation),
@@ -246,6 +256,20 @@ impl PhysicalGrooveSource {
         }
     }
 
+    fn maximum_certified_absolute_wall_slope(&self) -> f64 {
+        match &self.inner {
+            PhysicalGrooveSourceInner::Contiguous(groove) => groove
+                .trace_admission_certificate()
+                .maximum_absolute_wall_slope(),
+            PhysicalGrooveSourceInner::Paged { cache, .. } => {
+                cache.maximum_certified_absolute_wall_slope()
+            }
+            PhysicalGrooveSourceInner::RealtimePaged { cache, .. } => {
+                cache.maximum_certified_absolute_wall_slope()
+            }
+        }
+    }
+
     fn trace(
         &self,
         absolute_frame_position: f64,
@@ -258,29 +282,61 @@ impl PhysicalGrooveSource {
                 let selection = groove.spatial_level_selection(source_frame_advance.abs())?;
                 let lower = selection.lower();
                 let upper = selection.upper();
-                let wall_contacts = [0, 1].map(|wall| {
-                    trace_spherical_45_45_wall_multiresolution_contacts(
-                        lower.lateral_displacement_m(),
-                        lower.vertical_displacement_m(),
-                        lower.first_source_frame(),
-                        lower.source_frame_step(),
-                        upper.lateral_displacement_m(),
-                        upper.vertical_displacement_m(),
-                        upper.first_source_frame(),
-                        upper.source_frame_step(),
-                        selection.upper_level_blend(),
-                        wall,
-                        absolute_frame_position,
-                        meters_per_source_frame,
-                        geometry,
-                    )
-                });
+                let admission = groove.validated_trace_admission()?;
+                admission.validate_for_active_tracing(geometry)?;
+                let wall_contacts =
+                    [0, 1].map(|wall| match admission.certificate().admission_class() {
+                        GrooveTraceAdmissionClass::StrictConcavity => {
+                            trace_spherical_45_45_wall_multiresolution_contacts_certified_concave(
+                                lower.lateral_displacement_m(),
+                                lower.vertical_displacement_m(),
+                                lower.first_source_frame(),
+                                lower.source_frame_step(),
+                                upper.lateral_displacement_m(),
+                                upper.vertical_displacement_m(),
+                                upper.first_source_frame(),
+                                upper.source_frame_step(),
+                                selection.upper_level_blend(),
+                                wall,
+                                absolute_frame_position,
+                                meters_per_source_frame,
+                                geometry,
+                                admission.certified_concave_trace_bounds(geometry)?,
+                            )
+                            .map_err(PhysicalRecordPlayerError::from)
+                        }
+                        GrooveTraceAdmissionClass::FixedCapPiecewise => {
+                            trace_spherical_45_45_wall_multiresolution_contacts_certified_piecewise(
+                                lower.lateral_displacement_m(),
+                                lower.vertical_displacement_m(),
+                                lower.first_source_frame(),
+                                lower.source_frame_step(),
+                                upper.lateral_displacement_m(),
+                                upper.vertical_displacement_m(),
+                                upper.first_source_frame(),
+                                upper.source_frame_step(),
+                                selection.upper_level_blend(),
+                                wall,
+                                absolute_frame_position,
+                                meters_per_source_frame,
+                                geometry,
+                                admission.fixed_cap_piecewise_trace_bounds(geometry)?,
+                            )
+                            .map_err(PhysicalRecordPlayerError::from)
+                        }
+                        rejected => Err(PhysicalRecordPlayerError::TraceAdmission(
+                            rejected
+                                .rejection_error()
+                                .expect("non-trace admission classes have a typed rejection"),
+                        )),
+                    });
+                let [left_wall_contacts, right_wall_contacts] = wall_contacts;
                 Ok(GrooveSourceTrace {
                     groove_radius_m: groove.radius_at_frame(absolute_frame_position),
                     spatial_filter_lower_step_frames: lower.source_frame_step(),
                     spatial_filter_upper_step_frames: upper.source_frame_step(),
                     spatial_filter_upper_blend: selection.upper_level_blend(),
-                    wall_contacts: [wall_contacts[0]?, wall_contacts[1]?],
+                    wall_contacts: [left_wall_contacts?, right_wall_contacts?],
                 })
             }
             PhysicalGrooveSourceInner::Paged {
@@ -348,6 +404,20 @@ impl GrooveSourceDescriptor {
     fn radius_at_frame(self, frame: f64) -> f64 {
         self.layout
             .radius_at_frame(frame, self.cut.groove_pitch_m_per_revolution)
+    }
+}
+
+fn validate_source_friction_geometry(
+    source: &PhysicalGrooveSource,
+    friction_coefficient: f64,
+) -> Result<(), PhysicalRecordPlayerError> {
+    if groove_friction_geometry_is_well_conditioned(
+        friction_coefficient,
+        source.maximum_certified_absolute_wall_slope(),
+    ) {
+        Ok(())
+    } else {
+        Err(super::PickupMechanicalError::IllConditionedGrooveWallFrictionGeometry.into())
     }
 }
 
@@ -632,6 +702,15 @@ impl PhysicalRecordPlayer {
         if descriptor.frame_count > MAX_EXACT_GROOVE_FRAME_COUNT {
             return Err(PhysicalRecordPlayerError::GrooveFrameCountNotExactlyRepresentable);
         }
+        validate_source_friction_geometry(
+            &source,
+            self.profile.config.contact.groove_friction_coefficient,
+        )?;
+        if let Some(groove) = source.as_contiguous() {
+            groove
+                .validated_trace_admission()?
+                .validate_for_active_tracing(self.profile.config.stylus)?;
+        }
         if let Some(cache) = source.as_paged_cache() {
             cache
                 .metadata()
@@ -666,7 +745,8 @@ impl PhysicalRecordPlayer {
         Ok(previous)
     }
 
-    /// Replaces one immutable page publication without resetting player state.
+    /// Replaces one page publication with an immutable extension.
+    /// The operation keeps player state and changes the loaded representation identity.
     pub fn replace_loaded_paged_cache_snapshot(
         &mut self,
         new_cache: Arc<PagedGrooveCache>,
@@ -674,7 +754,15 @@ impl PhysicalRecordPlayer {
         new_cache
             .metadata()
             .validate_tracing_geometry(self.profile.config.stylus)?;
-        let (old_metadata, requested_generation, old_descriptor) = match self.source.as_ref() {
+        if !groove_friction_geometry_is_well_conditioned(
+            self.profile.config.contact.groove_friction_coefficient,
+            new_cache.maximum_certified_absolute_wall_slope(),
+        ) {
+            return Err(
+                super::PickupMechanicalError::IllConditionedGrooveWallFrictionGeometry.into(),
+            );
+        }
+        let (old_cache, requested_generation, old_descriptor) = match self.source.as_ref() {
             Some(
                 source @ PhysicalGrooveSource {
                     inner:
@@ -683,11 +771,12 @@ impl PhysicalRecordPlayer {
                             requested_generation,
                         },
                 },
-            ) => (cache.metadata(), *requested_generation, source.descriptor()),
+            ) => (cache, *requested_generation, source.descriptor()),
             _ => {
                 return Err(PhysicalRecordPlayerError::PagedCacheReplacementRequiresPagedSource);
             }
         };
+        let old_metadata = old_cache.metadata();
         let new_metadata = new_cache.metadata();
         let new_descriptor =
             PhysicalGrooveSource::paged_generation(Arc::clone(&new_cache), requested_generation)
@@ -701,6 +790,7 @@ impl PhysicalRecordPlayer {
             || old_descriptor.frame_count != new_descriptor.frame_count
             || old_descriptor.canonical_content_identity
                 != new_descriptor.canonical_content_identity
+            || !new_cache.is_immutable_extension_of(old_cache)
         {
             return Err(PhysicalRecordPlayerError::PagedCacheReplacementMismatch);
         }
@@ -1231,6 +1321,12 @@ impl PhysicalRecordPlayer {
                 maximum: self.profile.config.solver.maximum_render_frames,
             }
         })?;
+        if let Some(source) = &self.source {
+            validate_source_friction_geometry(
+                source,
+                self.profile.config.contact.groove_friction_coefficient,
+            )?;
+        }
         let render_checkpoint = self.render_checkpoint();
 
         self.control_items.clear();
@@ -1620,6 +1716,8 @@ pub enum PhysicalRecordPlayerError {
     #[error(transparent)]
     Stylus(#[from] super::StylusTraceError),
     #[error(transparent)]
+    TraceAdmission(#[from] GrooveTraceAdmissionError),
+    #[error(transparent)]
     Groove(#[from] GrooveError),
     #[error(transparent)]
     PagedGroove(#[from] PagedGrooveError),
@@ -1691,12 +1789,31 @@ mod tests {
         frequency_hz: f64,
         right_polarity: f64,
     ) -> Arc<GrooveAsset> {
+        stereo_sine_groove_with_gain(profile, frequency_hz, right_polarity, 1.0)
+    }
+
+    fn stereo_sine_groove_with_gain(
+        profile: &PhysicalProfile,
+        frequency_hz: f64,
+        right_polarity: f64,
+        velocity_gain: f64,
+    ) -> Arc<GrooveAsset> {
         let sample_rate = profile.config.groove.groove_sample_rate_hz;
         let frames = sample_rate as usize;
+        let zero_edge_frames = 1_024;
+        let peak_wall_velocity_m_s = profile.config.record_cut.full_scale_sine_velocity_rms_m_s
+            * std::f64::consts::SQRT_2
+            * 0.5;
         let left: Vec<f32> = (0..frames)
             .map(|frame| {
-                (0.5 * (std::f64::consts::TAU * frequency_hz * frame as f64 / sample_rate).sin())
-                    as f32
+                if frame < zero_edge_frames || frame + zero_edge_frames >= frames {
+                    0.0
+                } else {
+                    (peak_wall_velocity_m_s
+                        * velocity_gain
+                        * (std::f64::consts::TAU * frequency_hz * frame as f64 / sample_rate).sin())
+                        as f32
+                }
             })
             .collect();
         let right: Vec<f32> = left
@@ -1704,14 +1821,59 @@ mod tests {
             .map(|sample| (*sample as f64 * right_polarity) as f32)
             .collect();
         Arc::new(
-            GrooveAsset::cut_from_pcm(
-                &[&left, &right],
-                sample_rate,
+            GrooveAsset::from_stereo_wall_velocity_m_s_with_cut(
+                &left,
+                &right,
                 profile.config.groove,
                 profile.config.record_cut,
             )
             .unwrap(),
         )
+    }
+
+    #[test]
+    fn sine_fixture_has_exact_c1_record_clamps_at_every_spatial_level() {
+        let profile = PhysicalProfile::sl_1200mk7_concorde_mkii_scratch_seed();
+        let groove = sine_groove(&profile, 997.0);
+        let assert_clamped = |label: &str, lateral: &[f32], vertical: &[f32]| {
+            for index in 1..4 {
+                assert_eq!(lateral[0], lateral[index], "{label} left lateral {index}");
+                assert_eq!(
+                    vertical[0], vertical[index],
+                    "{label} left vertical {index}"
+                );
+                assert_eq!(
+                    lateral[lateral.len() - 1],
+                    lateral[lateral.len() - 1 - index],
+                    "{label} right lateral {index}"
+                );
+                assert_eq!(
+                    vertical[vertical.len() - 1],
+                    vertical[vertical.len() - 1 - index],
+                    "{label} right vertical {index}"
+                );
+            }
+        };
+        assert_clamped(
+            "base",
+            groove.lateral_displacement_m(),
+            groove.vertical_displacement_m(),
+        );
+        for (index, level) in groove.spatial_pyramid().levels().iter().enumerate() {
+            assert_clamped(
+                match index {
+                    0 => "level 0",
+                    1 => "level 1",
+                    2 => "level 2",
+                    _ => "level 3",
+                },
+                level.lateral_displacement_m(),
+                level.vertical_displacement_m(),
+            );
+        }
+        assert!(groove
+            .trace_admission_certificate()
+            .clamped_edges_c1_certified());
     }
 
     fn motor_control(config: PhysicalDeckConfig, rate: f64) -> DeckMechanicalControl {
@@ -1731,6 +1893,17 @@ mod tests {
 
     fn player_control(config: PhysicalDeckConfig, rate: f64) -> PlayerControl {
         PlayerControl::new(motor_control(config, rate), true)
+    }
+
+    fn assert_player_state_matches_ignoring_source_representation(
+        left: &PhysicalRecordPlayer,
+        right: &PhysicalRecordPlayer,
+    ) {
+        let mut left = left.snapshot();
+        let mut right = right.snapshot();
+        left.loaded_source_identity = None;
+        right.loaded_source_identity = None;
+        assert_eq!(left, right);
     }
 
     fn paged_cache_for_ranges(
@@ -2803,14 +2976,32 @@ mod tests {
 
         let mut resident = PhysicalRecordPlayer::new(profile).unwrap();
         resident.load_realtime_paged_groove(full_realtime).unwrap();
-        resident.restore(&before_miss).unwrap();
+        resident.set_groove_frame_position(50_000.0).unwrap();
+        resident.reset_transport(1.0, 1.0, 0.0, 0.0).unwrap();
+        resident
+            .enqueue_control(TimedPlayerControl::new(
+                0,
+                1,
+                PlayerControl::new(DeckMechanicalControl::default(), true),
+            ))
+            .unwrap();
+        assert_player_state_matches_ignoring_source_representation(&incremental, &resident);
 
         let before_publication = incremental.snapshot();
+        let before_publication_checkpoint = incremental.render_checkpoint();
         publish_realtime_page(
             incremental.realtime_paged_cache_mut().unwrap(),
             page_cache.pages().next().unwrap(),
         );
-        assert_eq!(incremental.snapshot(), before_publication);
+        assert_ne!(incremental.snapshot(), before_publication);
+        assert_eq!(
+            incremental.render_checkpoint(),
+            before_publication_checkpoint
+        );
+        assert_eq!(
+            incremental.loaded_source_identity(),
+            resident.loaded_source_identity()
+        );
         let mut incremental_output = [0.0_f32; 128];
         let mut resident_output = [0.0_f32; 128];
         incremental
@@ -2821,6 +3012,102 @@ mod tests {
             .unwrap();
         assert_eq!(incremental_output, resident_output);
         assert_eq!(incremental.snapshot(), resident.snapshot());
+    }
+
+    #[test]
+    fn certified_source_slope_and_friction_are_bound_at_every_publication_boundary() {
+        let base_profile = PhysicalProfile::sl_1200mk7_concorde_mkii_scratch_seed();
+        let groove = stereo_sine_groove_with_gain(&base_profile, 10_007.0, 1.0, 8.0);
+        let full_range = GrooveFrameRange::new(0, groove.frame_count() as u64).unwrap();
+        let full_paged = paged_cache_for_ranges(&base_profile, &groove, 175, &[full_range]);
+        let empty_paged = paged_cache_for_ranges(&base_profile, &groove, 175, &[]);
+        let maximum_absolute_wall_slope = groove
+            .trace_admission_certificate()
+            .maximum_absolute_wall_slope()
+            .max(full_paged.maximum_certified_absolute_wall_slope());
+        assert!(maximum_absolute_wall_slope > 0.5);
+        assert!(maximum_absolute_wall_slope < 16.0);
+
+        let mut rejected_friction = (1.0 - 1.0e-6) / maximum_absolute_wall_slope;
+        while groove_friction_geometry_is_well_conditioned(
+            rejected_friction,
+            maximum_absolute_wall_slope,
+        ) {
+            rejected_friction = f64::from_bits(rejected_friction.to_bits() + 1);
+        }
+        let mut supported_friction = f64::from_bits(rejected_friction.to_bits() - 1);
+        while !groove_friction_geometry_is_well_conditioned(
+            supported_friction,
+            maximum_absolute_wall_slope,
+        ) {
+            supported_friction = f64::from_bits(supported_friction.to_bits() - 1);
+        }
+        assert!(rejected_friction <= 2.0);
+
+        let mut supported_profile = base_profile.clone();
+        supported_profile.config.contact.groove_friction_coefficient = supported_friction;
+        synchronize_profile_evidence(&mut supported_profile);
+        let mut supported = PhysicalRecordPlayer::new(supported_profile).unwrap();
+        supported.load_groove(Arc::clone(&groove)).unwrap();
+
+        let mut rejected_profile = base_profile.clone();
+        rejected_profile.config.contact.groove_friction_coefficient = rejected_friction;
+        synchronize_profile_evidence(&mut rejected_profile);
+        let mut rejected_contiguous = PhysicalRecordPlayer::new(rejected_profile.clone()).unwrap();
+        let before_contiguous = rejected_contiguous.snapshot();
+        assert!(matches!(
+            rejected_contiguous.load_groove(Arc::clone(&groove)),
+            Err(PhysicalRecordPlayerError::Pickup(
+                crate::physical::PickupMechanicalError::IllConditionedGrooveWallFrictionGeometry
+            ))
+        ));
+        assert_eq!(rejected_contiguous.snapshot(), before_contiguous);
+
+        let mut rejected_paged = PhysicalRecordPlayer::new(rejected_profile.clone()).unwrap();
+        let before_paged = rejected_paged.snapshot();
+        assert!(matches!(
+            rejected_paged.load_paged_groove(Arc::clone(&full_paged)),
+            Err(PhysicalRecordPlayerError::Pickup(
+                crate::physical::PickupMechanicalError::IllConditionedGrooveWallFrictionGeometry
+            ))
+        ));
+        assert_eq!(rejected_paged.snapshot(), before_paged);
+
+        rejected_paged
+            .load_paged_groove(Arc::clone(&empty_paged))
+            .unwrap();
+        let before_replacement = rejected_paged.snapshot();
+        assert!(matches!(
+            rejected_paged.replace_loaded_paged_cache_snapshot(Arc::clone(&full_paged)),
+            Err(PhysicalRecordPlayerError::Pickup(
+                crate::physical::PickupMechanicalError::IllConditionedGrooveWallFrictionGeometry
+            ))
+        ));
+        assert_eq!(rejected_paged.snapshot(), before_replacement);
+
+        let realtime = realtime_cache_from_paged(
+            &empty_paged,
+            1,
+            u32::try_from(groove.frame_count()).unwrap(),
+        );
+        let mut rejected_realtime = PhysicalRecordPlayer::new(rejected_profile).unwrap();
+        rejected_realtime
+            .load_realtime_paged_groove(realtime)
+            .unwrap();
+        publish_realtime_page(
+            rejected_realtime.realtime_paged_cache_mut().unwrap(),
+            full_paged.pages().next().unwrap(),
+        );
+        let after_publication = rejected_realtime.snapshot();
+        let mut output = [23.0_f32; 2];
+        assert!(matches!(
+            rejected_realtime.render_internal_interleaved(&mut output),
+            Err(PhysicalRecordPlayerError::Pickup(
+                crate::physical::PickupMechanicalError::IllConditionedGrooveWallFrictionGeometry
+            ))
+        ));
+        assert_eq!(output, [23.0_f32; 2]);
+        assert_eq!(rejected_realtime.snapshot(), after_publication);
     }
 
     #[test]
@@ -2936,6 +3223,74 @@ mod tests {
     }
 
     #[test]
+    fn paged_manifest_rejects_a_self_consistent_page_substitution() {
+        let profile = PhysicalProfile::sl_1200mk7_concorde_mkii_scratch_seed();
+        let groove = sine_groove(&profile, 1_271.0);
+        let core = GrooveFrameRange::new(0, 32_768).unwrap();
+        let original = paged_cache_for_ranges(&profile, &groove, 175, &[core]);
+        let original_page = original.pages().next().unwrap();
+        let mut lateral = original_page.lateral_displacement_m().to_vec();
+        let changed_index = 5_000;
+        lateral[changed_index] = f32::from_bits(lateral[changed_index].to_bits() + 1);
+        let altered_page = PhysicalGroovePage::new(
+            original.metadata(),
+            original_page.core_range(),
+            original_page.stored_range(),
+            lateral,
+            original_page.vertical_displacement_m().to_vec(),
+        )
+        .unwrap();
+        assert_ne!(
+            altered_page.content_identity(),
+            original_page.content_identity()
+        );
+        assert_ne!(
+            altered_page
+                .trace_admission_certificate()
+                .unwrap()
+                .certificate_identity(),
+            original_page
+                .trace_admission_certificate()
+                .unwrap()
+                .certificate_identity()
+        );
+        let mut producer = PagedGrooveCacheProducer::new(
+            original.metadata(),
+            PagedGrooveCacheLimits::new(1, 512 * 1_024 * 1_024).unwrap(),
+        )
+        .unwrap();
+        producer.insert_page(altered_page).unwrap();
+        let altered = Arc::new(producer.publish());
+        assert_eq!(altered.content_identity(), original.content_identity());
+        assert_eq!(altered.generation(), original.generation());
+        assert_ne!(
+            altered.trace_admitted_representation_identity(),
+            original.trace_admitted_representation_identity()
+        );
+
+        let mut original_player = PhysicalRecordPlayer::new(profile.clone()).unwrap();
+        original_player
+            .load_paged_groove(Arc::clone(&original))
+            .unwrap();
+        let original_snapshot = original_player.snapshot();
+        let mut altered_player = PhysicalRecordPlayer::new(profile).unwrap();
+        altered_player
+            .load_paged_groove(Arc::clone(&altered))
+            .unwrap();
+        let altered_snapshot = altered_player.snapshot();
+        assert!(matches!(
+            altered_player.restore(&original_snapshot),
+            Err(PhysicalRecordPlayerError::SnapshotSourceMismatch)
+        ));
+        assert_eq!(altered_player.snapshot(), altered_snapshot);
+        assert!(matches!(
+            original_player.replace_loaded_paged_cache_snapshot(altered),
+            Err(PhysicalRecordPlayerError::PagedCacheReplacementMismatch)
+        ));
+        assert_eq!(original_player.snapshot(), original_snapshot);
+    }
+
+    #[test]
     fn paged_publication_replacement_preserves_state_and_matches_a_full_cache() {
         let profile = PhysicalProfile::sl_1200mk7_concorde_mkii_scratch_seed();
         let groove = sine_groove(&profile, 1_427.0);
@@ -2969,18 +3324,26 @@ mod tests {
             .render_internal_interleaved(&mut resident_preroll)
             .unwrap();
         assert_eq!(incremental_preroll, resident_preroll);
-        assert_eq!(incremental.snapshot(), resident.snapshot());
+        assert_player_state_matches_ignoring_source_representation(&incremental, &resident);
+        assert_ne!(
+            incremental.loaded_source_identity(),
+            resident.loaded_source_identity()
+        );
 
         let before_refresh = incremental.snapshot();
+        let before_refresh_checkpoint = incremental.render_checkpoint();
         let old_cache = incremental
             .replace_loaded_paged_cache_snapshot(Arc::clone(&refreshed))
             .unwrap();
         assert!(Arc::ptr_eq(&old_cache, &initial));
-        assert_eq!(incremental.snapshot(), before_refresh);
-        assert_eq!(
-            incremental.loaded_source_identity(),
-            resident.loaded_source_identity()
-        );
+        let after_refresh = incremental.snapshot();
+        assert_ne!(after_refresh, before_refresh);
+        assert_eq!(incremental.render_checkpoint(), before_refresh_checkpoint);
+        assert!(matches!(
+            incremental.restore(&before_refresh),
+            Err(PhysicalRecordPlayerError::SnapshotSourceMismatch)
+        ));
+        assert_eq!(incremental.snapshot(), after_refresh);
 
         let mut incremental_forward = [0.0_f32; 96];
         let mut resident_forward = [0.0_f32; 96];
@@ -3002,7 +3365,7 @@ mod tests {
             .render_internal_interleaved(&mut resident_reverse)
             .unwrap();
         assert_eq!(incremental_reverse, resident_reverse);
-        assert_eq!(incremental.snapshot(), resident.snapshot());
+        assert_player_state_matches_ignoring_source_representation(&incremental, &resident);
 
         let continuity = incremental.snapshot();
         let mut restored = PhysicalRecordPlayer::new(profile.clone()).unwrap();
@@ -3037,11 +3400,21 @@ mod tests {
         let mut renderer = PhysicalHostRenderer::new(profile, 48_000, TEST_HOST_OUTPUT).unwrap();
         renderer.load_paged_groove(initial).unwrap();
         let renderer_before = renderer.snapshot();
+        let renderer_identity_before = renderer.loaded_source_identity();
+        let expected_refreshed_identity = refreshed.trace_admitted_representation_identity();
         let renderer_old = renderer
             .replace_loaded_paged_cache_snapshot(refreshed)
             .unwrap();
         assert_eq!(renderer_old.page_count(), 1);
-        assert_eq!(renderer.snapshot(), renderer_before);
+        assert_ne!(renderer.snapshot(), renderer_before);
+        assert_ne!(renderer.loaded_source_identity(), renderer_identity_before);
+        assert_eq!(
+            renderer
+                .loaded_source_identity()
+                .unwrap()
+                .trace_admitted_representation_identity,
+            expected_refreshed_identity
+        );
     }
 
     #[test]

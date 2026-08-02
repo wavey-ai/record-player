@@ -8,14 +8,16 @@ use crate::mechanics::{
     DeckMidpointPreparation, DeckMidpointSolution,
 };
 
-const SNAPSHOT_VERSION: u32 = 3;
+const SNAPSHOT_VERSION: u32 = 4;
 const MIN_SAMPLE_RATE_HZ: f64 = 44_100.0;
 const MAX_SAMPLE_RATE_HZ: f64 = 768_000.0;
 const MIN_MOVING_MASS_KG: f64 = 1.0e-9;
 const MAX_MOVING_MASS_KG: f64 = 1.0e-2;
 const CONTACT_TOLERANCE_M: f64 = 1.0e-11;
 const BEARING_VELOCITY_TOLERANCE_M_S: f64 = 1.0e-10;
+const TANGENTIAL_VELOCITY_TOLERANCE_M_S: f64 = 1.0e-12;
 const TANGENTIAL_FORCE_TOLERANCE_N: f64 = 1.0e-10;
+const FRICTION_GEOMETRY_PRODUCT_MARGIN: f64 = 1.0e-6;
 const INVERSE_SQRT_2: f64 = std::f64::consts::FRAC_1_SQRT_2;
 const WALL_NORMALS: [[f64; 2]; 2] = [
     [INVERSE_SQRT_2, INVERSE_SQRT_2],
@@ -190,21 +192,22 @@ fn wall_effective_slope(input: PickupMechanicalInput) -> [f64; 2] {
     })
 }
 
-fn wall_effective_surface_normal_scale(input: PickupMechanicalInput) -> [f64; 2] {
-    input.wall_contacts.map(|set| {
-        let count = wall_contact_count(set).unwrap_or(1);
-        set.contacts[..count]
-            .iter()
-            .map(|contact| contact.groove_slope.hypot(1.0))
-            .sum::<f64>()
-            / count as f64
-    })
+#[derive(Debug, Clone, Copy)]
+enum WallFrictionDistribution {
+    None,
+    Sliding { coefficient: f64, direction: f64 },
+    FlatSticking { record_force_n: f64 },
 }
+
+// A tangential stylus force maps to the lateral body through the tonearm
+// skating factor K. Its conjugate stylus velocity is therefore K * v_body.
+// For a compatible wall, v_wall = p * (v_record - K * v_body). Sliding uses
+// F_record = -sign(gamma_dot) * mu * lambda and F_wall = p * F_record.
 
 fn distribute_wall_contact_forces(
     input: PickupMechanicalInput,
     wall_projected_force_n: [f64; 2],
-    coulomb_friction_force_n: f64,
+    friction: WallFrictionDistribution,
 ) -> [PickupWallContactTelemetry; 2] {
     // The reduced pickup has no stylus rotation or local contact compliance.
     // Its certified common-height rigid constraint has non-unique multipliers. The
@@ -216,7 +219,7 @@ fn distribute_wall_contact_forces(
             geometry,
             ..PickupWallContactTelemetry::default()
         });
-    let mut total_surface_normal_force_n = 0.0;
+    let total_projected_force_n = wall_projected_force_n.into_iter().sum::<f64>();
     let mut final_loaded_contact = None;
     for wall in 0..2 {
         let set = input.wall_contacts[wall];
@@ -238,44 +241,75 @@ fn distribute_wall_contact_forces(
             telemetry[wall].surface_normal_force_n[contact_index] = surface_normal_force_n;
             telemetry[wall].modulation_reaction_force_n[contact_index] =
                 modulation_reaction_force_n;
-            total_surface_normal_force_n += surface_normal_force_n;
-            if surface_normal_force_n > 0.0 {
+            if projected_force_n > 0.0 {
                 final_loaded_contact = Some((wall, contact_index));
             }
         }
     }
-    if total_surface_normal_force_n > 0.0 && coulomb_friction_force_n != 0.0 {
-        let mut assigned_friction_force_n = 0.0;
-        for wall in 0..2 {
-            let count = wall_contact_count(input.wall_contacts[wall]).unwrap_or(1);
-            for contact_index in 0..count {
-                let friction_force_n = if final_loaded_contact == Some((wall, contact_index)) {
-                    coulomb_friction_force_n - assigned_friction_force_n
-                } else {
-                    coulomb_friction_force_n * telemetry[wall].surface_normal_force_n[contact_index]
-                        / total_surface_normal_force_n
-                };
-                telemetry[wall].coulomb_friction_force_n[contact_index] = friction_force_n;
-                assigned_friction_force_n += friction_force_n;
+    match friction {
+        WallFrictionDistribution::None => {}
+        WallFrictionDistribution::Sliding {
+            coefficient,
+            direction,
+        } => {
+            let target_record_force_n = -direction * coefficient * total_projected_force_n;
+            let mut assigned_record_force_n = 0.0;
+            for (wall, wall_telemetry) in telemetry.iter_mut().enumerate() {
+                let count = wall_contact_count(input.wall_contacts[wall]).unwrap_or(1);
+                for contact_index in 0..count {
+                    let projected_force_n = wall_telemetry.projected_normal_force_n[contact_index];
+                    let record_force_n = if final_loaded_contact == Some((wall, contact_index)) {
+                        target_record_force_n - assigned_record_force_n
+                    } else {
+                        -direction * coefficient * projected_force_n
+                    };
+                    let wall_force_on_tip_n = record_force_n
+                        * input.wall_contacts[wall].contacts[contact_index].groove_slope;
+                    wall_telemetry.coulomb_friction_force_n[contact_index] = record_force_n;
+                    wall_telemetry.coulomb_wall_force_on_tip_n[contact_index] = wall_force_on_tip_n;
+                    assigned_record_force_n += record_force_n;
+                }
+            }
+        }
+        WallFrictionDistribution::FlatSticking { record_force_n } => {
+            let mut assigned_record_force_n = 0.0;
+            for (wall, wall_telemetry) in telemetry.iter_mut().enumerate() {
+                let count = wall_contact_count(input.wall_contacts[wall]).unwrap_or(1);
+                for contact_index in 0..count {
+                    let friction_force_n = if final_loaded_contact == Some((wall, contact_index)) {
+                        record_force_n - assigned_record_force_n
+                    } else if total_projected_force_n > 0.0 {
+                        record_force_n * wall_telemetry.projected_normal_force_n[contact_index]
+                            / total_projected_force_n
+                    } else {
+                        0.0
+                    };
+                    wall_telemetry.coulomb_friction_force_n[contact_index] = friction_force_n;
+                    assigned_record_force_n += friction_force_n;
+                }
             }
         }
     }
+    let coulomb_friction_force_n = telemetry
+        .into_iter()
+        .flat_map(|wall| wall.coulomb_friction_force_n)
+        .sum::<f64>();
     let target_record_reaction_force_tangent_n = telemetry
         .into_iter()
         .flat_map(|wall| wall.modulation_reaction_force_n)
         .sum::<f64>()
         + coulomb_friction_force_n;
     let mut assigned_record_reaction_force_tangent_n = 0.0;
-    for wall in 0..2 {
+    for (wall, wall_telemetry) in telemetry.iter_mut().enumerate() {
         let count = wall_contact_count(input.wall_contacts[wall]).unwrap_or(1);
         for contact_index in 0..count {
             let reaction_force_n = if final_loaded_contact == Some((wall, contact_index)) {
                 target_record_reaction_force_tangent_n - assigned_record_reaction_force_tangent_n
             } else {
-                telemetry[wall].modulation_reaction_force_n[contact_index]
-                    + telemetry[wall].coulomb_friction_force_n[contact_index]
+                wall_telemetry.modulation_reaction_force_n[contact_index]
+                    + wall_telemetry.coulomb_friction_force_n[contact_index]
             };
-            telemetry[wall].record_reaction_force_tangent_n[contact_index] = reaction_force_n;
+            wall_telemetry.record_reaction_force_tangent_n[contact_index] = reaction_force_n;
             assigned_record_reaction_force_tangent_n += reaction_force_n;
         }
     }
@@ -287,6 +321,106 @@ fn sum_wall_contact_field(
     select: impl Fn(PickupWallContactTelemetry) -> [f64; MAX_SPHERICAL_TRACE_CONTACTS_PER_WALL],
 ) -> f64 {
     telemetry.into_iter().flat_map(select).sum::<f64>()
+}
+
+fn wall_friction_distribution(
+    mode: StylusTangentialMode,
+    friction_coefficient: f64,
+    record_friction_force_n: f64,
+) -> WallFrictionDistribution {
+    match mode {
+        StylusTangentialMode::SlidingPositive => WallFrictionDistribution::Sliding {
+            coefficient: friction_coefficient,
+            direction: 1.0,
+        },
+        StylusTangentialMode::SlidingNegative => WallFrictionDistribution::Sliding {
+            coefficient: friction_coefficient,
+            direction: -1.0,
+        },
+        StylusTangentialMode::Sticking => WallFrictionDistribution::FlatSticking {
+            record_force_n: record_friction_force_n,
+        },
+        StylusTangentialMode::Separated => WallFrictionDistribution::None,
+    }
+}
+
+fn wall_coulomb_force_on_tip_n(telemetry: [PickupWallContactTelemetry; 2]) -> [f64; 2] {
+    let wall_force_n = telemetry.map(PickupWallContactTelemetry::total_coulomb_wall_force_on_tip_n);
+    [
+        (wall_force_n[0] - wall_force_n[1]) * INVERSE_SQRT_2,
+        (wall_force_n[0] + wall_force_n[1]) * INVERSE_SQRT_2,
+    ]
+}
+
+fn wall_coulomb_friction_power_w(
+    telemetry: [PickupWallContactTelemetry; 2],
+    along_groove_slip_velocity_m_s: f64,
+    wall_coordinate_velocity_m_s: [f64; 2],
+) -> f64 {
+    telemetry
+        .into_iter()
+        .enumerate()
+        .map(|(wall_index, wall)| {
+            (0..wall.contact_count())
+                .map(|contact_index| {
+                    let groove_slope = wall.geometry.contacts[contact_index].groove_slope;
+                    wall.coulomb_friction_force_n[contact_index]
+                        * (along_groove_slip_velocity_m_s
+                            + groove_slope * wall_coordinate_velocity_m_s[wall_index])
+                })
+                .sum::<f64>()
+        })
+        .sum()
+}
+
+fn wall_coordinate_velocity_m_s(tip_velocity_m_s: [f64; 2]) -> [f64; 2] {
+    WALL_NORMALS.map(|normal| dot(normal, tip_velocity_m_s))
+}
+
+fn along_groove_slip_velocity_m_s(
+    record_velocity_m_s: f64,
+    skating_factor: f64,
+    body_lateral_velocity_m_s: f64,
+) -> f64 {
+    record_velocity_m_s - skating_factor * body_lateral_velocity_m_s
+}
+
+fn loaded_wall_has_nonzero_slope(
+    input: PickupMechanicalInput,
+    wall_projected_force_n: [f64; 2],
+) -> bool {
+    (0..2).any(|wall| {
+        wall_projected_force_n[wall] > TANGENTIAL_FORCE_TOLERANCE_N
+            && input.wall_contacts[wall].contacts
+                [..wall_contact_count(input.wall_contacts[wall]).unwrap_or(1)]
+                .iter()
+                .any(|contact| contact.groove_slope != 0.0)
+    })
+}
+
+fn active_wall_has_nonzero_slope(input: PickupMechanicalInput, active_mask: u8) -> bool {
+    (0..2).any(|wall| {
+        active_mask & (1 << wall) != 0
+            && input.wall_contacts[wall].contacts
+                [..wall_contact_count(input.wall_contacts[wall]).unwrap_or(1)]
+                .iter()
+                .any(|contact| contact.groove_slope != 0.0)
+    })
+}
+
+/// Checks only the local inward direction of each sliding wall force.
+///
+/// This predicate does not prove that the coupled contact problem is well posed.
+pub(crate) fn groove_friction_geometry_is_well_conditioned(
+    friction_coefficient: f64,
+    maximum_absolute_wall_slope: f64,
+) -> bool {
+    friction_coefficient.is_finite()
+        && friction_coefficient >= 0.0
+        && maximum_absolute_wall_slope.is_finite()
+        && maximum_absolute_wall_slope >= 0.0
+        && friction_coefficient * maximum_absolute_wall_slope
+            < 1.0 - FRICTION_GEOMETRY_PRODUCT_MARGIN
 }
 
 #[cfg(test)]
@@ -315,6 +449,9 @@ pub struct PickupWallContactTelemetry {
     /// This force uses each local three-dimensional surface normal.
     pub surface_normal_force_n: [f64; MAX_SPHERICAL_TRACE_CONTACTS_PER_WALL],
     pub modulation_reaction_force_n: [f64; MAX_SPHERICAL_TRACE_CONTACTS_PER_WALL],
+    /// This force acts on the tip along the inward 45-degree wall coordinate.
+    pub coulomb_wall_force_on_tip_n: [f64; MAX_SPHERICAL_TRACE_CONTACTS_PER_WALL],
+    /// This force acts on the record along the groove.
     pub coulomb_friction_force_n: [f64; MAX_SPHERICAL_TRACE_CONTACTS_PER_WALL],
     pub record_reaction_force_tangent_n: [f64; MAX_SPHERICAL_TRACE_CONTACTS_PER_WALL],
 }
@@ -326,6 +463,7 @@ impl Default for PickupWallContactTelemetry {
             projected_normal_force_n: [0.0; MAX_SPHERICAL_TRACE_CONTACTS_PER_WALL],
             surface_normal_force_n: [0.0; MAX_SPHERICAL_TRACE_CONTACTS_PER_WALL],
             modulation_reaction_force_n: [0.0; MAX_SPHERICAL_TRACE_CONTACTS_PER_WALL],
+            coulomb_wall_force_on_tip_n: [0.0; MAX_SPHERICAL_TRACE_CONTACTS_PER_WALL],
             coulomb_friction_force_n: [0.0; MAX_SPHERICAL_TRACE_CONTACTS_PER_WALL],
             record_reaction_force_tangent_n: [0.0; MAX_SPHERICAL_TRACE_CONTACTS_PER_WALL],
         }
@@ -347,6 +485,10 @@ impl PickupWallContactTelemetry {
 
     pub fn total_modulation_reaction_force_n(self) -> f64 {
         self.modulation_reaction_force_n.into_iter().sum()
+    }
+
+    pub fn total_coulomb_wall_force_on_tip_n(self) -> f64 {
+        self.coulomb_wall_force_on_tip_n.into_iter().sum()
     }
 
     pub fn total_coulomb_friction_force_n(self) -> f64 {
@@ -509,6 +651,11 @@ impl PickupMechanicalTelemetry {
 
     pub fn longitudinal_record_reaction_torque_nm(self) -> f64 {
         self.longitudinal_record_reaction_force_tangent_n() * self.groove_radius_m
+    }
+
+    /// Returns the complete cross-plane Coulomb force on the stylus tip.
+    pub fn coulomb_wall_force_on_tip_n(self) -> [f64; 2] {
+        wall_coulomb_force_on_tip_n(self.wall_longitudinal_contact)
     }
 }
 
@@ -706,6 +853,7 @@ impl PickupMechanicalState {
         input: PickupMechanicalInput,
     ) -> Result<PickupMechanicalTelemetry, PickupMechanicalError> {
         validate_input(input)?;
+        validate_friction_geometry(self.contact, input)?;
         let relation = PickupElectromagneticForceRelation::constant(input.electromagnetic_force_n)?;
         self.process_with_validated_electromagnetic_relation(input, relation)
     }
@@ -719,6 +867,7 @@ impl PickupMechanicalState {
         relation: PickupElectromagneticForceRelation,
     ) -> Result<PickupMechanicalTelemetry, PickupMechanicalError> {
         validate_input(input)?;
+        validate_friction_geometry(self.contact, input)?;
         let relation = PickupElectromagneticForceRelation::new(
             relation.force_bias_n,
             relation.reciprocal_damping_n_s_per_m,
@@ -747,15 +896,23 @@ impl PickupMechanicalState {
             relation,
             dt,
         )?;
+        let skating_factor = if input.stylus_lowered {
+            self.tonearm
+                .geometry
+                .equivalent_radial_force_n(input.groove_radius_m, 1.0)?
+        } else {
+            0.0
+        };
+        let along_groove_slip_velocity_m_s = along_groove_slip_velocity_m_s(
+            input.groove_tangential_velocity_m_s,
+            skating_factor,
+            step.body_velocity_m_s[0],
+        );
         let wall_projected_force_n = step.wall_projected_force_n;
-        let zero_friction_wall_contact =
-            distribute_wall_contact_forces(input, wall_projected_force_n, 0.0);
-        let wall_normal_force_n = zero_friction_wall_contact
-            .map(PickupWallContactTelemetry::total_surface_normal_force_n);
         let land_normal_force_n = step.land_normal_force_n;
-        let (normal_force_sum, friction_coefficient) = match input.contact_surface {
+        let (friction_normal_force_n, friction_coefficient) = match input.contact_surface {
             PickupContactSurface::GrooveWalls => (
-                wall_normal_force_n[0] + wall_normal_force_n[1],
+                wall_projected_force_n[0] + wall_projected_force_n[1],
                 self.contact.groove_friction_coefficient,
             ),
             PickupContactSurface::RecordLand => (
@@ -764,15 +921,31 @@ impl PickupMechanicalState {
             ),
             PickupContactSurface::None => (0.0, 0.0),
         };
-        let coulomb_friction_force_n = if input.stylus_lowered {
-            -signed_direction(input.groove_tangential_velocity_m_s)
-                * friction_coefficient
-                * normal_force_sum
-        } else {
-            0.0
+        let tangential_mode = step.tangential_mode;
+        if tangential_mode == StylusTangentialMode::Sticking
+            && input.contact_surface == PickupContactSurface::GrooveWalls
+            && friction_coefficient > 0.0
+            && loaded_wall_has_nonzero_slope(input, wall_projected_force_n)
+        {
+            return Err(PickupMechanicalError::UnsupportedGrooveWallSticking);
+        }
+        let coulomb_friction_force_n = match tangential_mode {
+            StylusTangentialMode::SlidingPositive => {
+                -friction_coefficient * friction_normal_force_n
+            }
+            StylusTangentialMode::SlidingNegative => friction_coefficient * friction_normal_force_n,
+            StylusTangentialMode::Sticking => step.sticking_friction_force_n,
+            StylusTangentialMode::Separated => 0.0,
         };
-        let wall_contact_telemetry =
-            distribute_wall_contact_forces(input, wall_projected_force_n, coulomb_friction_force_n);
+        let wall_contact_telemetry = distribute_wall_contact_forces(
+            input,
+            wall_projected_force_n,
+            wall_friction_distribution(
+                tangential_mode,
+                friction_coefficient,
+                coulomb_friction_force_n,
+            ),
+        );
         let modulation_reaction_force_n =
             if input.stylus_lowered && input.contact_surface == PickupContactSurface::GrooveWalls {
                 sum_wall_contact_field(wall_contact_telemetry, |wall| {
@@ -783,18 +956,6 @@ impl PickupMechanicalState {
             };
         let record_reaction_force_tangent_n =
             coulomb_friction_force_n + modulation_reaction_force_n;
-        let tangential_mode = if !input.stylus_lowered
-            || input.contact_surface == PickupContactSurface::None
-            || normal_force_sum <= TANGENTIAL_FORCE_TOLERANCE_N
-        {
-            StylusTangentialMode::Separated
-        } else if input.groove_tangential_velocity_m_s > 0.0 {
-            StylusTangentialMode::SlidingPositive
-        } else if input.groove_tangential_velocity_m_s < 0.0 {
-            StylusTangentialMode::SlidingNegative
-        } else {
-            StylusTangentialMode::Sticking
-        };
         self.commit_pickup_step(
             input,
             relation,
@@ -803,7 +964,7 @@ impl PickupMechanicalState {
                 coulomb_friction_force_n,
                 modulation_reaction_force_n,
                 record_reaction_force_tangent_n,
-                relative_velocity_m_s: input.groove_tangential_velocity_m_s,
+                relative_velocity_m_s: along_groove_slip_velocity_m_s,
                 mode: tangential_mode,
             },
             0.0,
@@ -851,10 +1012,25 @@ impl PickupMechanicalState {
         ];
         let wall_projected_force_n = step.wall_projected_force_n;
         let land_normal_force_n = step.land_normal_force_n;
+        if tangential.mode == StylusTangentialMode::Sticking
+            && input.contact_surface == PickupContactSurface::GrooveWalls
+            && self.contact.groove_friction_coefficient > 0.0
+            && loaded_wall_has_nonzero_slope(input, wall_projected_force_n)
+        {
+            return Err(PickupMechanicalError::UnsupportedGrooveWallSticking);
+        }
         let wall_longitudinal_contact = distribute_wall_contact_forces(
             input,
             wall_projected_force_n,
-            tangential.coulomb_friction_force_n,
+            if input.contact_surface == PickupContactSurface::GrooveWalls {
+                wall_friction_distribution(
+                    tangential.mode,
+                    self.contact.groove_friction_coefficient,
+                    tangential.coulomb_friction_force_n,
+                )
+            } else {
+                WallFrictionDistribution::None
+            },
         );
         let wall_normal_force_n = wall_longitudinal_contact
             .map(|wall| wall.surface_normal_force_n.into_iter().sum::<f64>());
@@ -919,8 +1095,12 @@ impl PickupMechanicalState {
         {
             return Err(PickupMechanicalError::ConstraintFailure);
         }
-        let groove_lateral_force_on_tip_n =
-            (wall_projected_force_n[0] - wall_projected_force_n[1]) * INVERSE_SQRT_2;
+        let wall_coordinate_force_on_tip_n = wall_longitudinal_contact.map(|wall| {
+            wall.total_projected_normal_force_n() + wall.total_coulomb_wall_force_on_tip_n()
+        });
+        let groove_lateral_force_on_tip_n = (wall_coordinate_force_on_tip_n[0]
+            - wall_coordinate_force_on_tip_n[1])
+            * INVERSE_SQRT_2;
         let kinetic_energy_j = 0.5 * tip_mass * dot(tip_velocity, tip_velocity)
             + 0.5
                 * axes
@@ -941,7 +1121,15 @@ impl PickupMechanicalState {
                 })
                 .sum::<f64>();
         let tangential_friction_power_w =
-            tangential.coulomb_friction_force_n * tangential.relative_velocity_m_s;
+            if input.contact_surface == PickupContactSurface::GrooveWalls {
+                wall_coulomb_friction_power_w(
+                    wall_longitudinal_contact,
+                    tangential.relative_velocity_m_s,
+                    wall_coordinate_velocity_m_s(tip_velocity),
+                )
+            } else {
+                tangential.coulomb_friction_force_n * tangential.relative_velocity_m_s
+            };
         if tangential_friction_power_w > 1.0e-18
             || tip_displacement
                 .iter()
@@ -1063,6 +1251,7 @@ pub(crate) fn solve_coupled_deck_pickup_midpoint(
     previous_tangential_mode: StylusTangentialMode,
 ) -> Result<CoupledDeckPickupStep, CoupledDeckPickupError> {
     validate_input(geometry.input)?;
+    validate_friction_geometry(pickup.contact, geometry.input)?;
     if !geometry.lateral_origin_shift_bias_m.is_finite()
         || !geometry
             .lateral_origin_shift_per_record_velocity_m_s
@@ -1094,12 +1283,6 @@ pub(crate) fn solve_coupled_deck_pickup_midpoint(
             ))
         }
     };
-    let pickup_bearing_modes = pickup_bearing_mode_order(pickup.body_velocity_m_s[0]);
-    let stylus_modes = tangential_mode_order(
-        previous_tangential_mode,
-        0.5 * input.groove_radius_m
-            * (deck.previous_record_velocity_rad_s + deck.predicted_record_velocity_rad_s),
-    );
     let skating_factor = if input.stylus_lowered {
         pickup
             .tonearm
@@ -1109,8 +1292,18 @@ pub(crate) fn solve_coupled_deck_pickup_midpoint(
     } else {
         0.0
     };
+    let pickup_bearing_modes = pickup_bearing_mode_order(pickup.body_velocity_m_s[0]);
+    let predicted_relative_velocity_m_s = along_groove_slip_velocity_m_s(
+        0.5 * input.groove_radius_m
+            * (deck.previous_record_velocity_rad_s + deck.predicted_record_velocity_rad_s),
+        skating_factor,
+        pickup.body_velocity_m_s[0],
+    );
+    let stylus_modes =
+        tangential_mode_order(previous_tangential_mode, predicted_relative_velocity_m_s);
     let mut evaluated_branches = 0_u32;
     let mut attempted_linear_solves = 0_u32;
+    let mut rejected_unsupported_groove_wall_sticking = false;
 
     // This order is part of the deterministic discrete selection law. Predictor
     // and continuation hints change the first candidate only. The fallback
@@ -1138,6 +1331,14 @@ pub(crate) fn solve_coupled_deck_pickup_midpoint(
                         };
                         for &stylus_mode in candidate_modes {
                             evaluated_branches = evaluated_branches.saturating_add(1);
+                            if stylus_mode == StylusTangentialMode::Sticking
+                                && input.contact_surface == PickupContactSurface::GrooveWalls
+                                && pickup.contact.groove_friction_coefficient > 0.0
+                                && active_wall_has_nonzero_slope(input, active_mask)
+                            {
+                                rejected_unsupported_groove_wall_sticking = true;
+                                continue;
+                            }
                             let Some(candidate) = solve_joint_branch(
                                 deck,
                                 pickup,
@@ -1184,6 +1385,11 @@ pub(crate) fn solve_coupled_deck_pickup_midpoint(
                 }
             }
         }
+    }
+    if rejected_unsupported_groove_wall_sticking {
+        return Err(CoupledDeckPickupError::Pickup(
+            PickupMechanicalError::UnsupportedGrooveWallSticking,
+        ));
     }
     Err(CoupledDeckPickupError::NoConsistentMode {
         evaluated_branches,
@@ -1281,7 +1487,6 @@ fn solve_joint_branch(
         pickup_bearing_column,
     );
 
-    let surface_normal_scale = wall_effective_surface_normal_scale(input);
     let effective_slope = wall_effective_slope(input);
     let friction_coefficient = match input.contact_surface {
         PickupContactSurface::GrooveWalls => pickup.contact.groove_friction_coefficient,
@@ -1305,10 +1510,7 @@ fn solve_joint_branch(
             };
             let tangential_force_per_projected_normal = match input.contact_surface {
                 PickupContactSurface::GrooveWalls => {
-                    effective_slope[constraint]
-                        + sliding_direction
-                            * friction_coefficient
-                            * surface_normal_scale[constraint]
+                    effective_slope[constraint] + sliding_direction * friction_coefficient
                 }
                 PickupContactSurface::RecordLand => sliding_direction * friction_coefficient,
                 PickupContactSurface::None => 0.0,
@@ -1320,8 +1522,13 @@ fn solve_joint_branch(
     for constraint in 0..active_constraint_count(input) {
         if let Some(column) = lambda_columns[constraint] {
             let normal = constraint_normal(input.contact_surface, constraint);
-            augmented[2][column] = -normal[0];
-            augmented[4][column] = -normal[1];
+            let wall_force_scale = if input.contact_surface == PickupContactSurface::GrooveWalls {
+                1.0 - sliding_direction * friction_coefficient * effective_slope[constraint]
+            } else {
+                1.0
+            };
+            augmented[2][column] = -wall_force_scale * normal[0];
+            augmented[4][column] = -wall_force_scale * normal[1];
         }
     }
 
@@ -1333,6 +1540,7 @@ fn solve_joint_branch(
             -normal[0] * geometry.lateral_origin_shift_per_record_velocity_m_s / deck.dt;
         if input.contact_surface == PickupContactSurface::GrooveWalls {
             augmented[next_row][1] -= 0.5 * effective_slope[constraint] * input.groove_radius_m;
+            augmented[next_row][4] += effective_slope[constraint] * skating_factor;
         }
         augmented[next_row][2] = normal[0];
         augmented[next_row][3] = normal[1];
@@ -1362,6 +1570,7 @@ fn solve_joint_branch(
     }
     if stylus_force_column.is_some() {
         augmented[next_row][1] = 1.0;
+        augmented[next_row][4] = -2.0 * skating_factor / input.groove_radius_m;
         augmented[next_row][JOINT_RHS_COLUMN] = -deck.previous_record_velocity_rad_s;
         next_row += 1;
     }
@@ -1389,6 +1598,7 @@ fn solve_joint_branch(
         hand_column,
         stylus_force_column,
         stylus_mode,
+        skating_factor,
     )
 }
 
@@ -1710,6 +1920,7 @@ fn validate_joint_candidate(
     hand_column: Option<usize>,
     stylus_force_column: Option<usize>,
     stylus_mode: StylusTangentialMode,
+    skating_factor: f64,
 ) -> Option<JointCandidate> {
     let input = geometry.input;
     let platter_velocity_rad_s = solution[0];
@@ -1721,7 +1932,10 @@ fn validate_joint_candidate(
     let effective_slope = wall_effective_slope(input);
     let wall_endpoint_displacement_m = [0, 1].map(|wall| {
         input.wall_contacts[wall].center_displacement_m
-            + 0.5 * effective_slope[wall] * input.groove_radius_m * deck.dt * record_velocity_rad_s
+            + effective_slope[wall]
+                * deck.dt
+                * (0.5 * input.groove_radius_m * record_velocity_rad_s
+                    - skating_factor * body_velocity_m_s[0])
     });
     let tip_displacement_m = [
         pickup.tip_displacement_m[0] + tip_velocity_m_s[0] * deck.dt - lateral_origin_shift_m,
@@ -1762,13 +1976,14 @@ fn validate_joint_candidate(
         }
         _ => ([0.0; 2], 0.0),
     };
-    let zero_friction_wall_contact =
-        distribute_wall_contact_forces(input, wall_projected_force_n, 0.0);
-    let wall_normal_force_n =
-        zero_friction_wall_contact.map(PickupWallContactTelemetry::total_surface_normal_force_n);
-    let (normal_force_sum, friction_coefficient) = match input.contact_surface {
+    let zero_friction_wall_contact = distribute_wall_contact_forces(
+        input,
+        wall_projected_force_n,
+        WallFrictionDistribution::None,
+    );
+    let (friction_normal_force_n, friction_coefficient) = match input.contact_surface {
         PickupContactSurface::GrooveWalls => (
-            wall_normal_force_n[0] + wall_normal_force_n[1],
+            wall_projected_force_n[0] + wall_projected_force_n[1],
             pickup.contact.groove_friction_coefficient,
         ),
         PickupContactSurface::RecordLand => (
@@ -1785,11 +2000,14 @@ fn validate_joint_candidate(
         } else {
             0.0
         };
-    let tangential_relative_velocity_m_s =
-        0.5 * input.groove_radius_m * (deck.previous_record_velocity_rad_s + record_velocity_rad_s);
+    let tangential_relative_velocity_m_s = along_groove_slip_velocity_m_s(
+        0.5 * input.groove_radius_m * (deck.previous_record_velocity_rad_s + record_velocity_rad_s),
+        skating_factor,
+        body_velocity_m_s[0],
+    );
     let (record_reaction_force_tangent_n, coulomb_friction_force_n) = match stylus_mode {
         StylusTangentialMode::Sticking => {
-            if normal_force_sum <= TANGENTIAL_FORCE_TOLERANCE_N
+            if friction_normal_force_n <= TANGENTIAL_FORCE_TOLERANCE_N
                 || tangential_relative_velocity_m_s.abs() > 1.0e-12
             {
                 return None;
@@ -1797,34 +2015,34 @@ fn validate_joint_candidate(
             let total = stylus_force_column.map_or(0.0, |column| solution[column]);
             let friction = total - modulation_reaction_force_n;
             if friction.abs()
-                > friction_coefficient * normal_force_sum + TANGENTIAL_FORCE_TOLERANCE_N
+                > friction_coefficient * friction_normal_force_n + TANGENTIAL_FORCE_TOLERANCE_N
             {
                 return None;
             }
             (total, friction)
         }
         StylusTangentialMode::SlidingPositive => {
-            if normal_force_sum <= TANGENTIAL_FORCE_TOLERANCE_N
+            if friction_normal_force_n <= TANGENTIAL_FORCE_TOLERANCE_N
                 || tangential_relative_velocity_m_s <= 0.0
             {
                 return None;
             }
-            let friction = -friction_coefficient * normal_force_sum;
+            let friction = -friction_coefficient * friction_normal_force_n;
             (modulation_reaction_force_n + friction, friction)
         }
         StylusTangentialMode::SlidingNegative => {
-            if normal_force_sum <= TANGENTIAL_FORCE_TOLERANCE_N
+            if friction_normal_force_n <= TANGENTIAL_FORCE_TOLERANCE_N
                 || tangential_relative_velocity_m_s >= 0.0
             {
                 return None;
             }
-            let friction = friction_coefficient * normal_force_sum;
+            let friction = friction_coefficient * friction_normal_force_n;
             (modulation_reaction_force_n + friction, friction)
         }
         StylusTangentialMode::Separated => {
             if input.stylus_lowered
                 && input.contact_surface != PickupContactSurface::None
-                && normal_force_sum > TANGENTIAL_FORCE_TOLERANCE_N
+                && friction_normal_force_n > TANGENTIAL_FORCE_TOLERANCE_N
                 && friction_coefficient > 0.0
             {
                 return None;
@@ -1832,7 +2050,24 @@ fn validate_joint_candidate(
             (modulation_reaction_force_n, 0.0)
         }
     };
-    if coulomb_friction_force_n * tangential_relative_velocity_m_s > 1.0e-18 {
+    let friction_power_w = if input.contact_surface == PickupContactSurface::GrooveWalls {
+        wall_coulomb_friction_power_w(
+            distribute_wall_contact_forces(
+                input,
+                wall_projected_force_n,
+                wall_friction_distribution(
+                    stylus_mode,
+                    friction_coefficient,
+                    coulomb_friction_force_n,
+                ),
+            ),
+            tangential_relative_velocity_m_s,
+            wall_coordinate_velocity_m_s(tip_velocity_m_s),
+        )
+    } else {
+        coulomb_friction_force_n * tangential_relative_velocity_m_s
+    };
+    if friction_power_w > 1.0e-18 {
         return None;
     }
 
@@ -1965,6 +2200,8 @@ fn validate_joint_candidate(
             wall_contact: wall_projected_force_n.map(|force| force > 0.0),
             land_normal_force_n,
             bearing_friction_force_n: pickup_bearing_friction_force_n,
+            tangential_mode: stylus_mode,
+            sticking_friction_force_n: 0.0,
         },
         tangential: PickupTangentialForces {
             coulomb_friction_force_n,
@@ -2081,6 +2318,8 @@ struct PickupStepSolution {
     wall_contact: [bool; 2],
     land_normal_force_n: f64,
     bearing_friction_force_n: f64,
+    tangential_mode: StylusTangentialMode,
+    sticking_friction_force_n: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2090,6 +2329,72 @@ struct PickupTangentialForces {
     record_reaction_force_tangent_n: f64,
     relative_velocity_m_s: f64,
     mode: StylusTangentialMode,
+}
+
+fn classify_tangential_velocity(velocity_m_s: f64) -> StylusTangentialMode {
+    if velocity_m_s > TANGENTIAL_VELOCITY_TOLERANCE_M_S {
+        StylusTangentialMode::SlidingPositive
+    } else if velocity_m_s < -TANGENTIAL_VELOCITY_TOLERANCE_M_S {
+        StylusTangentialMode::SlidingNegative
+    } else {
+        StylusTangentialMode::Sticking
+    }
+}
+
+fn standalone_tangential_mode(
+    input: PickupMechanicalInput,
+    wall_projected_force_n: [f64; 2],
+    land_normal_force_n: f64,
+    tip_velocity_m_s: [f64; 2],
+    body_velocity_m_s: [f64; 2],
+    skating_factor: f64,
+) -> Option<StylusTangentialMode> {
+    if !input.stylus_lowered || input.contact_surface == PickupContactSurface::None {
+        return Some(StylusTangentialMode::Separated);
+    }
+    let slip_velocity_m_s = along_groove_slip_velocity_m_s(
+        input.groove_tangential_velocity_m_s,
+        skating_factor,
+        body_velocity_m_s[0],
+    );
+    match input.contact_surface {
+        PickupContactSurface::None => Some(StylusTangentialMode::Separated),
+        PickupContactSurface::RecordLand => {
+            if land_normal_force_n <= TANGENTIAL_FORCE_TOLERANCE_N {
+                Some(StylusTangentialMode::Separated)
+            } else {
+                Some(classify_tangential_velocity(slip_velocity_m_s))
+            }
+        }
+        PickupContactSurface::GrooveWalls => {
+            let wall_velocity_m_s = wall_coordinate_velocity_m_s(tip_velocity_m_s);
+            let mut common_mode = None;
+            for wall in 0..2 {
+                if wall_projected_force_n[wall] <= TANGENTIAL_FORCE_TOLERANCE_N {
+                    continue;
+                }
+                let count = wall_contact_count(input.wall_contacts[wall]).unwrap_or(1);
+                for contact in &input.wall_contacts[wall].contacts[..count] {
+                    let gamma_dot_m_s =
+                        slip_velocity_m_s + contact.groove_slope * wall_velocity_m_s[wall];
+                    let mode = classify_tangential_velocity(gamma_dot_m_s);
+                    if common_mode.is_some_and(|common| common != mode) {
+                        return None;
+                    }
+                    common_mode = Some(mode);
+                }
+            }
+            Some(common_mode.unwrap_or(StylusTangentialMode::Separated))
+        }
+    }
+}
+
+fn sliding_direction_matches_mode(direction: f64, mode: StylusTangentialMode) -> bool {
+    match mode {
+        StylusTangentialMode::SlidingPositive => direction == 1.0,
+        StylusTangentialMode::SlidingNegative => direction == -1.0,
+        StylusTangentialMode::Sticking | StylusTangentialMode::Separated => direction == 0.0,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2107,7 +2412,7 @@ fn solve_pickup_step(
 ) -> Result<PickupStepSolution, PickupMechanicalError> {
     let mut constraint_normals = [[0.0_f64; 2]; 2];
     let mut constraint_displacement_m = [0.0_f64; 2];
-    let mut tangential_force_per_normal = [0.0_f64; 2];
+    let effective_slope = wall_effective_slope(input);
     let constraint_count = if !input.stylus_lowered {
         0
     } else {
@@ -2116,24 +2421,11 @@ fn solve_pickup_step(
             PickupContactSurface::GrooveWalls => {
                 constraint_normals = WALL_NORMALS;
                 constraint_displacement_m = wall_displacement_m(input);
-                let effective_slope = wall_effective_slope(input);
-                let surface_normal_scale = wall_effective_surface_normal_scale(input);
-                for (constraint, tangential_force) in
-                    tangential_force_per_normal.iter_mut().enumerate()
-                {
-                    *tangential_force = signed_direction(input.groove_tangential_velocity_m_s)
-                        * contact.groove_friction_coefficient
-                        * surface_normal_scale[constraint]
-                        + effective_slope[constraint];
-                }
                 2
             }
             PickupContactSurface::RecordLand => {
                 constraint_normals[0] = [0.0, 1.0];
                 constraint_displacement_m[0] = input.land_displacement_m;
-                tangential_force_per_normal[0] =
-                    signed_direction(input.groove_tangential_velocity_m_s)
-                        * contact.record_surface_friction_coefficient;
                 1
             }
         }
@@ -2150,6 +2442,18 @@ fn solve_pickup_step(
             .equivalent_radial_force_n(input.groove_radius_m, 1.0)?
     } else {
         0.0
+    };
+    let predicted_slip_velocity_m_s = along_groove_slip_velocity_m_s(
+        input.groove_tangential_velocity_m_s,
+        skating_factor,
+        body_velocity_m_s[0],
+    );
+    let sliding_directions = if predicted_slip_velocity_m_s > 0.0 {
+        [1.0, 0.0, -1.0]
+    } else if predicted_slip_velocity_m_s < 0.0 {
+        [-1.0, 0.0, 1.0]
+    } else {
+        [0.0, 1.0, -1.0]
     };
 
     let bearing_modes = if body_velocity_m_s[0] > BEARING_VELOCITY_TOLERANCE_M_S {
@@ -2181,160 +2485,263 @@ fn solve_pickup_step(
                     active_count += 1;
                 }
             }
-            let bearing_sticks = bearing_mode == BearingMode::Stick;
-            let variable_count = 4 + active_count + usize::from(bearing_sticks);
-            let mut augmented = [[0.0_f64; 8]; 7];
-            let axes = [tonearm.lateral, tonearm.vertical];
-            for axis in 0..2 {
-                let tip_row = axis * 2;
-                let body_row = tip_row + 1;
-                let tip_velocity_column = axis;
-                let body_velocity_column = 2 + axis;
-                let stiffness = axes[axis].stiffness_n_per_m();
-                let damping = axes[axis].viscous_damping_n_s_per_m();
-                let coupling = stiffness * dt + damping;
-                let relative_displacement = tip_displacement_m[axis] - body_displacement_m[axis];
-
-                augmented[tip_row][tip_velocity_column] = contact.moving_mass_kg / dt + coupling;
-                augmented[tip_row][body_velocity_column] = -coupling;
-                augmented[tip_row][variable_count] = contact.moving_mass_kg / dt
-                    * tip_velocity_m_s[axis]
-                    - stiffness * relative_displacement
-                    + electromagnetic_relation.force_bias_n[axis];
-
-                augmented[body_row][tip_velocity_column] = -coupling;
-                augmented[body_row][body_velocity_column] =
-                    axes[axis].effective_mass_kg / dt + coupling;
-                augmented[body_row][variable_count] = axes[axis].effective_mass_kg / dt
-                    * body_velocity_m_s[axis]
-                    + stiffness * relative_displacement
-                    + body_external_force_n[axis]
-                    - electromagnetic_relation.force_bias_n[axis];
-
-                for velocity_axis in 0..2 {
-                    let reciprocal_damping =
-                        electromagnetic_relation.reciprocal_damping_n_s_per_m[axis][velocity_axis];
-                    augmented[tip_row][velocity_axis] += reciprocal_damping;
-                    augmented[tip_row][2 + velocity_axis] -= reciprocal_damping;
-                    augmented[body_row][velocity_axis] -= reciprocal_damping;
-                    augmented[body_row][2 + velocity_axis] += reciprocal_damping;
-                }
-
-                if axis == 0 {
-                    augmented[body_row][body_velocity_column] +=
-                        tonearm.lateral_bearing_viscous_damping_n_s_per_m;
-                    augmented[body_row][variable_count] += match bearing_mode {
-                        BearingMode::Stick => 0.0,
-                        BearingMode::Positive => -tonearm.lateral_bearing_kinetic_friction_n,
-                        BearingMode::Negative => tonearm.lateral_bearing_kinetic_friction_n,
-                    };
-                    if bearing_sticks {
-                        let bearing_force_column = 4 + active_count;
-                        augmented[body_row][bearing_force_column] = -1.0;
+            let candidate_directions = if active_count == 0 {
+                [0.0; 3]
+            } else {
+                sliding_directions
+            };
+            let direction_count = if active_count == 0 { 1 } else { 3 };
+            for &sliding_direction in &candidate_directions[..direction_count] {
+                let mut tangential_force_per_normal = [0.0_f64; 2];
+                let mut wall_force_scale_per_normal = [1.0_f64; 2];
+                for constraint in 0..constraint_count {
+                    match input.contact_surface {
+                        PickupContactSurface::GrooveWalls => {
+                            tangential_force_per_normal[constraint] = effective_slope[constraint]
+                                + sliding_direction * contact.groove_friction_coefficient;
+                            wall_force_scale_per_normal[constraint] = 1.0
+                                - sliding_direction
+                                    * contact.groove_friction_coefficient
+                                    * effective_slope[constraint];
+                        }
+                        PickupContactSurface::RecordLand => {
+                            tangential_force_per_normal[constraint] =
+                                sliding_direction * contact.record_surface_friction_coefficient;
+                        }
+                        PickupContactSurface::None => {}
                     }
                 }
+                let bearing_sticks = bearing_mode == BearingMode::Stick;
+                let friction_coefficient = match input.contact_surface {
+                    PickupContactSurface::GrooveWalls => contact.groove_friction_coefficient,
+                    PickupContactSurface::RecordLand => contact.record_surface_friction_coefficient,
+                    PickupContactSurface::None => 0.0,
+                };
+                let flat_sticking_requested = sliding_direction == 0.0
+                    && active_count > 0
+                    && friction_coefficient > 0.0
+                    && (input.contact_surface != PickupContactSurface::GrooveWalls
+                        || !active_wall_has_nonzero_slope(input, active_mask));
+                if flat_sticking_requested
+                    && bearing_sticks
+                    && input.groove_tangential_velocity_m_s.abs()
+                        > TANGENTIAL_VELOCITY_TOLERANCE_M_S
+                {
+                    continue;
+                }
+                let flat_sticking_branch = flat_sticking_requested && !bearing_sticks;
+                let bearing_force_column = bearing_sticks.then_some(4 + active_count);
+                let sticking_force_column =
+                    flat_sticking_branch.then_some(4 + active_count + usize::from(bearing_sticks));
+                let variable_count = 4
+                    + active_count
+                    + usize::from(bearing_sticks)
+                    + usize::from(flat_sticking_branch);
+                let mut augmented = [[0.0_f64; 9]; 8];
+                let axes = [tonearm.lateral, tonearm.vertical];
+                for axis in 0..2 {
+                    let tip_row = axis * 2;
+                    let body_row = tip_row + 1;
+                    let tip_velocity_column = axis;
+                    let body_velocity_column = 2 + axis;
+                    let stiffness = axes[axis].stiffness_n_per_m();
+                    let damping = axes[axis].viscous_damping_n_s_per_m();
+                    let coupling = stiffness * dt + damping;
+                    let relative_displacement =
+                        tip_displacement_m[axis] - body_displacement_m[axis];
 
-                if axis == 1 && !input.stylus_lowered {
-                    let cue_coupling = tonearm.cue_support_stiffness_n_per_m * dt
-                        + tonearm.cue_support_damping_n_s_per_m;
-                    augmented[body_row][body_velocity_column] += cue_coupling;
-                    augmented[body_row][variable_count] += tonearm.cue_support_stiffness_n_per_m
-                        * (tonearm.cue_lift_height_m - body_displacement_m[1]);
+                    augmented[tip_row][tip_velocity_column] =
+                        contact.moving_mass_kg / dt + coupling;
+                    augmented[tip_row][body_velocity_column] = -coupling;
+                    augmented[tip_row][variable_count] = contact.moving_mass_kg / dt
+                        * tip_velocity_m_s[axis]
+                        - stiffness * relative_displacement
+                        + electromagnetic_relation.force_bias_n[axis];
+
+                    augmented[body_row][tip_velocity_column] = -coupling;
+                    augmented[body_row][body_velocity_column] =
+                        axes[axis].effective_mass_kg / dt + coupling;
+                    augmented[body_row][variable_count] = axes[axis].effective_mass_kg / dt
+                        * body_velocity_m_s[axis]
+                        + stiffness * relative_displacement
+                        + body_external_force_n[axis]
+                        - electromagnetic_relation.force_bias_n[axis];
+
+                    for velocity_axis in 0..2 {
+                        let reciprocal_damping = electromagnetic_relation
+                            .reciprocal_damping_n_s_per_m[axis][velocity_axis];
+                        augmented[tip_row][velocity_axis] += reciprocal_damping;
+                        augmented[tip_row][2 + velocity_axis] -= reciprocal_damping;
+                        augmented[body_row][velocity_axis] -= reciprocal_damping;
+                        augmented[body_row][2 + velocity_axis] += reciprocal_damping;
+                    }
+
+                    if axis == 0 {
+                        augmented[body_row][body_velocity_column] +=
+                            tonearm.lateral_bearing_viscous_damping_n_s_per_m;
+                        augmented[body_row][variable_count] += match bearing_mode {
+                            BearingMode::Stick => 0.0,
+                            BearingMode::Positive => -tonearm.lateral_bearing_kinetic_friction_n,
+                            BearingMode::Negative => tonearm.lateral_bearing_kinetic_friction_n,
+                        };
+                        if let Some(bearing_force_column) = bearing_force_column {
+                            augmented[body_row][bearing_force_column] = -1.0;
+                        }
+                        if let Some(sticking_force_column) = sticking_force_column {
+                            augmented[body_row][sticking_force_column] = skating_factor;
+                        }
+                    }
+
+                    if axis == 1 && !input.stylus_lowered {
+                        let cue_coupling = tonearm.cue_support_stiffness_n_per_m * dt
+                            + tonearm.cue_support_damping_n_s_per_m;
+                        augmented[body_row][body_velocity_column] += cue_coupling;
+                        augmented[body_row][variable_count] += tonearm
+                            .cue_support_stiffness_n_per_m
+                            * (tonearm.cue_lift_height_m - body_displacement_m[1]);
+                    }
+
+                    for (active_index, &constraint) in
+                        active_constraints[..active_count].iter().enumerate()
+                    {
+                        let lambda_column = 4 + active_index;
+                        augmented[tip_row][lambda_column] = -wall_force_scale_per_normal
+                            [constraint]
+                            * constraint_normals[constraint][axis];
+                        if axis == 0 {
+                            augmented[body_row][lambda_column] =
+                                -skating_factor * tangential_force_per_normal[constraint];
+                        }
+                    }
                 }
 
                 for (active_index, &constraint) in
                     active_constraints[..active_count].iter().enumerate()
                 {
-                    let lambda_column = 4 + active_index;
-                    augmented[tip_row][lambda_column] = -constraint_normals[constraint][axis];
-                    if axis == 0 {
-                        augmented[body_row][lambda_column] =
-                            -skating_factor * tangential_force_per_normal[constraint];
-                    }
+                    let row = 4 + active_index;
+                    augmented[row][0] = constraint_normals[constraint][0];
+                    augmented[row][1] = constraint_normals[constraint][1];
+                    augmented[row][variable_count] = (constraint_displacement_m[constraint]
+                        - dot(constraint_normals[constraint], tip_displacement_m))
+                        / dt;
                 }
-            }
+                if bearing_sticks {
+                    let row = 4 + active_count;
+                    augmented[row][2] = 1.0;
+                    augmented[row][variable_count] = 0.0;
+                }
+                if sticking_force_column.is_some() {
+                    let row = 4 + active_count + usize::from(bearing_sticks);
+                    augmented[row][2] = skating_factor;
+                    augmented[row][variable_count] = input.groove_tangential_velocity_m_s;
+                }
 
-            for (active_index, &constraint) in active_constraints[..active_count].iter().enumerate()
-            {
-                let row = 4 + active_index;
-                augmented[row][0] = constraint_normals[constraint][0];
-                augmented[row][1] = constraint_normals[constraint][1];
-                augmented[row][variable_count] = (constraint_displacement_m[constraint]
-                    - dot(constraint_normals[constraint], tip_displacement_m))
-                    / dt;
-            }
-            if bearing_sticks {
-                let row = 4 + active_count;
-                augmented[row][2] = 1.0;
-                augmented[row][variable_count] = 0.0;
-            }
-
-            let Some(solution) = solve_linear_system(&mut augmented, variable_count) else {
-                continue;
-            };
-            let next_tip_velocity = [solution[0], solution[1]];
-            let next_body_velocity = [solution[2], solution[3]];
-            let next_tip_displacement = [
-                tip_displacement_m[0] + next_tip_velocity[0] * dt,
-                tip_displacement_m[1] + next_tip_velocity[1] * dt,
-            ];
-            let mut constraint_force_n = [0.0; 2];
-            let mut valid = true;
-            for constraint in 0..constraint_count {
-                let gap = dot(constraint_normals[constraint], next_tip_displacement)
-                    - constraint_displacement_m[constraint];
-                if active_mask & (1 << constraint) == 0 {
-                    valid &= gap >= -CONTACT_TOLERANCE_M;
-                }
-            }
-            for (active_index, &constraint) in active_constraints[..active_count].iter().enumerate()
-            {
-                let force = solution[4 + active_index];
-                valid &= force >= -1.0e-10;
-                constraint_force_n[constraint] = force.max(0.0);
-            }
-            let bearing_friction_force_n = match bearing_mode {
-                BearingMode::Stick => {
-                    let force = solution[4 + active_count];
-                    valid &= force.abs() <= tonearm.lateral_bearing_static_friction_n + 1.0e-10;
-                    force
-                }
-                BearingMode::Positive => {
-                    valid &= next_body_velocity[0] >= -BEARING_VELOCITY_TOLERANCE_M_S;
-                    -tonearm.lateral_bearing_kinetic_friction_n
-                        - tonearm.lateral_bearing_viscous_damping_n_s_per_m * next_body_velocity[0]
-                }
-                BearingMode::Negative => {
-                    valid &= next_body_velocity[0] <= BEARING_VELOCITY_TOLERANCE_M_S;
-                    tonearm.lateral_bearing_kinetic_friction_n
-                        - tonearm.lateral_bearing_viscous_damping_n_s_per_m * next_body_velocity[0]
-                }
-            };
-            if valid
-                && next_tip_velocity
-                    .iter()
-                    .chain(&next_body_velocity)
-                    .chain(&constraint_force_n)
-                    .chain([bearing_friction_force_n].iter())
-                    .all(|value| value.is_finite())
-            {
-                let (wall_projected_force_n, land_normal_force_n) = match input.contact_surface {
-                    PickupContactSurface::GrooveWalls if input.stylus_lowered => {
-                        (constraint_force_n, 0.0)
-                    }
-                    PickupContactSurface::RecordLand if input.stylus_lowered => {
-                        ([0.0; 2], constraint_force_n[0])
-                    }
-                    _ => ([0.0; 2], 0.0),
+                let Some(solution) = solve_linear_system(&mut augmented, variable_count) else {
+                    continue;
                 };
-                return Ok(PickupStepSolution {
-                    tip_velocity_m_s: next_tip_velocity,
-                    body_velocity_m_s: next_body_velocity,
-                    wall_projected_force_n,
-                    wall_contact: wall_projected_force_n.map(|force| force > 0.0),
-                    land_normal_force_n,
-                    bearing_friction_force_n,
-                });
+                let next_tip_velocity = [solution[0], solution[1]];
+                let next_body_velocity = [solution[2], solution[3]];
+                let next_tip_displacement = [
+                    tip_displacement_m[0] + next_tip_velocity[0] * dt,
+                    tip_displacement_m[1] + next_tip_velocity[1] * dt,
+                ];
+                let mut constraint_force_n = [0.0; 2];
+                let mut valid = true;
+                for constraint in 0..constraint_count {
+                    let gap = dot(constraint_normals[constraint], next_tip_displacement)
+                        - constraint_displacement_m[constraint];
+                    if active_mask & (1 << constraint) == 0 {
+                        valid &= gap >= -CONTACT_TOLERANCE_M;
+                    }
+                }
+                for (active_index, &constraint) in
+                    active_constraints[..active_count].iter().enumerate()
+                {
+                    let force = solution[4 + active_index];
+                    valid &= force >= -1.0e-10;
+                    constraint_force_n[constraint] = force.max(0.0);
+                }
+                let bearing_friction_force_n = match bearing_mode {
+                    BearingMode::Stick => {
+                        let force = solution[4 + active_count];
+                        valid &= force.abs() <= tonearm.lateral_bearing_static_friction_n + 1.0e-10;
+                        force
+                    }
+                    BearingMode::Positive => {
+                        valid &= next_body_velocity[0] >= -BEARING_VELOCITY_TOLERANCE_M_S;
+                        -tonearm.lateral_bearing_kinetic_friction_n
+                            - tonearm.lateral_bearing_viscous_damping_n_s_per_m
+                                * next_body_velocity[0]
+                    }
+                    BearingMode::Negative => {
+                        valid &= next_body_velocity[0] <= BEARING_VELOCITY_TOLERANCE_M_S;
+                        tonearm.lateral_bearing_kinetic_friction_n
+                            - tonearm.lateral_bearing_viscous_damping_n_s_per_m
+                                * next_body_velocity[0]
+                    }
+                };
+                if valid
+                    && next_tip_velocity
+                        .iter()
+                        .chain(&next_body_velocity)
+                        .chain(&constraint_force_n)
+                        .chain([bearing_friction_force_n].iter())
+                        .all(|value| value.is_finite())
+                {
+                    let (wall_projected_force_n, land_normal_force_n) = match input.contact_surface
+                    {
+                        PickupContactSurface::GrooveWalls if input.stylus_lowered => {
+                            (constraint_force_n, 0.0)
+                        }
+                        PickupContactSurface::RecordLand if input.stylus_lowered => {
+                            ([0.0; 2], constraint_force_n[0])
+                        }
+                        _ => ([0.0; 2], 0.0),
+                    };
+                    let friction_normal_force_n = match input.contact_surface {
+                        PickupContactSurface::GrooveWalls => {
+                            wall_projected_force_n[0] + wall_projected_force_n[1]
+                        }
+                        PickupContactSurface::RecordLand => land_normal_force_n,
+                        PickupContactSurface::None => 0.0,
+                    };
+                    let sticking_friction_force_n =
+                        sticking_force_column.map_or(0.0, |column| solution[column]);
+                    if sticking_friction_force_n.abs()
+                        > friction_coefficient * friction_normal_force_n
+                            + TANGENTIAL_FORCE_TOLERANCE_N
+                    {
+                        continue;
+                    }
+                    let Some(tangential_mode) = standalone_tangential_mode(
+                        input,
+                        wall_projected_force_n,
+                        land_normal_force_n,
+                        next_tip_velocity,
+                        next_body_velocity,
+                        skating_factor,
+                    ) else {
+                        continue;
+                    };
+                    if !sliding_direction_matches_mode(sliding_direction, tangential_mode) {
+                        continue;
+                    }
+                    if tangential_mode == StylusTangentialMode::Separated
+                        && sticking_friction_force_n.abs() > TANGENTIAL_FORCE_TOLERANCE_N
+                    {
+                        continue;
+                    }
+                    return Ok(PickupStepSolution {
+                        tip_velocity_m_s: next_tip_velocity,
+                        body_velocity_m_s: next_body_velocity,
+                        wall_projected_force_n,
+                        wall_contact: wall_projected_force_n.map(|force| force > 0.0),
+                        land_normal_force_n,
+                        bearing_friction_force_n,
+                        tangential_mode,
+                        sticking_friction_force_n,
+                    });
+                }
             }
         }
     }
@@ -2348,7 +2755,7 @@ enum BearingMode {
     Negative,
 }
 
-fn solve_linear_system(augmented: &mut [[f64; 8]; 7], size: usize) -> Option<[f64; 7]> {
+fn solve_linear_system(augmented: &mut [[f64; 9]; 8], size: usize) -> Option<[f64; 8]> {
     for pivot_column in 0..size {
         let pivot_row = (pivot_column..size).max_by(|left, right| {
             augmented[*left][pivot_column]
@@ -2377,7 +2784,7 @@ fn solve_linear_system(augmented: &mut [[f64; 8]; 7], size: usize) -> Option<[f6
             }
         }
     }
-    let mut solution = [0.0; 7];
+    let mut solution = [0.0; 8];
     for row in 0..size {
         solution[row] = augmented[row][size];
     }
@@ -2494,6 +2901,29 @@ fn validate_input(input: PickupMechanicalInput) -> Result<(), PickupMechanicalEr
     Ok(())
 }
 
+fn validate_friction_geometry(
+    contact: StylusContactConfig,
+    input: PickupMechanicalInput,
+) -> Result<(), PickupMechanicalError> {
+    if input.stylus_lowered
+        && input.contact_surface == PickupContactSurface::GrooveWalls
+        && input.wall_contacts.into_iter().any(|set| {
+            set.contacts[..wall_contact_count(set).unwrap_or(1)]
+                .iter()
+                .any(|wall_contact| {
+                    !groove_friction_geometry_is_well_conditioned(
+                        contact.groove_friction_coefficient,
+                        wall_contact.groove_slope.abs(),
+                    )
+                })
+        })
+    {
+        Err(PickupMechanicalError::IllConditionedGrooveWallFrictionGeometry)
+    } else {
+        Ok(())
+    }
+}
+
 fn wall_contact_telemetry_is_valid(telemetry: PickupWallContactTelemetry) -> bool {
     if !wall_contact_set_is_valid(telemetry.geometry)
         || (telemetry.geometry.contact_count != 1
@@ -2507,6 +2937,7 @@ fn wall_contact_telemetry_is_valid(telemetry: PickupWallContactTelemetry) -> boo
             telemetry.projected_normal_force_n[contact_index],
             telemetry.surface_normal_force_n[contact_index],
             telemetry.modulation_reaction_force_n[contact_index],
+            telemetry.coulomb_wall_force_on_tip_n[contact_index],
             telemetry.coulomb_friction_force_n[contact_index],
             telemetry.record_reaction_force_tangent_n[contact_index],
         ];
@@ -2514,7 +2945,7 @@ fn wall_contact_telemetry_is_valid(telemetry: PickupWallContactTelemetry) -> boo
             return false;
         }
         if contact_index >= count {
-            if values != [0.0; 5] {
+            if values != [0.0; 6] {
                 return false;
             }
             continue;
@@ -2532,6 +2963,10 @@ fn wall_contact_telemetry_is_valid(telemetry: PickupWallContactTelemetry) -> boo
                 -projected_force_n * contact.groove_slope,
             )
             || !nearly_equal_force(
+                telemetry.coulomb_wall_force_on_tip_n[contact_index],
+                telemetry.coulomb_friction_force_n[contact_index] * contact.groove_slope,
+            )
+            || !nearly_equal_force(
                 telemetry.record_reaction_force_tangent_n[contact_index],
                 telemetry.modulation_reaction_force_n[contact_index]
                     + telemetry.coulomb_friction_force_n[contact_index],
@@ -2541,6 +2976,104 @@ fn wall_contact_telemetry_is_valid(telemetry: PickupWallContactTelemetry) -> boo
         }
     }
     true
+}
+
+fn snapshot_tangential_state_is_valid(
+    contact: StylusContactConfig,
+    telemetry: PickupMechanicalTelemetry,
+) -> bool {
+    let mode_matches_velocity = |velocity_m_s: f64| match telemetry.tangential_mode {
+        StylusTangentialMode::SlidingPositive => velocity_m_s > TANGENTIAL_VELOCITY_TOLERANCE_M_S,
+        StylusTangentialMode::SlidingNegative => velocity_m_s < -TANGENTIAL_VELOCITY_TOLERANCE_M_S,
+        StylusTangentialMode::Sticking => velocity_m_s.abs() <= TANGENTIAL_VELOCITY_TOLERANCE_M_S,
+        StylusTangentialMode::Separated => true,
+    };
+    match telemetry.contact_surface {
+        PickupContactSurface::None => {
+            telemetry.tangential_mode == StylusTangentialMode::Separated
+                && telemetry.coulomb_friction_force_n == 0.0
+        }
+        PickupContactSurface::RecordLand => {
+            let normal_force_n = telemetry.land_normal_force_n;
+            let friction_limit_n = contact.record_surface_friction_coefficient * normal_force_n;
+            match telemetry.tangential_mode {
+                StylusTangentialMode::SlidingPositive => {
+                    normal_force_n > TANGENTIAL_FORCE_TOLERANCE_N
+                        && mode_matches_velocity(telemetry.tangential_relative_velocity_m_s)
+                        && nearly_equal_force(telemetry.coulomb_friction_force_n, -friction_limit_n)
+                }
+                StylusTangentialMode::SlidingNegative => {
+                    normal_force_n > TANGENTIAL_FORCE_TOLERANCE_N
+                        && mode_matches_velocity(telemetry.tangential_relative_velocity_m_s)
+                        && nearly_equal_force(telemetry.coulomb_friction_force_n, friction_limit_n)
+                }
+                StylusTangentialMode::Sticking => {
+                    normal_force_n > TANGENTIAL_FORCE_TOLERANCE_N
+                        && mode_matches_velocity(telemetry.tangential_relative_velocity_m_s)
+                        && telemetry.coulomb_friction_force_n.abs()
+                            <= friction_limit_n + TANGENTIAL_FORCE_TOLERANCE_N
+                }
+                StylusTangentialMode::Separated => {
+                    (normal_force_n <= TANGENTIAL_FORCE_TOLERANCE_N
+                        || contact.record_surface_friction_coefficient == 0.0)
+                        && telemetry.coulomb_friction_force_n == 0.0
+                }
+            }
+        }
+        PickupContactSurface::GrooveWalls => {
+            let wall_velocity_m_s = wall_coordinate_velocity_m_s(telemetry.tip_velocity_m_s);
+            let mut loaded_contact_count = 0;
+            for (wall_velocity_m_s, wall_telemetry) in wall_velocity_m_s
+                .into_iter()
+                .zip(telemetry.wall_longitudinal_contact)
+            {
+                for contact_index in 0..wall_telemetry.contact_count() {
+                    let projected_force_n = wall_telemetry.projected_normal_force_n[contact_index];
+                    let friction_force_n = wall_telemetry.coulomb_friction_force_n[contact_index];
+                    if projected_force_n <= TANGENTIAL_FORCE_TOLERANCE_N {
+                        if friction_force_n.abs() > TANGENTIAL_FORCE_TOLERANCE_N {
+                            return false;
+                        }
+                        continue;
+                    }
+                    loaded_contact_count += 1;
+                    let slope = wall_telemetry.geometry.contacts[contact_index].groove_slope;
+                    let gamma_dot_m_s =
+                        telemetry.tangential_relative_velocity_m_s + slope * wall_velocity_m_s;
+                    let friction_limit_n = contact.groove_friction_coefficient * projected_force_n;
+                    let valid_contact = match telemetry.tangential_mode {
+                        StylusTangentialMode::SlidingPositive => {
+                            mode_matches_velocity(gamma_dot_m_s)
+                                && nearly_equal_force(friction_force_n, -friction_limit_n)
+                        }
+                        StylusTangentialMode::SlidingNegative => {
+                            mode_matches_velocity(gamma_dot_m_s)
+                                && nearly_equal_force(friction_force_n, friction_limit_n)
+                        }
+                        StylusTangentialMode::Sticking => {
+                            mode_matches_velocity(gamma_dot_m_s)
+                                && (contact.groove_friction_coefficient == 0.0 || slope == 0.0)
+                                && friction_force_n.abs()
+                                    <= friction_limit_n + TANGENTIAL_FORCE_TOLERANCE_N
+                        }
+                        StylusTangentialMode::Separated => {
+                            contact.groove_friction_coefficient == 0.0 && friction_force_n == 0.0
+                        }
+                    };
+                    if !valid_contact {
+                        return false;
+                    }
+                }
+            }
+            match telemetry.tangential_mode {
+                StylusTangentialMode::Separated => {
+                    (loaded_contact_count == 0 || contact.groove_friction_coefficient == 0.0)
+                        && telemetry.coulomb_friction_force_n == 0.0
+                }
+                _ => loaded_contact_count > 0,
+            }
+        }
+    }
 }
 
 fn validate_snapshot(snapshot: PickupMechanicalSnapshot) -> Result<(), PickupMechanicalError> {
@@ -2562,6 +3095,7 @@ fn validate_snapshot(snapshot: PickupMechanicalSnapshot) -> Result<(), PickupMec
         return Err(PickupMechanicalError::InvalidSnapshot);
     }
     let telemetry = snapshot.last_telemetry;
+    let tangential_state_is_valid = snapshot_tangential_state_is_valid(snapshot.contact, telemetry);
     let wall_longitudinal_is_valid = telemetry
         .wall_longitudinal_contact
         .into_iter()
@@ -2576,6 +3110,21 @@ fn validate_snapshot(snapshot: PickupMechanicalSnapshot) -> Result<(), PickupMec
         .into_iter()
         .map(PickupWallContactTelemetry::total_coulomb_friction_force_n)
         .sum::<f64>();
+    let expected_tangential_friction_power_w =
+        if telemetry.contact_surface == PickupContactSurface::GrooveWalls {
+            wall_coulomb_friction_power_w(
+                telemetry.wall_longitudinal_contact,
+                telemetry.tangential_relative_velocity_m_s,
+                wall_coordinate_velocity_m_s(telemetry.tip_velocity_m_s),
+            )
+        } else {
+            telemetry.coulomb_friction_force_n * telemetry.tangential_relative_velocity_m_s
+        };
+    let wall_coordinate_force_on_tip_n = telemetry.wall_longitudinal_contact.map(|wall| {
+        wall.total_projected_normal_force_n() + wall.total_coulomb_wall_force_on_tip_n()
+    });
+    let expected_groove_lateral_force_on_tip_n =
+        (wall_coordinate_force_on_tip_n[0] - wall_coordinate_force_on_tip_n[1]) * INVERSE_SQRT_2;
     let telemetry_is_finite = telemetry
         .tip_displacement_m
         .iter()
@@ -2610,6 +3159,7 @@ fn validate_snapshot(snapshot: PickupMechanicalSnapshot) -> Result<(), PickupMec
         .all(|value| value.is_finite());
     if !telemetry_is_finite
         || !wall_longitudinal_is_valid
+        || !tangential_state_is_valid
         || telemetry.completed_steps != snapshot.completed_steps
         || telemetry.tip_displacement_m != snapshot.tip_displacement_m
         || telemetry.tip_velocity_m_s != snapshot.tip_velocity_m_s
@@ -2643,6 +3193,14 @@ fn validate_snapshot(snapshot: PickupMechanicalSnapshot) -> Result<(), PickupMec
         || telemetry.kinetic_energy_j < 0.0
         || telemetry.suspension_energy_j < 0.0
         || telemetry.tangential_friction_power_w > 1.0e-18
+        || !nearly_equal_force(
+            telemetry.tangential_friction_power_w,
+            expected_tangential_friction_power_w,
+        )
+        || !nearly_equal_force(
+            telemetry.groove_lateral_force_on_tip_n,
+            expected_groove_lateral_force_on_tip_n,
+        )
         || (!telemetry.stylus_lowered
             && (telemetry.contact_surface != PickupContactSurface::None
                 || telemetry.wall_contact != [false; 2]
@@ -2674,16 +3232,6 @@ fn matrix_vector(matrix: [[f64; 2]; 2], vector: [f64; 2]) -> [f64; 2] {
         matrix[0][0] * vector[0] + matrix[0][1] * vector[1],
         matrix[1][0] * vector[0] + matrix[1][1] * vector[1],
     ]
-}
-
-fn signed_direction(value: f64) -> f64 {
-    if value > 0.0 {
-        1.0
-    } else if value < 0.0 {
-        -1.0
-    } else {
-        0.0
-    }
 }
 
 fn dot(left: [f64; 2], right: [f64; 2]) -> f64 {
@@ -2751,6 +3299,10 @@ pub enum PickupMechanicalError {
     InvalidSnapshot,
     #[error("pickup contact constraint failed")]
     ConstraintFailure,
+    #[error("nonzero-slope groove-wall sticking needs a resolved tangential contact model")]
+    UnsupportedGrooveWallSticking,
+    #[error("groove-wall sliding would direct a local Coulomb force out of the wall")]
+    IllConditionedGrooveWallFrictionGeometry,
     #[error("pickup integration produced a nonfinite value")]
     NumericalFailure,
     #[error(transparent)]
@@ -2887,7 +3439,14 @@ mod tests {
             ],
             ..PickupMechanicalInput::default()
         };
-        let distributed = distribute_wall_contact_forces(input, [2.0, 0.0], -0.4);
+        let distributed = distribute_wall_contact_forces(
+            input,
+            [2.0, 0.0],
+            WallFrictionDistribution::Sliding {
+                coefficient: 0.2,
+                direction: 1.0,
+            },
+        );
         let wall = distributed[0];
         assert_eq!(wall.contact_count(), 2);
         assert_eq!(wall.projected_normal_force_n[..2], [1.0, 1.0]);
@@ -2896,6 +3455,7 @@ mod tests {
             wall.surface_normal_force_n[1]
         );
         assert_eq!(wall.coulomb_friction_force_n[..2], [-0.2, -0.2]);
+        assert_eq!(wall.coulomb_wall_force_on_tip_n[..2], [-0.05, 0.05]);
         assert_eq!(wall.total_projected_normal_force_n(), 2.0);
         assert_eq!(wall.total_modulation_reaction_force_n(), 0.0);
         assert_eq!(wall.total_coulomb_friction_force_n(), -0.4);
@@ -2911,11 +3471,19 @@ mod tests {
             ],
             ..PickupMechanicalInput::default()
         };
-        let distributed = distribute_wall_contact_forces(input, [2.0, 0.0], -0.4);
+        let distributed = distribute_wall_contact_forces(
+            input,
+            [2.0, 0.0],
+            WallFrictionDistribution::Sliding {
+                coefficient: 0.2,
+                direction: 1.0,
+            },
+        );
         let wall = distributed[0];
         assert_eq!(wall.contact_count(), 1);
         assert_eq!(wall.projected_normal_force_n[0], 2.0);
         assert_eq!(wall.coulomb_friction_force_n[0], -0.4);
+        assert_eq!(wall.coulomb_wall_force_on_tip_n[0], 0.1);
         assert!(nearly_equal_force(
             wall.total_record_reaction_force_tangent_n(),
             0.1,
@@ -2946,8 +3514,9 @@ mod tests {
             ],
             ..PickupMechanicalInput::default()
         };
-        let sequence = [left, bridge, right]
-            .map(|input| distribute_wall_contact_forces(input, [1.25, 0.0], 0.0)[0]);
+        let sequence = [left, bridge, right].map(|input| {
+            distribute_wall_contact_forces(input, [1.25, 0.0], WallFrictionDistribution::None)[0]
+        });
         for wall in sequence {
             assert_eq!(wall.total_projected_normal_force_n(), 1.25);
             assert_eq!(
@@ -2963,7 +3532,11 @@ mod tests {
     #[test]
     fn longitudinal_force_torque_and_friction_power_balance() {
         let input = bridged_input([0.0; 2], [0.3, -0.2], [-0.1, 0.4], 0.7);
-        let distributed = distribute_wall_contact_forces(input, [1.2, 0.8], -0.35);
+        let friction = WallFrictionDistribution::Sliding {
+            coefficient: 0.175,
+            direction: 1.0,
+        };
+        let distributed = distribute_wall_contact_forces(input, [1.2, 0.8], friction);
         let projected_force_n = distributed
             .into_iter()
             .map(PickupWallContactTelemetry::total_projected_normal_force_n)
@@ -2984,14 +3557,48 @@ mod tests {
         assert_eq!(friction_force_n, -0.35);
         assert_eq!(reaction_force_n, modulation_force_n + friction_force_n);
         assert!(friction_force_n * input.groove_tangential_velocity_m_s <= 0.0);
+        assert!(
+            wall_coulomb_friction_power_w(
+                distributed,
+                input.groove_tangential_velocity_m_s,
+                wall_effective_slope(input)
+                    .map(|slope| slope * input.groove_tangential_velocity_m_s),
+            ) < friction_force_n * input.groove_tangential_velocity_m_s
+        );
         let radius_m = 0.082_505_922_498_838_55;
         assert_eq!(
             reaction_force_n * radius_m,
             (modulation_force_n - 0.35) * radius_m
         );
         assert_no_alloc::assert_no_alloc(|| {
-            let _ = distribute_wall_contact_forces(input, [1.2, 0.8], -0.35);
+            let _ = distribute_wall_contact_forces(input, [1.2, 0.8], friction);
         });
+    }
+
+    #[test]
+    fn zero_slope_preserves_the_scalar_coulomb_branch_exactly() {
+        let input = PickupMechanicalInput {
+            wall_contacts: test_single_wall_contacts([0.0; 2], [0.0; 2]),
+            groove_tangential_velocity_m_s: 0.5,
+            ..PickupMechanicalInput::default()
+        };
+        let distributed = distribute_wall_contact_forces(
+            input,
+            [1.25, 0.75],
+            WallFrictionDistribution::Sliding {
+                coefficient: 0.25,
+                direction: 1.0,
+            },
+        );
+        assert_eq!(distributed[0].surface_normal_force_n[0], 1.25);
+        assert_eq!(distributed[1].surface_normal_force_n[0], 0.75);
+        assert_eq!(distributed[0].coulomb_friction_force_n[0], -0.3125);
+        assert_eq!(distributed[1].coulomb_friction_force_n[0], -0.1875);
+        assert_eq!(wall_coulomb_force_on_tip_n(distributed), [0.0, 0.0],);
+        assert_eq!(
+            wall_coulomb_friction_power_w(distributed, 0.5, [0.0; 2]),
+            -0.25,
+        );
     }
 
     #[test]
@@ -3183,32 +3790,250 @@ mod tests {
     }
 
     #[test]
-    fn steep_wall_friction_uses_the_true_surface_normal_force() {
+    fn signed_wall_slopes_use_the_complete_coulomb_vector() {
         let mut state = state();
         for _ in 0..20_000 {
             state.process(PickupMechanicalInput::default()).unwrap();
         }
         let input = PickupMechanicalInput {
-            wall_contacts: test_single_wall_contacts([0.0; 2], [3.0, -2.0]),
+            wall_contacts: test_single_wall_contacts([0.0; 2], [0.5, -0.5]),
             groove_tangential_velocity_m_s: 0.5,
             ..PickupMechanicalInput::default()
         };
         let telemetry = state.process(input).unwrap();
+        let projected_force_n = telemetry
+            .wall_longitudinal_contact
+            .map(PickupWallContactTelemetry::total_projected_normal_force_n);
         let expected_coulomb = -state.contact.groove_friction_coefficient
-            * (telemetry.wall_normal_force_n[0] + telemetry.wall_normal_force_n[1]);
+            * (projected_force_n[0] + projected_force_n[1]);
         assert!((telemetry.coulomb_friction_force_n - expected_coulomb).abs() < 1.0e-12);
 
-        let projected_force = telemetry.wall_normal_force_n[0] / 3.0_f64.hypot(1.0)
-            + telemetry.wall_normal_force_n[1] / (-2.0_f64).hypot(1.0);
-        let incorrectly_projected_coulomb =
-            -state.contact.groove_friction_coefficient * projected_force;
+        let incorrect_scalar_coulomb = -state.contact.groove_friction_coefficient
+            * (telemetry.wall_normal_force_n[0] + telemetry.wall_normal_force_n[1]);
         assert!(
-            (telemetry.coulomb_friction_force_n - incorrectly_projected_coulomb).abs()
-                > telemetry.coulomb_friction_force_n.abs() * 0.25
+            (telemetry.coulomb_friction_force_n - incorrect_scalar_coulomb).abs()
+                > telemetry.coulomb_friction_force_n.abs() * 0.1
         );
-        let expected_modulation = -(telemetry.wall_normal_force_n[0] * 3.0 / 3.0_f64.hypot(1.0)
-            + telemetry.wall_normal_force_n[1] * -2.0 / (-2.0_f64).hypot(1.0));
+        let expected_modulation = -(projected_force_n[0] * 0.5 - projected_force_n[1] * 0.5);
         assert!((telemetry.modulation_reaction_force_n - expected_modulation).abs() < 1.0e-12);
+        for wall in 0..2 {
+            let contact = telemetry.wall_longitudinal_contact[wall];
+            assert!(nearly_equal_force(
+                contact.coulomb_wall_force_on_tip_n[0],
+                contact.coulomb_friction_force_n[0]
+                    * input.wall_contacts[wall].contacts[0].groove_slope,
+            ));
+        }
+        let skating_factor = state
+            .tonearm
+            .geometry
+            .equivalent_radial_force_n(input.groove_radius_m, 1.0)
+            .unwrap();
+        let expected_power_w = telemetry.coulomb_friction_force_n
+            * input.groove_tangential_velocity_m_s
+            - skating_factor * telemetry.coulomb_friction_force_n * telemetry.body_velocity_m_s[0]
+            + dot(
+                telemetry.coulomb_wall_force_on_tip_n(),
+                telemetry.tip_velocity_m_s,
+            );
+        assert!(nearly_equal_force(
+            telemetry.tangential_friction_power_w,
+            expected_power_w,
+        ));
+    }
+
+    #[test]
+    fn standalone_sliding_uses_the_reciprocal_body_velocity_and_all_force_ports() {
+        let mut state = state();
+        for _ in 0..20_000 {
+            state.process(PickupMechanicalInput::default()).unwrap();
+        }
+        state.body_velocity_m_s[0] = 0.25;
+        let skating_factor = state
+            .tonearm
+            .geometry
+            .equivalent_radial_force_n(PickupMechanicalInput::default().groove_radius_m, 1.0)
+            .unwrap();
+        let input = PickupMechanicalInput {
+            wall_contacts: test_single_wall_contacts([0.0; 2], [0.35, -0.20]),
+            groove_tangential_velocity_m_s: 0.5 * skating_factor * state.body_velocity_m_s[0],
+            ..PickupMechanicalInput::default()
+        };
+        assert!(input.groove_tangential_velocity_m_s < 0.0);
+
+        let telemetry = state.process(input).unwrap();
+        assert!(telemetry.body_velocity_m_s[0] > 0.1);
+        assert!(telemetry.tangential_relative_velocity_m_s > 0.0);
+        assert_eq!(
+            telemetry.tangential_mode,
+            StylusTangentialMode::SlidingPositive,
+        );
+
+        let record_power_w =
+            telemetry.coulomb_friction_force_n * input.groove_tangential_velocity_m_s;
+        let reciprocal_body_power_w =
+            -skating_factor * telemetry.coulomb_friction_force_n * telemetry.body_velocity_m_s[0];
+        let cross_plane_tip_power_w = dot(
+            telemetry.coulomb_wall_force_on_tip_n(),
+            telemetry.tip_velocity_m_s,
+        );
+        assert!(reciprocal_body_power_w.abs() > 1.0e-8);
+        assert!(nearly_equal_force(
+            telemetry.tangential_friction_power_w,
+            record_power_w + reciprocal_body_power_w + cross_plane_tip_power_w,
+        ));
+        assert!(telemetry.tangential_friction_power_w < 0.0);
+    }
+
+    #[test]
+    fn wall_coulomb_force_is_inside_the_pickup_momentum_solve() {
+        let mut state = state();
+        for _ in 0..20_000 {
+            state.process(PickupMechanicalInput::default()).unwrap();
+        }
+        let before_momentum = [
+            state.contact.moving_mass_kg * state.tip_velocity_m_s[0]
+                + state.tonearm.lateral.effective_mass_kg * state.body_velocity_m_s[0],
+            state.contact.moving_mass_kg * state.tip_velocity_m_s[1]
+                + state.tonearm.vertical.effective_mass_kg * state.body_velocity_m_s[1],
+        ];
+        let input = PickupMechanicalInput {
+            wall_contacts: test_single_wall_contacts([0.0; 2], [0.5, -0.5]),
+            groove_tangential_velocity_m_s: 0.7,
+            ..PickupMechanicalInput::default()
+        };
+        let telemetry = state.process(input).unwrap();
+        let after_momentum = [
+            state.contact.moving_mass_kg * state.tip_velocity_m_s[0]
+                + state.tonearm.lateral.effective_mass_kg * state.body_velocity_m_s[0],
+            state.contact.moving_mass_kg * state.tip_velocity_m_s[1]
+                + state.tonearm.vertical.effective_mass_kg * state.body_velocity_m_s[1],
+        ];
+        let wall_coordinate_force_on_tip_n = [0, 1].map(|wall| {
+            telemetry.wall_longitudinal_contact[wall].total_projected_normal_force_n()
+                + telemetry.wall_longitudinal_contact[wall].total_coulomb_wall_force_on_tip_n()
+        });
+        let contact_force_on_tip_n = [
+            (wall_coordinate_force_on_tip_n[0] - wall_coordinate_force_on_tip_n[1])
+                * INVERSE_SQRT_2,
+            (wall_coordinate_force_on_tip_n[0] + wall_coordinate_force_on_tip_n[1])
+                * INVERSE_SQRT_2,
+        ];
+        let expected_external_force_n = [
+            state.tonearm.anti_skate_force_n
+                + telemetry.bearing_friction_force_n
+                + telemetry.skating_force_n
+                + contact_force_on_tip_n[0],
+            -state.tonearm.vertical_tracking_force_n + contact_force_on_tip_n[1],
+        ];
+        let dt = 1.0 / state.sample_rate_hz;
+        for axis in 0..2 {
+            assert!(
+                (after_momentum[axis]
+                    - before_momentum[axis]
+                    - expected_external_force_n[axis] * dt)
+                    .abs()
+                    < 1.0e-12,
+                "axis={axis} telemetry={telemetry:?}",
+            );
+        }
+        assert!(nearly_equal_force(
+            telemetry.groove_lateral_force_on_tip_n,
+            contact_force_on_tip_n[0],
+        ));
+    }
+
+    #[test]
+    fn sliding_reversal_flips_both_coulomb_components_and_remains_passive() {
+        let mut state = state();
+        for _ in 0..20_000 {
+            state.process(PickupMechanicalInput::default()).unwrap();
+        }
+        let mut input = PickupMechanicalInput {
+            wall_contacts: test_single_wall_contacts([0.0; 2], [0.5, -0.5]),
+            groove_tangential_velocity_m_s: 0.7,
+            ..PickupMechanicalInput::default()
+        };
+        let forward = state.process(input).unwrap();
+        input.groove_tangential_velocity_m_s = -0.7;
+        let reverse = state.process(input).unwrap();
+        assert_eq!(
+            forward.tangential_mode,
+            StylusTangentialMode::SlidingPositive
+        );
+        assert_eq!(
+            reverse.tangential_mode,
+            StylusTangentialMode::SlidingNegative
+        );
+        assert!(forward.coulomb_friction_force_n < 0.0);
+        assert!(reverse.coulomb_friction_force_n > 0.0);
+        assert!(forward.tangential_friction_power_w < 0.0);
+        assert!(reverse.tangential_friction_power_w < 0.0);
+        for telemetry in [forward, reverse] {
+            for wall in telemetry.wall_longitudinal_contact {
+                for contact_index in 0..wall.contact_count() {
+                    assert!(nearly_equal_force(
+                        wall.coulomb_wall_force_on_tip_n[contact_index],
+                        wall.coulomb_friction_force_n[contact_index]
+                            * wall.geometry.contacts[contact_index].groove_slope,
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_sloped_sticking_rolls_back_without_allocation() {
+        let mut state = state();
+        for _ in 0..20_000 {
+            state.process(PickupMechanicalInput::default()).unwrap();
+        }
+        let before = state;
+        let input = PickupMechanicalInput {
+            wall_contacts: test_single_wall_contacts([0.0; 2], [0.5, -0.5]),
+            groove_tangential_velocity_m_s: 0.0,
+            ..PickupMechanicalInput::default()
+        };
+        let result = assert_no_alloc::assert_no_alloc(|| state.process(input));
+        assert_eq!(
+            result,
+            Err(PickupMechanicalError::UnsupportedGrooveWallSticking),
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn friction_geometry_requires_a_strict_inward_force_margin() {
+        let contact = StylusContactConfig::default();
+        let maximum_product = 1.0 - FRICTION_GEOMETRY_PRODUCT_MARGIN;
+        for sign in [-1.0, 1.0] {
+            let supported_slope =
+                sign * (maximum_product - 1.0e-9) / contact.groove_friction_coefficient;
+            let rejected_slope =
+                sign * (maximum_product + 1.0e-9) / contact.groove_friction_coefficient;
+            let supported = PickupMechanicalInput {
+                wall_contacts: test_single_wall_contacts([0.0; 2], [supported_slope, 0.0]),
+                groove_tangential_velocity_m_s: 0.7,
+                ..PickupMechanicalInput::default()
+            };
+            validate_friction_geometry(contact, supported).unwrap();
+
+            let rejected = PickupMechanicalInput {
+                wall_contacts: test_single_wall_contacts([0.0; 2], [rejected_slope, 0.0]),
+                ..supported
+            };
+            assert_eq!(
+                validate_friction_geometry(contact, rejected),
+                Err(PickupMechanicalError::IllConditionedGrooveWallFrictionGeometry),
+            );
+            let mut state = state();
+            let before = state;
+            assert_eq!(
+                state.process(rejected),
+                Err(PickupMechanicalError::IllConditionedGrooveWallFrictionGeometry),
+            );
+            assert_eq!(state, before);
+        }
     }
 
     #[test]
@@ -3430,6 +4255,44 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_rejects_forged_coulomb_mode_and_magnitude() {
+        let mut state = state();
+        for _ in 0..20_000 {
+            state.process(PickupMechanicalInput::default()).unwrap();
+        }
+        state
+            .process(PickupMechanicalInput {
+                wall_contacts: test_single_wall_contacts([0.0; 2], [0.35, -0.20]),
+                groove_tangential_velocity_m_s: 0.5,
+                ..PickupMechanicalInput::default()
+            })
+            .unwrap();
+        let snapshot = state.snapshot();
+        assert_eq!(
+            snapshot.last_telemetry.tangential_mode,
+            StylusTangentialMode::SlidingPositive,
+        );
+
+        let before = state;
+        let mut forged_mode = snapshot;
+        forged_mode.last_telemetry.tangential_mode = StylusTangentialMode::SlidingNegative;
+        assert_eq!(
+            state.restore(forged_mode),
+            Err(PickupMechanicalError::InvalidSnapshot),
+        );
+        assert_eq!(state, before);
+
+        let mut forged_magnitude = snapshot;
+        forged_magnitude.contact.groove_friction_coefficient *= 0.5;
+        assert_eq!(
+            state.restore(forged_magnitude),
+            Err(PickupMechanicalError::InvalidSnapshot),
+        );
+        assert_eq!(state, before);
+        state.restore(snapshot).unwrap();
+    }
+
+    #[test]
     fn snapshot_restore_continues_identically() {
         let mut a = state();
         for step in 0..1_000 {
@@ -3491,11 +4354,11 @@ mod tests {
         assert_eq!(replay.snapshot(), partitioned.snapshot());
     }
 
-    fn coupled_midpoint_step(
+    fn try_coupled_midpoint_step(
         record_rate: f64,
         wall_slope: [f64; 2],
         previous_mode: StylusTangentialMode,
-    ) -> CoupledDeckPickupStep {
+    ) -> Result<CoupledDeckPickupStep, CoupledDeckPickupError> {
         let mut deck = DeckMechanicalState::new(crate::PhysicalDeckConfig::default()).unwrap();
         deck.reset(record_rate, record_rate, 0.0, 0.0).unwrap();
         let preparation = deck
@@ -3516,12 +4379,19 @@ mod tests {
             PickupElectromagneticForceRelation::constant([0.0; 2]).unwrap(),
             previous_mode,
         )
-        .unwrap()
+    }
+
+    fn coupled_midpoint_step(
+        record_rate: f64,
+        wall_slope: [f64; 2],
+        previous_mode: StylusTangentialMode,
+    ) -> CoupledDeckPickupStep {
+        try_coupled_midpoint_step(record_rate, wall_slope, previous_mode).unwrap()
     }
 
     #[test]
     fn midpoint_static_contact_uses_bounded_traction_without_power() {
-        let step = coupled_midpoint_step(0.0, [0.04, -0.03], StylusTangentialMode::Separated);
+        let step = coupled_midpoint_step(0.0, [0.0; 2], StylusTangentialMode::Separated);
         assert_eq!(step.tangential_mode, StylusTangentialMode::Sticking);
         assert!(step.evaluated_branches > 0);
         assert!(step.evaluated_branches <= MAX_MIDPOINT_CANDIDATE_BRANCHES);
@@ -3567,11 +4437,19 @@ mod tests {
 
     #[test]
     fn midpoint_sliding_is_sign_strict_passive_and_reciprocal() {
-        for (record_rate, expected_mode) in [
-            (20.0, StylusTangentialMode::SlidingPositive),
-            (-20.0, StylusTangentialMode::SlidingNegative),
+        for (record_rate, previous_mode, expected_mode) in [
+            (
+                20.0,
+                StylusTangentialMode::SlidingNegative,
+                StylusTangentialMode::SlidingPositive,
+            ),
+            (
+                -20.0,
+                StylusTangentialMode::SlidingPositive,
+                StylusTangentialMode::SlidingNegative,
+            ),
         ] {
-            let step = coupled_midpoint_step(record_rate, [0.3, -0.2], expected_mode);
+            let step = coupled_midpoint_step(record_rate, [0.5, -0.5], previous_mode);
             assert_eq!(step.tangential_mode, expected_mode);
             assert!(step.evaluated_branches <= MAX_MIDPOINT_CANDIDATE_BRANCHES);
             assert!(step.attempted_linear_solves <= MAX_MIDPOINT_LINEAR_SOLVES);
@@ -3590,20 +4468,106 @@ mod tests {
     }
 
     #[test]
-    fn midpoint_zero_velocity_tie_selects_the_same_static_state() {
-        let expected = coupled_midpoint_step(0.0, [0.04, -0.03], StylusTangentialMode::Sticking);
-        assert_eq!(expected.tangential_mode, StylusTangentialMode::Sticking);
+    fn midpoint_sliding_closes_record_body_and_cross_plane_coulomb_power() {
+        let mut pickup = state();
+        pickup.body_velocity_m_s[0] = 0.25;
+        let base_input = PickupMechanicalInput::default();
+        let skating_factor = pickup
+            .tonearm
+            .geometry
+            .equivalent_radial_force_n(base_input.groove_radius_m, 1.0)
+            .unwrap();
+        let previous_record_velocity_rad_s =
+            0.5 * skating_factor * pickup.body_velocity_m_s[0] / base_input.groove_radius_m;
+        let previous_midpoint_travel_m =
+            0.5 * base_input.groove_radius_m * previous_record_velocity_rad_s / 192_000.0;
+        let input = PickupMechanicalInput {
+            wall_contacts: test_single_wall_contacts(
+                [
+                    0.5 * previous_midpoint_travel_m,
+                    -0.5 * previous_midpoint_travel_m,
+                ],
+                [0.5, -0.5],
+            ),
+            ..base_input
+        };
+        let deck_config = crate::PhysicalDeckConfig::default();
+        let previous_record_rate =
+            previous_record_velocity_rad_s / deck_config.nominal_angular_velocity_rad_s();
+        let mut deck = DeckMechanicalState::new(deck_config).unwrap();
+        deck.reset(previous_record_rate, previous_record_rate, 0.0, 0.0)
+            .unwrap();
+        let preparation = deck
+            .prepare_midpoint_step(1.0 / 192_000.0, crate::DeckMechanicalControl::default())
+            .unwrap();
+        let step = solve_coupled_deck_pickup_midpoint(
+            preparation,
+            pickup,
+            MidpointPickupGeometry {
+                input,
+                lateral_origin_shift_bias_m: 0.0,
+                lateral_origin_shift_per_record_velocity_m_s: 0.0,
+            },
+            PickupElectromagneticForceRelation::constant([0.0; 2]).unwrap(),
+            StylusTangentialMode::SlidingPositive,
+        )
+        .unwrap();
+        let telemetry = step.pickup_telemetry;
+        assert!(telemetry.body_velocity_m_s[0] > 0.1);
+        let expected_mode = if telemetry.tangential_relative_velocity_m_s > 0.0 {
+            StylusTangentialMode::SlidingPositive
+        } else {
+            StylusTangentialMode::SlidingNegative
+        };
+        assert_eq!(telemetry.tangential_mode, expected_mode);
+
+        let record_velocity_m_s = telemetry.tangential_relative_velocity_m_s
+            + skating_factor * telemetry.body_velocity_m_s[0];
+        let record_power_w = telemetry.coulomb_friction_force_n * record_velocity_m_s;
+        let reciprocal_body_power_w =
+            -skating_factor * telemetry.coulomb_friction_force_n * telemetry.body_velocity_m_s[0];
+        let cross_plane_tip_power_w = dot(
+            telemetry.coulomb_wall_force_on_tip_n(),
+            telemetry.tip_velocity_m_s,
+        );
+        let compatible_power_w = telemetry
+            .wall_longitudinal_contact
+            .into_iter()
+            .flat_map(|wall| {
+                (0..wall.contact_count()).map(move |contact_index| {
+                    let slope = wall.geometry.contacts[contact_index].groove_slope;
+                    wall.coulomb_friction_force_n[contact_index]
+                        * (1.0 + slope * slope)
+                        * telemetry.tangential_relative_velocity_m_s
+                })
+            })
+            .sum::<f64>();
+        assert!(reciprocal_body_power_w.abs() > 1.0e-8);
+        assert!(nearly_equal_force(
+            telemetry.tangential_friction_power_w,
+            record_power_w + reciprocal_body_power_w + cross_plane_tip_power_w,
+        ));
+        assert!(nearly_equal_force(
+            telemetry.tangential_friction_power_w,
+            compatible_power_w,
+        ), "telemetry={telemetry:?} compatible={compatible_power_w} record={record_velocity_m_s} K={skating_factor}");
+        assert!(telemetry.tangential_friction_power_w < 0.0);
+    }
+
+    #[test]
+    fn midpoint_nonzero_slope_sticking_is_a_typed_transactional_failure() {
         for previous_mode in [
             StylusTangentialMode::Separated,
             StylusTangentialMode::Sticking,
             StylusTangentialMode::SlidingPositive,
             StylusTangentialMode::SlidingNegative,
         ] {
-            let actual = coupled_midpoint_step(0.0, [0.04, -0.03], previous_mode);
-            assert_eq!(actual.tangential_mode, StylusTangentialMode::Sticking);
-            assert_eq!(actual.deck, expected.deck);
-            assert_eq!(actual.pickup, expected.pickup);
-            assert_eq!(actual.pickup_telemetry, expected.pickup_telemetry);
+            assert_eq!(
+                try_coupled_midpoint_step(0.0, [0.5, -0.5], previous_mode).unwrap_err(),
+                CoupledDeckPickupError::Pickup(
+                    PickupMechanicalError::UnsupportedGrooveWallSticking,
+                ),
+            );
         }
     }
 

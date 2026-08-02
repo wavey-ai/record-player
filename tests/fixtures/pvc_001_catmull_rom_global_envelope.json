@@ -94,10 +94,10 @@
   },
   "replacement": {
     "centerDisplacementM": 2.3703855781733048e-7,
-    "contactOffsetM": 8.345522958362502e-7,
+    "contactOffsetM": 8.345522958362521e-7,
     "grooveDisplacementM": 2.563955641556607e-7,
     "grooveSlope": 0.046413929475732675,
-    "tangentResidual": -6.1547988927657116e-15
+    "tangentResidual": -6.25888230132432e-15
   },
   "outwardIntervalReference": {
     "centerDisplacementLowerM": 2.3703855742170508e-7,

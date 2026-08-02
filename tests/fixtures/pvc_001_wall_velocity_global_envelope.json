@@ -81,11 +81,11 @@
     "tangentResidual": 4.746066926979153e-5
   },
   "replacement": {
-    "centerDisplacementM": 4.480387360042857e-8,
-    "contactOffsetM": 2.2756270872122465e-6,
-    "grooveDisplacementM": 1.8922991587098205e-7,
-    "grooveSlope": 0.12744631410894294,
-    "tangentResidual": 1.1102230246251565e-16
+    "centerDisplacementM": 4.480387360042518e-8,
+    "contactOffsetM": 2.27562708721225e-6,
+    "grooveDisplacementM": 1.8922991587098192e-7,
+    "grooveSlope": 0.12744631410894303,
+    "tangentResidual": 0.0
   },
   "outwardIntervalReference": {
     "centerDisplacementLowerM": 4.480387360039807e-8,

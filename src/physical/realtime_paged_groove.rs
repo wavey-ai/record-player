@@ -8,20 +8,30 @@ use thiserror::Error;
 
 use super::groove::{
     align_up, GrooveContentHasher, GrooveContentIdentity, GROOVE_SPATIAL_DECIMATION_COEFFICIENTS,
-    GROOVE_SPATIAL_PYRAMID_FORMAT_VERSION, GROOVE_SPATIAL_PYRAMID_LEVELS,
+    GROOVE_SPATIAL_FILTER_RADIUS_FRAMES, GROOVE_SPATIAL_PYRAMID_FORMAT_VERSION,
+    GROOVE_SPATIAL_PYRAMID_LEVELS,
 };
 use super::paged_groove::{
     GrooveFrameRange, GrooveGenerationId, GrooveSample, GrooveTravelDirection, PagedGrooveError,
     PagedGroovePrefetchPlan, PagedGrooveRenderMiss, PagedGrooveRenderRequest,
-    PhysicalGrooveMetadata, PhysicalGroovePage, MAX_PAGED_GROOVE_PREFETCH_CANDIDATES,
-    MAX_PAGED_GROOVE_RENDER_SPEED,
+    PagedTraceRepresentationManifestHasher, PhysicalGrooveMetadata, PhysicalGroovePage,
+    MAX_PAGED_GROOVE_PREFETCH_CANDIDATES, MAX_PAGED_GROOVE_RENDER_SPEED,
+    PAGED_GROOVE_FORMAT_VERSION,
 };
 use super::stylus::{
-    trace_spherical_45_45_wall_multiresolution_contacts, StylusGeometry, StylusTraceContactSet,
-    StylusTraceError,
+    trace_spherical_45_45_wall_multiresolution_contacts_certified_concave,
+    trace_spherical_45_45_wall_multiresolution_contacts_certified_piecewise, StylusGeometry,
+    StylusTraceContactSet, StylusTraceError,
+};
+use super::trace_admission::{
+    GrooveTraceAdmissionBinding, GrooveTraceAdmissionCertificate, GrooveTraceAdmissionClass,
+    GrooveTraceAdmissionError, GrooveTraceAdmissionIncrementalState, GrooveTraceAdmissionLevel,
+    GrooveTraceEdgeCoverage, GrooveTraceRepresentationKind,
+    ValidatedGrooveTraceAdmissionCertificate,
 };
 
 const MAX_REALTIME_PAGE_SLOTS: u32 = 64;
+const MAX_REALTIME_PAGE_SLOTS_USIZE: usize = MAX_REALTIME_PAGE_SLOTS as usize;
 const MAX_REALTIME_STORED_FRAMES_PER_PAGE: u32 = 4 * 1_024 * 1_024;
 const MAX_REALTIME_CHUNK_FRAMES: u32 = 64 * 1_024;
 const MAX_REALTIME_WORK_UNITS_PER_CALL: u32 = 16 * 1_024 * 1_024;
@@ -93,11 +103,12 @@ impl Default for RealtimePagedGrooveCacheConfig {
 }
 
 /// Describes the identity and ranges for one staged page.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RealtimePagedGroovePageDescriptor {
     pub generation: GrooveGenerationId,
     pub asset_content_identity: GrooveContentIdentity,
     pub page_content_identity: GrooveContentIdentity,
+    pub trace_admission_certificate: Option<GrooveTraceAdmissionCertificate>,
     pub core_range: GrooveFrameRange,
     pub stored_range: GrooveFrameRange,
 }
@@ -108,6 +119,7 @@ impl RealtimePagedGroovePageDescriptor {
             generation: page.generation(),
             asset_content_identity: page.asset_content_identity(),
             page_content_identity: page.content_identity(),
+            trace_admission_certificate: page.trace_admission_certificate(),
             core_range: page.core_range(),
             stored_range: page.stored_range(),
         }
@@ -173,6 +185,12 @@ pub enum RealtimePagedGroovePyramidInput {
     Precomputed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TraceCertificateSource {
+    RequiredExpected,
+    RustOwned,
+}
+
 /// Describes one preallocated spatial level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RealtimePagedGrooveLevelLayout {
@@ -199,6 +217,7 @@ pub enum RealtimePagedGrooveSlotPhase {
     Receiving,
     BuildingPyramid,
     Hashing,
+    CertifyingTrace,
     ValidatingSeams,
     Ready,
     Published,
@@ -209,7 +228,12 @@ pub enum RealtimePagedGrooveSlotPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RealtimePagedGroovePageFailure {
     PageContentIdentityMismatch,
+    NoncanonicalSpatialPyramid { level_index: u8, frame: u64 },
+    MissingTraceAdmissionCertificate,
+    TraceAdmissionCertificateMismatch,
+    TraceAdmissionNotAdmitted,
     SeamSampleMismatch { frame: u64 },
+    SpatialSeamSampleMismatch { level_index: u8, frame: u64 },
 }
 
 /// Reports bounded page progress without allocating.
@@ -246,7 +270,9 @@ pub struct RealtimePagedGrooveWorkEstimate {
     pub pyramid_output_frames: u64,
     pub precomputed_input_channel_samples: u64,
     pub raw_pyramid_work_units: u64,
+    pub precomputed_pyramid_validation_work_units: u64,
     pub content_hash_work_units: u64,
+    pub trace_admission_work_units: u64,
     pub maximum_seam_work_units: u64,
 }
 
@@ -254,11 +280,14 @@ impl RealtimePagedGrooveWorkEstimate {
     pub fn raw_total_work_units(self) -> u64 {
         self.raw_pyramid_work_units
             .saturating_add(self.content_hash_work_units)
+            .saturating_add(self.trace_admission_work_units)
             .saturating_add(self.maximum_seam_work_units)
     }
 
     pub fn precomputed_total_work_units(self) -> u64 {
-        self.content_hash_work_units
+        self.precomputed_pyramid_validation_work_units
+            .saturating_add(self.content_hash_work_units)
+            .saturating_add(self.trace_admission_work_units)
             .saturating_add(self.maximum_seam_work_units)
     }
 
@@ -283,6 +312,13 @@ enum HashPhase {
     LevelLateral(usize),
     LevelVertical(usize),
     Finish,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PyramidAdvance {
+    Complete,
+    OutputProcessed,
+    Rejected,
 }
 
 struct RealtimeSpatialLevel {
@@ -321,6 +357,7 @@ struct RealtimePageSlot {
     phase: RealtimePagedGrooveSlotPhase,
     descriptor: Option<RealtimePagedGroovePageDescriptor>,
     pyramid_input: RealtimePagedGroovePyramidInput,
+    trace_certificate_source: TraceCertificateSource,
     lateral_received: usize,
     vertical_received: usize,
     lateral_displacement_m: Box<[f32]>,
@@ -335,8 +372,12 @@ struct RealtimePageSlot {
     hash: Option<GrooveContentHasher>,
     hash_phase: HashPhase,
     hash_index: usize,
+    trace_admission_state: Option<GrooveTraceAdmissionIncrementalState>,
+    validated_trace_admission: Option<ValidatedGrooveTraceAdmissionCertificate>,
     seam_slot_index: usize,
+    seam_level_index: usize,
     seam_next_frame: u64,
+    seam_frame_initialized: bool,
     failure: Option<RealtimePagedGroovePageFailure>,
 }
 
@@ -348,6 +389,7 @@ impl RealtimePageSlot {
             phase: RealtimePagedGrooveSlotPhase::Empty,
             descriptor: None,
             pyramid_input: RealtimePagedGroovePyramidInput::BuildFromBase,
+            trace_certificate_source: TraceCertificateSource::RequiredExpected,
             lateral_received: 0,
             vertical_received: 0,
             lateral_displacement_m: allocate_zeroed_f32(maximum_stored_frames)?,
@@ -367,8 +409,12 @@ impl RealtimePageSlot {
             hash: None,
             hash_phase: HashPhase::BaseLateral,
             hash_index: 0,
+            trace_admission_state: None,
+            validated_trace_admission: None,
             seam_slot_index: 0,
+            seam_level_index: 0,
             seam_next_frame: 0,
+            seam_frame_initialized: false,
             failure: None,
         })
     }
@@ -396,12 +442,14 @@ impl RealtimePageSlot {
         sequence: u64,
         descriptor: RealtimePagedGroovePageDescriptor,
         pyramid_input: RealtimePagedGroovePyramidInput,
+        trace_certificate_source: TraceCertificateSource,
         layouts: [(u64, usize); GROOVE_SPATIAL_PYRAMID_LEVELS],
     ) {
         self.sequence = sequence;
         self.phase = RealtimePagedGrooveSlotPhase::Receiving;
         self.descriptor = Some(descriptor);
         self.pyramid_input = pyramid_input;
+        self.trace_certificate_source = trace_certificate_source;
         self.lateral_received = 0;
         self.vertical_received = 0;
         for (level, (first_source_frame, len)) in self.levels.iter_mut().zip(layouts) {
@@ -417,17 +465,28 @@ impl RealtimePageSlot {
         self.hash = None;
         self.hash_phase = HashPhase::BaseLateral;
         self.hash_index = 0;
+        self.trace_admission_state = None;
+        self.validated_trace_admission = None;
         self.seam_slot_index = 0;
+        self.seam_level_index = 0;
         self.seam_next_frame = 0;
+        self.seam_frame_initialized = false;
         self.failure = None;
     }
 
     fn clear(&mut self) {
         self.phase = RealtimePagedGrooveSlotPhase::Empty;
         self.descriptor = None;
+        self.trace_certificate_source = TraceCertificateSource::RequiredExpected;
         self.lateral_received = 0;
         self.vertical_received = 0;
         self.hash = None;
+        self.trace_admission_state = None;
+        self.validated_trace_admission = None;
+        self.seam_slot_index = 0;
+        self.seam_level_index = 0;
+        self.seam_next_frame = 0;
+        self.seam_frame_initialized = false;
         self.failure = None;
         self.pending_chunk = None;
     }
@@ -469,7 +528,10 @@ pub struct RealtimePagedGrooveCache {
     next_ticket_sequence: u64,
     next_chunk_reservation_sequence: u64,
     published_pages: u32,
+    manifest_slot_order: [u8; MAX_REALTIME_PAGE_SLOTS_USIZE],
     allocated_resident_bytes: u64,
+    trace_admitted_representation_identity: GrooveContentIdentity,
+    maximum_certified_absolute_wall_slope: f64,
 }
 
 impl std::fmt::Debug for RealtimePagedGrooveCache {
@@ -508,6 +570,8 @@ impl RealtimePagedGrooveCache {
                 config.maximum_stored_frames_per_page as usize,
             )?);
         }
+        let trace_admitted_representation_identity =
+            PagedTraceRepresentationManifestHasher::new(metadata, 0).finish();
         Ok(Self {
             metadata,
             config,
@@ -515,7 +579,10 @@ impl RealtimePagedGrooveCache {
             next_ticket_sequence: 1,
             next_chunk_reservation_sequence: 1,
             published_pages: 0,
+            manifest_slot_order: [0; MAX_REALTIME_PAGE_SLOTS_USIZE],
             allocated_resident_bytes,
+            trace_admitted_representation_identity,
+            maximum_certified_absolute_wall_slope: 0.0,
         })
     }
 
@@ -529,6 +596,14 @@ impl RealtimePagedGrooveCache {
 
     pub fn content_identity(&self) -> GrooveContentIdentity {
         self.metadata.content_identity()
+    }
+
+    pub fn trace_admitted_representation_identity(&self) -> GrooveContentIdentity {
+        self.trace_admitted_representation_identity
+    }
+
+    pub(crate) fn maximum_certified_absolute_wall_slope(&self) -> f64 {
+        self.maximum_certified_absolute_wall_slope
     }
 
     pub fn config(&self) -> RealtimePagedGrooveCacheConfig {
@@ -580,6 +655,29 @@ impl RealtimePagedGrooveCache {
             .checked_add(pyramid_output_frames)
             .and_then(|value| value.checked_mul(2))
             .ok_or(RealtimePagedGrooveError::PageLayoutOverflow)?;
+        let active_metric_levels =
+            1_u64.saturating_add(layouts.iter().filter(|(_, len)| *len >= 4).count() as u64);
+        let edge_sides =
+            u64::from(descriptor.stored_range.start_frame() == 0).saturating_add(u64::from(
+                descriptor.stored_range.end_frame_exclusive() == self.metadata.total_frame_count(),
+            ));
+        let metric_work_per_level = stored_frames
+            .saturating_sub(1)
+            .saturating_mul(2)
+            .saturating_add(edge_sides.saturating_mul(2));
+        let trace_admission_work_units = precomputed_input_channel_samples
+            .checked_add(active_metric_levels.saturating_mul(metric_work_per_level))
+            .and_then(|value| value.checked_add(1))
+            .ok_or(RealtimePagedGrooveError::PageLayoutOverflow)?;
+        let maximum_seam_sample_frames = [1_u64, 2, 4, 8, 16]
+            .into_iter()
+            .try_fold(0_u64, |total, step| {
+                maximum_seam_frames
+                    .checked_add(step - 1)
+                    .map(|value| value / step)
+                    .and_then(|level_frames| total.checked_add(level_frames))
+            })
+            .ok_or(RealtimePagedGrooveError::PageLayoutOverflow)?;
         Ok(RealtimePagedGrooveWorkEstimate {
             stored_frames,
             pyramid_output_frames,
@@ -587,8 +685,12 @@ impl RealtimePagedGrooveCache {
             raw_pyramid_work_units: pyramid_output_frames
                 .checked_mul(u64::from(FILTER_WORK_UNITS_PER_OUTPUT))
                 .ok_or(RealtimePagedGrooveError::PageLayoutOverflow)?,
+            precomputed_pyramid_validation_work_units: pyramid_output_frames
+                .checked_mul(u64::from(FILTER_WORK_UNITS_PER_OUTPUT))
+                .ok_or(RealtimePagedGrooveError::PageLayoutOverflow)?,
             content_hash_work_units: precomputed_input_channel_samples,
-            maximum_seam_work_units: maximum_seam_frames
+            trace_admission_work_units,
+            maximum_seam_work_units: maximum_seam_sample_frames
                 .checked_mul(u64::from(SEAM_WORK_UNITS_PER_FRAME))
                 .ok_or(RealtimePagedGrooveError::PageLayoutOverflow)?,
         })
@@ -602,6 +704,7 @@ impl RealtimePagedGrooveCache {
         self.begin_page_with_pyramid_input(
             descriptor,
             RealtimePagedGroovePyramidInput::BuildFromBase,
+            TraceCertificateSource::RequiredExpected,
         )
     }
 
@@ -610,13 +713,42 @@ impl RealtimePagedGrooveCache {
         &mut self,
         descriptor: RealtimePagedGroovePageDescriptor,
     ) -> Result<RealtimePagedGroovePageTicket, RealtimePagedGrooveError> {
-        self.begin_page_with_pyramid_input(descriptor, RealtimePagedGroovePyramidInput::Precomputed)
+        self.begin_page_with_pyramid_input(
+            descriptor,
+            RealtimePagedGroovePyramidInput::Precomputed,
+            TraceCertificateSource::RequiredExpected,
+        )
+    }
+
+    /// Reserves raw ingress and computes its certificate inside the cache.
+    pub fn begin_raw_page(
+        &mut self,
+        descriptor: RealtimePagedGroovePageDescriptor,
+    ) -> Result<RealtimePagedGroovePageTicket, RealtimePagedGrooveError> {
+        self.begin_page_with_pyramid_input(
+            descriptor,
+            RealtimePagedGroovePyramidInput::BuildFromBase,
+            TraceCertificateSource::RustOwned,
+        )
+    }
+
+    /// Reserves raw ingress with precomputed canonical spatial levels.
+    pub fn begin_raw_page_with_precomputed_pyramid(
+        &mut self,
+        descriptor: RealtimePagedGroovePageDescriptor,
+    ) -> Result<RealtimePagedGroovePageTicket, RealtimePagedGrooveError> {
+        self.begin_page_with_pyramid_input(
+            descriptor,
+            RealtimePagedGroovePyramidInput::Precomputed,
+            TraceCertificateSource::RustOwned,
+        )
     }
 
     fn begin_page_with_pyramid_input(
         &mut self,
         descriptor: RealtimePagedGroovePageDescriptor,
         pyramid_input: RealtimePagedGroovePyramidInput,
+        trace_certificate_source: TraceCertificateSource,
     ) -> Result<RealtimePagedGroovePageTicket, RealtimePagedGrooveError> {
         self.validate_descriptor(descriptor)?;
         let layouts = self.page_level_layouts(descriptor)?;
@@ -630,7 +762,13 @@ impl RealtimePagedGrooveCache {
             .checked_add(1)
             .ok_or(RealtimePagedGrooveError::TicketSequenceExhausted)?;
 
-        self.slots[slot_index].begin(sequence, descriptor, pyramid_input, layouts);
+        self.slots[slot_index].begin(
+            sequence,
+            descriptor,
+            pyramid_input,
+            trace_certificate_source,
+            layouts,
+        );
         self.next_ticket_sequence = next_sequence;
         Ok(RealtimePagedGroovePageTicket {
             slot_index: slot_index as u32,
@@ -877,17 +1015,10 @@ impl RealtimePagedGrooveCache {
             }
         }
 
-        let precomputed =
-            self.slots[index].pyramid_input == RealtimePagedGroovePyramidInput::Precomputed;
         self.slots[index].build_level = 0;
         self.slots[index].build_output_index = 0;
-        if precomputed {
-            self.slots[index].completed_pyramid_levels = GROOVE_SPATIAL_PYRAMID_LEVELS as u8;
-            self.start_hash(index);
-        } else {
-            self.slots[index].completed_pyramid_levels = 0;
-            self.slots[index].phase = RealtimePagedGrooveSlotPhase::BuildingPyramid;
-        }
+        self.slots[index].completed_pyramid_levels = 0;
+        self.slots[index].phase = RealtimePagedGrooveSlotPhase::BuildingPyramid;
         Ok(self.slots[index].progress(index, 0))
     }
 
@@ -912,10 +1043,15 @@ impl RealtimePagedGrooveCache {
                     if maximum_work_units - consumed < FILTER_WORK_UNITS_PER_OUTPUT {
                         break;
                     }
-                    if !self.advance_pyramid_one_output(index)? {
-                        self.start_hash(index);
-                    } else {
-                        consumed += FILTER_WORK_UNITS_PER_OUTPUT;
+                    match self.advance_pyramid_one_output(index)? {
+                        PyramidAdvance::Complete => self.start_page_validation(index),
+                        PyramidAdvance::OutputProcessed => {
+                            consumed += FILTER_WORK_UNITS_PER_OUTPUT;
+                        }
+                        PyramidAdvance::Rejected => {
+                            consumed += FILTER_WORK_UNITS_PER_OUTPUT;
+                            break;
+                        }
                     }
                 }
                 RealtimePagedGrooveSlotPhase::Hashing => {
@@ -923,6 +1059,16 @@ impl RealtimePagedGrooveCache {
                         break;
                     }
                     let used = self.advance_hash(index, maximum_work_units - consumed)?;
+                    consumed += used;
+                    if used == 0 && self.slots[index].phase == phase {
+                        break;
+                    }
+                }
+                RealtimePagedGrooveSlotPhase::CertifyingTrace => {
+                    let used = self.advance_trace_admission(
+                        index,
+                        maximum_work_units.saturating_sub(consumed),
+                    )?;
                     consumed += used;
                     if used == 0 && self.slots[index].phase == phase {
                         break;
@@ -966,7 +1112,7 @@ impl RealtimePagedGrooveCache {
         Ok(self.slots[index].progress(index, consumed))
     }
 
-    /// Publishes one fully validated slot with one state change.
+    /// Publishes one validated slot and rebuilds at most 64 manifest entries without allocation.
     pub fn publish_page(
         &mut self,
         ticket: RealtimePagedGroovePageTicket,
@@ -981,7 +1127,9 @@ impl RealtimePagedGrooveCache {
         }
         let descriptor = slot.descriptor();
         self.slots[index].phase = RealtimePagedGrooveSlotPhase::Published;
+        self.insert_manifest_slot(index);
         self.published_pages += 1;
+        self.recompute_trace_admitted_representation_identity();
         Ok(descriptor)
     }
 
@@ -1025,9 +1173,72 @@ impl RealtimePagedGrooveCache {
                 });
             }
         }
+        self.remove_manifest_slot(index);
         self.slots[index].clear();
         self.published_pages -= 1;
+        self.recompute_trace_admitted_representation_identity();
         Ok(Some(descriptor))
+    }
+
+    fn recompute_trace_admitted_representation_identity(&mut self) {
+        let mut manifest = PagedTraceRepresentationManifestHasher::new(
+            self.metadata,
+            u64::from(self.published_pages),
+        );
+        let mut maximum_certified_absolute_wall_slope = 0.0_f64;
+        for order_index in 0..self.published_pages as usize {
+            let slot_index = usize::from(self.manifest_slot_order[order_index]);
+            let descriptor = self.slots[slot_index].descriptor();
+            let certificate = descriptor
+                .trace_admission_certificate
+                .expect("a published page has a trace-admission certificate");
+            maximum_certified_absolute_wall_slope = maximum_certified_absolute_wall_slope
+                .max(certificate.maximum_absolute_wall_slope());
+            manifest.append(
+                descriptor.core_range,
+                descriptor.stored_range,
+                descriptor.page_content_identity,
+                certificate.certificate_identity(),
+            );
+        }
+        self.trace_admitted_representation_identity = manifest.finish();
+        self.maximum_certified_absolute_wall_slope = maximum_certified_absolute_wall_slope;
+    }
+
+    fn insert_manifest_slot(&mut self, slot_index: usize) {
+        let page_count = self.published_pages as usize;
+        debug_assert!(page_count < self.manifest_slot_order.len());
+        let descriptor = self.slots[slot_index].descriptor();
+        let key = (
+            descriptor.core_range.start_frame(),
+            descriptor.core_range.end_frame_exclusive(),
+            slot_index,
+        );
+        let insertion_index = (0..page_count)
+            .find(|&order_index| {
+                let existing_slot_index = usize::from(self.manifest_slot_order[order_index]);
+                let existing = self.slots[existing_slot_index].descriptor();
+                key < (
+                    existing.core_range.start_frame(),
+                    existing.core_range.end_frame_exclusive(),
+                    existing_slot_index,
+                )
+            })
+            .unwrap_or(page_count);
+        self.manifest_slot_order
+            .copy_within(insertion_index..page_count, insertion_index + 1);
+        self.manifest_slot_order[insertion_index] = slot_index as u8;
+    }
+
+    fn remove_manifest_slot(&mut self, slot_index: usize) {
+        let page_count = self.published_pages as usize;
+        let order_index = self.manifest_slot_order[..page_count]
+            .iter()
+            .position(|&value| usize::from(value) == slot_index)
+            .expect("a published slot is present in the manifest order");
+        self.manifest_slot_order
+            .copy_within(order_index + 1..page_count, order_index);
+        self.manifest_slot_order[page_count - 1] = 0;
     }
 
     fn validate_descriptor(
@@ -1390,7 +1601,7 @@ impl RealtimePagedGrooveCache {
     fn advance_pyramid_one_output(
         &mut self,
         slot_index: usize,
-    ) -> Result<bool, RealtimePagedGrooveError> {
+    ) -> Result<PyramidAdvance, RealtimePagedGrooveError> {
         let slot = &mut self.slots[slot_index];
         while slot.build_level < GROOVE_SPATIAL_PYRAMID_LEVELS
             && slot.build_output_index >= slot.levels[slot.build_level].len
@@ -1400,7 +1611,7 @@ impl RealtimePagedGrooveCache {
             slot.completed_pyramid_levels = slot.build_level as u8;
         }
         if slot.build_level >= GROOVE_SPATIAL_PYRAMID_LEVELS {
-            return Ok(false);
+            return Ok(PyramidAdvance::Complete);
         }
 
         let level_index = slot.build_level;
@@ -1435,17 +1646,45 @@ impl RealtimePagedGrooveCache {
                 filter_sample(input.vertical(), center),
             )
         };
-        slot.levels[level_index].lateral_displacement_m[output_index] = lateral;
-        slot.levels[level_index].vertical_displacement_m[output_index] = vertical;
+        if slot.pyramid_input == RealtimePagedGroovePyramidInput::Precomputed {
+            let actual_lateral = slot.levels[level_index].lateral_displacement_m[output_index];
+            let actual_vertical = slot.levels[level_index].vertical_displacement_m[output_index];
+            if actual_lateral.to_bits() != lateral.to_bits()
+                || actual_vertical.to_bits() != vertical.to_bits()
+            {
+                let frame = slot.levels[level_index].first_source_frame.saturating_add(
+                    u64::try_from(output_index)
+                        .unwrap_or(u64::MAX)
+                        .saturating_mul(u64::from(slot.levels[level_index].source_frame_step)),
+                );
+                slot.phase = RealtimePagedGrooveSlotPhase::Rejected;
+                slot.failure = Some(RealtimePagedGroovePageFailure::NoncanonicalSpatialPyramid {
+                    level_index: level_index as u8,
+                    frame,
+                });
+                return Ok(PyramidAdvance::Rejected);
+            }
+        } else {
+            slot.levels[level_index].lateral_displacement_m[output_index] = lateral;
+            slot.levels[level_index].vertical_displacement_m[output_index] = vertical;
+        }
         slot.build_output_index += 1;
-        Ok(true)
+        Ok(PyramidAdvance::OutputProcessed)
     }
 
     fn start_hash(&mut self, slot_index: usize) {
         let slot = &mut self.slots[slot_index];
         let descriptor = slot.descriptor();
-        let mut hash = GrooveContentHasher::new(b"record-player-paged-groove-page\0");
+        let mut hash = GrooveContentHasher::new(b"record-player-paged-groove-page-v4\0");
+        hash.u64(descriptor.generation.get());
         hash.identity(descriptor.asset_content_identity);
+        match descriptor.trace_admission_certificate {
+            Some(certificate) => {
+                hash.u8(1);
+                hash.identity(certificate.certificate_identity());
+            }
+            None => hash.u8(0),
+        }
         hash.u64(descriptor.core_range.start_frame());
         hash.u64(descriptor.core_range.end_frame_exclusive());
         hash.u64(descriptor.stored_range.start_frame());
@@ -1455,6 +1694,19 @@ impl RealtimePagedGrooveCache {
         slot.hash_phase = HashPhase::BaseLateral;
         slot.hash_index = 0;
         slot.phase = RealtimePagedGrooveSlotPhase::Hashing;
+    }
+
+    fn start_page_validation(&mut self, slot_index: usize) {
+        if self.slots[slot_index].trace_certificate_source == TraceCertificateSource::RustOwned {
+            if self.start_trace_admission(slot_index).is_err() {
+                self.reject(
+                    slot_index,
+                    RealtimePagedGroovePageFailure::TraceAdmissionCertificateMismatch,
+                );
+            }
+        } else {
+            self.start_hash(slot_index);
+        }
     }
 
     fn advance_hash(
@@ -1579,16 +1831,167 @@ impl RealtimePagedGrooveCache {
                             slot_index,
                             RealtimePagedGroovePageFailure::PageContentIdentityMismatch,
                         );
+                    } else if self.slots[slot_index].trace_certificate_source
+                        == TraceCertificateSource::RustOwned
+                    {
+                        if self.slots[slot_index].validated_trace_admission.is_none()
+                            || self.slots[slot_index]
+                                .descriptor()
+                                .trace_admission_certificate
+                                .is_none()
+                        {
+                            self.reject(
+                                slot_index,
+                                RealtimePagedGroovePageFailure::TraceAdmissionCertificateMismatch,
+                            );
+                        } else {
+                            self.start_seam_validation(slot_index);
+                        }
+                    } else if self.slots[slot_index]
+                        .descriptor()
+                        .trace_admission_certificate
+                        .is_some()
+                    {
+                        if self.start_trace_admission(slot_index).is_err() {
+                            self.reject(
+                                slot_index,
+                                RealtimePagedGroovePageFailure::TraceAdmissionCertificateMismatch,
+                            );
+                        }
                     } else {
-                        self.slots[slot_index].phase =
-                            RealtimePagedGrooveSlotPhase::ValidatingSeams;
-                        self.slots[slot_index].seam_slot_index = 0;
-                        self.slots[slot_index].seam_next_frame = 0;
+                        self.reject(
+                            slot_index,
+                            RealtimePagedGroovePageFailure::MissingTraceAdmissionCertificate,
+                        );
                     }
                     return Ok(used);
                 }
             }
         }
+    }
+
+    fn trace_admission_binding(&self, slot_index: usize) -> GrooveTraceAdmissionBinding {
+        let descriptor = self.slots[slot_index].descriptor();
+        let final_frame = self.metadata.total_frame_count().saturating_sub(1) as f64;
+        GrooveTraceAdmissionBinding {
+            representation_kind: GrooveTraceRepresentationKind::Paged,
+            representation_format_version: PAGED_GROOVE_FORMAT_VERSION,
+            source_content_identity: self.metadata.source_content_identity(),
+            generation: descriptor.generation.get(),
+            core_start_frame: descriptor.core_range.start_frame(),
+            core_end_frame_exclusive: descriptor.core_range.end_frame_exclusive(),
+            stored_start_frame: descriptor.stored_range.start_frame(),
+            stored_end_frame_exclusive: descriptor.stored_range.end_frame_exclusive(),
+            record_end_frame_exclusive: self.metadata.total_frame_count(),
+            minimum_meters_per_source_frame: self.metadata.cut().layout().meters_per_frame_at(
+                final_frame,
+                self.metadata.cut().cut().groove_pitch_m_per_revolution,
+            ),
+            maximum_geometry: self.metadata.trace_admission_policy().maximum_geometry(),
+            edge_coverage: GrooveTraceEdgeCoverage::paged(
+                descriptor.stored_range.start_frame() == 0,
+                descriptor.stored_range.end_frame_exclusive() == self.metadata.total_frame_count(),
+            ),
+        }
+    }
+
+    fn start_trace_admission(&mut self, slot_index: usize) -> Result<(), RealtimePagedGrooveError> {
+        let binding = self.trace_admission_binding(slot_index);
+        let state = {
+            let slot = &self.slots[slot_index];
+            let spatial_levels = slot_trace_admission_levels(slot);
+            GrooveTraceAdmissionIncrementalState::new(
+                binding,
+                slot_base_trace_admission_level(slot),
+                &spatial_levels,
+            )?
+        };
+        self.slots[slot_index].trace_admission_state = Some(state);
+        self.slots[slot_index].phase = RealtimePagedGrooveSlotPhase::CertifyingTrace;
+        Ok(())
+    }
+
+    fn advance_trace_admission(
+        &mut self,
+        slot_index: usize,
+        maximum_work_units: u32,
+    ) -> Result<u32, RealtimePagedGrooveError> {
+        let mut state = self.slots[slot_index]
+            .trace_admission_state
+            .take()
+            .ok_or(RealtimePagedGrooveError::InternalPageMap)?;
+        let progress = {
+            let slot = &self.slots[slot_index];
+            let spatial_levels = slot_trace_admission_levels(slot);
+            state.advance(
+                slot_base_trace_admission_level(slot),
+                &spatial_levels,
+                maximum_work_units,
+            )
+        };
+        match progress {
+            Ok(progress) => {
+                if let Some(recomputed) = progress.certificate {
+                    let expected = self.slots[slot_index]
+                        .descriptor()
+                        .trace_admission_certificate;
+                    let certificate = expected.unwrap_or(recomputed);
+                    match certificate.validate_recomputed(recomputed) {
+                        Ok(validated) => {
+                            if validated
+                                .validate_for_active_tracing(
+                                    self.metadata.trace_admission_policy().maximum_geometry(),
+                                )
+                                .is_err()
+                            {
+                                self.reject(
+                                    slot_index,
+                                    RealtimePagedGroovePageFailure::TraceAdmissionNotAdmitted,
+                                );
+                            } else {
+                                if expected.is_none() {
+                                    self.slots[slot_index]
+                                        .descriptor
+                                        .as_mut()
+                                        .expect("an active page has a descriptor")
+                                        .trace_admission_certificate = Some(recomputed);
+                                }
+                                self.slots[slot_index].validated_trace_admission = Some(validated);
+                                if self.slots[slot_index].trace_certificate_source
+                                    == TraceCertificateSource::RustOwned
+                                {
+                                    self.start_hash(slot_index);
+                                } else {
+                                    self.start_seam_validation(slot_index);
+                                }
+                            }
+                        }
+                        Err(_) => self.reject(
+                            slot_index,
+                            RealtimePagedGroovePageFailure::TraceAdmissionCertificateMismatch,
+                        ),
+                    }
+                } else {
+                    self.slots[slot_index].trace_admission_state = Some(state);
+                }
+                Ok(progress.work_units_consumed)
+            }
+            Err(_) => {
+                self.reject(
+                    slot_index,
+                    RealtimePagedGroovePageFailure::TraceAdmissionCertificateMismatch,
+                );
+                Ok(0)
+            }
+        }
+    }
+
+    fn start_seam_validation(&mut self, slot_index: usize) {
+        self.slots[slot_index].phase = RealtimePagedGrooveSlotPhase::ValidatingSeams;
+        self.slots[slot_index].seam_slot_index = 0;
+        self.slots[slot_index].seam_level_index = 0;
+        self.slots[slot_index].seam_next_frame = 0;
+        self.slots[slot_index].seam_frame_initialized = false;
     }
 
     fn advance_seam_validation(
@@ -1606,8 +2009,7 @@ impl RealtimePagedGrooveCache {
             if other_index == slot_index
                 || self.slots[other_index].phase != RealtimePagedGrooveSlotPhase::Published
             {
-                self.slots[slot_index].seam_slot_index += 1;
-                self.slots[slot_index].seam_next_frame = 0;
+                self.advance_to_next_seam_slot(slot_index);
                 continue;
             }
 
@@ -1620,39 +2022,99 @@ impl RealtimePagedGrooveCache {
                 .end_frame_exclusive()
                 .min(published_range.end_frame_exclusive());
             if overlap_start >= overlap_end {
-                self.slots[slot_index].seam_slot_index += 1;
-                self.slots[slot_index].seam_next_frame = 0;
+                self.advance_to_next_seam_slot(slot_index);
                 continue;
             }
-            if self.slots[slot_index].seam_next_frame == 0 {
-                self.slots[slot_index].seam_next_frame = overlap_start;
+
+            let level_index = self.slots[slot_index].seam_level_index;
+            if level_index > GROOVE_SPATIAL_PYRAMID_LEVELS {
+                self.advance_to_next_seam_slot(slot_index);
+                continue;
+            }
+            let (validation_start, validation_end, step) = if level_index == 0 {
+                (overlap_start, overlap_end, 1_u64)
+            } else {
+                let spatial_start =
+                    overlap_start.saturating_add(u64::from(GROOVE_SPATIAL_FILTER_RADIUS_FRAMES));
+                let spatial_end =
+                    overlap_end.saturating_sub(u64::from(GROOVE_SPATIAL_FILTER_RADIUS_FRAMES));
+                let staged_level = &self.slots[slot_index].levels[level_index - 1];
+                let published_level = &self.slots[other_index].levels[level_index - 1];
+                let step = u64::from(staged_level.source_frame_step);
+                if step == 0 || published_level.source_frame_step != staged_level.source_frame_step
+                {
+                    return Err(RealtimePagedGrooveError::InternalPageMap);
+                }
+                (spatial_start, spatial_end, step)
+            };
+
+            if validation_start >= validation_end {
+                self.advance_to_next_seam_level(slot_index);
+                continue;
+            }
+            if !self.slots[slot_index].seam_frame_initialized {
+                self.slots[slot_index].seam_next_frame = if level_index == 0 {
+                    validation_start
+                } else {
+                    align_up(validation_start, step)
+                        .ok_or(RealtimePagedGrooveError::InternalPageMap)?
+                };
+                self.slots[slot_index].seam_frame_initialized = true;
             }
             let frame = self.slots[slot_index].seam_next_frame;
-            if frame >= overlap_end {
-                self.slots[slot_index].seam_slot_index += 1;
-                self.slots[slot_index].seam_next_frame = 0;
+            if frame >= validation_end {
+                self.advance_to_next_seam_level(slot_index);
                 continue;
             }
             if available_work_units - used < SEAM_WORK_UNITS_PER_FRAME {
                 return Ok(used);
             }
-            let staged = sample_from_slot(&self.slots[slot_index], frame)
-                .ok_or(RealtimePagedGrooveError::InternalPageMap)?;
-            let published = sample_from_slot(&self.slots[other_index], frame)
-                .ok_or(RealtimePagedGrooveError::InternalPageMap)?;
+            let (staged, published) = if level_index == 0 {
+                (
+                    sample_from_slot(&self.slots[slot_index], frame),
+                    sample_from_slot(&self.slots[other_index], frame),
+                )
+            } else {
+                (
+                    spatial_sample_from_slot(&self.slots[slot_index], level_index - 1, frame),
+                    spatial_sample_from_slot(&self.slots[other_index], level_index - 1, frame),
+                )
+            };
+            let staged = staged.ok_or(RealtimePagedGrooveError::InternalPageMap)?;
+            let published = published.ok_or(RealtimePagedGrooveError::InternalPageMap)?;
             used += SEAM_WORK_UNITS_PER_FRAME;
             if staged.lateral_displacement_m.to_bits() != published.lateral_displacement_m.to_bits()
                 || staged.vertical_displacement_m.to_bits()
                     != published.vertical_displacement_m.to_bits()
             {
-                self.reject(
-                    slot_index,
-                    RealtimePagedGroovePageFailure::SeamSampleMismatch { frame },
-                );
+                let failure = if level_index == 0 {
+                    RealtimePagedGroovePageFailure::SeamSampleMismatch { frame }
+                } else {
+                    RealtimePagedGroovePageFailure::SpatialSeamSampleMismatch {
+                        level_index: (level_index - 1) as u8,
+                        frame,
+                    }
+                };
+                self.reject(slot_index, failure);
                 return Ok(used);
             }
-            self.slots[slot_index].seam_next_frame += 1;
+            self.slots[slot_index].seam_next_frame = frame
+                .checked_add(step)
+                .ok_or(RealtimePagedGrooveError::InternalPageMap)?;
         }
+    }
+
+    fn advance_to_next_seam_level(&mut self, slot_index: usize) {
+        self.slots[slot_index].seam_level_index += 1;
+        self.slots[slot_index].seam_next_frame = 0;
+        self.slots[slot_index].seam_frame_initialized = false;
+    }
+
+    fn advance_to_next_seam_slot(&mut self, slot_index: usize) {
+        self.slots[slot_index].seam_slot_index += 1;
+        self.slots[slot_index].seam_level_index = 0;
+        self.slots[slot_index].seam_next_frame = 0;
+        self.slots[slot_index].seam_frame_initialized = false;
     }
 
     fn reject(&mut self, slot_index: usize, failure: RealtimePagedGroovePageFailure) {
@@ -1741,6 +2203,9 @@ impl RealtimePagedGrooveCache {
                 direction: request.direction(),
                 selection,
                 available_tracing_halo_frames: self.metadata.tracing_halo_frames(),
+                validated_trace_admission: slot
+                    .validated_trace_admission
+                    .ok_or(RealtimePagedGrooveError::InternalPageMap)?,
             },
         ))
     }
@@ -1913,6 +2378,7 @@ pub struct RealtimePagedGrooveTraceView<'a> {
     direction: GrooveTravelDirection,
     selection: RealtimeGrooveLevelSelection<'a>,
     available_tracing_halo_frames: u32,
+    validated_trace_admission: ValidatedGrooveTraceAdmissionCertificate,
 }
 
 impl<'a> RealtimePagedGrooveTraceView<'a> {
@@ -1941,7 +2407,7 @@ impl<'a> RealtimePagedGrooveTraceView<'a> {
         wall_index: usize,
         meters_per_source_frame: f64,
         geometry: StylusGeometry,
-    ) -> Result<StylusTraceContactSet, StylusTraceError> {
+    ) -> Result<StylusTraceContactSet, RealtimePagedGrooveError> {
         let maximum_level_step = self
             .selection
             .lower
@@ -1951,29 +2417,62 @@ impl<'a> RealtimePagedGrooveTraceView<'a> {
             geometry.multiresolution_support(meters_per_source_frame, maximum_level_step)?;
         let required_frames = support.symmetric_halo_source_frames();
         if required_frames > self.available_tracing_halo_frames {
-            return Err(StylusTraceError::InsufficientPageHalo {
-                required_frames,
-                available_frames: self.available_tracing_halo_frames,
-            });
+            return Err(RealtimePagedGrooveError::Stylus(
+                StylusTraceError::InsufficientPageHalo {
+                    required_frames,
+                    available_frames: self.available_tracing_halo_frames,
+                },
+            ));
         }
-        trace_spherical_45_45_wall_multiresolution_contacts(
-            self.selection.lower.lateral_displacement_m,
-            self.selection.lower.vertical_displacement_m,
-            self.selection.lower.first_source_frame,
-            self.selection.lower.source_frame_step,
-            self.selection.upper.lateral_displacement_m,
-            self.selection.upper.vertical_displacement_m,
-            self.selection.upper.first_source_frame,
-            self.selection.upper.source_frame_step,
-            self.selection.upper_level_blend,
-            wall_index,
-            self.absolute_frame_position,
-            meters_per_source_frame,
-            geometry,
-        )
+        let admission = self.validated_trace_admission;
+        admission.validate_for_active_tracing(geometry)?;
+        match admission.certificate().admission_class() {
+            GrooveTraceAdmissionClass::StrictConcavity => Ok(
+                trace_spherical_45_45_wall_multiresolution_contacts_certified_concave(
+                    self.selection.lower.lateral_displacement_m,
+                    self.selection.lower.vertical_displacement_m,
+                    self.selection.lower.first_source_frame,
+                    self.selection.lower.source_frame_step,
+                    self.selection.upper.lateral_displacement_m,
+                    self.selection.upper.vertical_displacement_m,
+                    self.selection.upper.first_source_frame,
+                    self.selection.upper.source_frame_step,
+                    self.selection.upper_level_blend,
+                    wall_index,
+                    self.absolute_frame_position,
+                    meters_per_source_frame,
+                    geometry,
+                    admission.certified_concave_trace_bounds(geometry)?,
+                )?,
+            ),
+            GrooveTraceAdmissionClass::FixedCapPiecewise => Ok(
+                trace_spherical_45_45_wall_multiresolution_contacts_certified_piecewise(
+                    self.selection.lower.lateral_displacement_m,
+                    self.selection.lower.vertical_displacement_m,
+                    self.selection.lower.first_source_frame,
+                    self.selection.lower.source_frame_step,
+                    self.selection.upper.lateral_displacement_m,
+                    self.selection.upper.vertical_displacement_m,
+                    self.selection.upper.first_source_frame,
+                    self.selection.upper.source_frame_step,
+                    self.selection.upper_level_blend,
+                    wall_index,
+                    self.absolute_frame_position,
+                    meters_per_source_frame,
+                    geometry,
+                    admission.fixed_cap_piecewise_trace_bounds(geometry)?,
+                )?,
+            ),
+            rejected => Err(rejected
+                .rejection_error()
+                .expect("non-trace admission classes have a typed rejection")
+                .into()),
+        }
     }
 }
 
+// This result stays inline and `Copy` so realtime tracing does not allocate.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Copy)]
 pub enum RealtimePagedGrooveRenderResolution<'a> {
     Ready(RealtimePagedGrooveTraceView<'a>),
@@ -2060,6 +2559,26 @@ fn append_level_header(hash: &mut GrooveContentHasher, level: &RealtimeSpatialLe
     hash.u64(level.len as u64);
 }
 
+fn slot_base_trace_admission_level(slot: &RealtimePageSlot) -> GrooveTraceAdmissionLevel<'_> {
+    GrooveTraceAdmissionLevel {
+        first_source_frame: slot.descriptor().stored_range.start_frame(),
+        source_frame_step: 1,
+        lateral_displacement_m: &slot.lateral_displacement_m[..slot.stored_len()],
+        vertical_displacement_m: &slot.vertical_displacement_m[..slot.stored_len()],
+    }
+}
+
+fn slot_trace_admission_levels(
+    slot: &RealtimePageSlot,
+) -> [GrooveTraceAdmissionLevel<'_>; GROOVE_SPATIAL_PYRAMID_LEVELS] {
+    std::array::from_fn(|index| GrooveTraceAdmissionLevel {
+        first_source_frame: slot.levels[index].first_source_frame,
+        source_frame_step: slot.levels[index].source_frame_step,
+        lateral_displacement_m: slot.levels[index].lateral(),
+        vertical_displacement_m: slot.levels[index].vertical(),
+    })
+}
+
 fn filter_sample(input: &[f32], center: usize) -> f32 {
     let mut filtered = GROOVE_SPATIAL_DECIMATION_COEFFICIENTS[0] * f64::from(input[center]);
     for (offset, coefficient) in GROOVE_SPATIAL_DECIMATION_COEFFICIENTS
@@ -2084,6 +2603,27 @@ fn sample_from_slot(slot: &RealtimePageSlot, frame: u64) -> Option<GrooveSample>
     Some(GrooveSample {
         lateral_displacement_m: slot.lateral_displacement_m[index],
         vertical_displacement_m: slot.vertical_displacement_m[index],
+    })
+}
+
+fn spatial_sample_from_slot(
+    slot: &RealtimePageSlot,
+    level_index: usize,
+    frame: u64,
+) -> Option<GrooveSample> {
+    let level = slot.levels.get(level_index)?;
+    let step = u64::from(level.source_frame_step);
+    let offset = frame.checked_sub(level.first_source_frame)?;
+    if step == 0 || offset % step != 0 {
+        return None;
+    }
+    let index = usize::try_from(offset / step).ok()?;
+    if index >= level.len {
+        return None;
+    }
+    Some(GrooveSample {
+        lateral_displacement_m: level.lateral_displacement_m[index],
+        vertical_displacement_m: level.vertical_displacement_m[index],
     })
 }
 
@@ -2257,10 +2797,13 @@ pub enum RealtimePagedGrooveError {
     Groove(#[from] super::GrooveError),
     #[error(transparent)]
     Stylus(#[from] StylusTraceError),
+    #[error(transparent)]
+    TraceAdmission(#[from] GrooveTraceAdmissionError),
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::trace_admission::certify_groove_trace_representation;
     use super::*;
     use crate::physical::{
         GrooveCutReport, GrooveLayout, PagedGrooveCacheLimits, PagedGrooveCacheProducer,
@@ -2350,6 +2893,35 @@ mod tests {
         .unwrap()
     }
 
+    fn rejected_wall_slope_page() -> PhysicalGroovePage {
+        let metadata = metadata();
+        let core_start = 0;
+        let core_end = SEAM_FRAME;
+        let stored_start = 0;
+        let stored_end = core_end
+            .saturating_add(u64::from(metadata.required_storage_halo_frames()))
+            .min(TOTAL_FRAMES);
+        let stored_len = usize::try_from(stored_end - stored_start).unwrap();
+        let lateral: Vec<f32> = (0..stored_len)
+            .map(|index| if index % 2 == 0 { -1.0e-3 } else { 1.0e-3 })
+            .collect();
+        let page = PhysicalGroovePage::new(
+            metadata,
+            GrooveFrameRange::new(core_start, core_end).unwrap(),
+            GrooveFrameRange::new(stored_start, stored_end).unwrap(),
+            lateral,
+            vec![0.0; stored_len],
+        )
+        .unwrap();
+        assert_eq!(
+            page.trace_admission_certificate()
+                .unwrap()
+                .admission_class(),
+            GrooveTraceAdmissionClass::RejectedWallSlope
+        );
+        page
+    }
+
     fn ingest_all(
         cache: &mut RealtimePagedGrooveCache,
         page: &PhysicalGroovePage,
@@ -2357,6 +2929,27 @@ mod tests {
         let ticket = cache
             .begin_page(RealtimePagedGroovePageDescriptor::from_page(page))
             .unwrap();
+        for (offset, chunk) in page.lateral_displacement_m().chunks(257).enumerate() {
+            cache
+                .ingest_lateral_chunk(ticket, (offset * 257) as u32, chunk)
+                .unwrap();
+        }
+        for (offset, chunk) in page.vertical_displacement_m().chunks(257).enumerate() {
+            cache
+                .ingest_vertical_chunk(ticket, (offset * 257) as u32, chunk)
+                .unwrap();
+        }
+        cache.finish_page_ingestion(ticket).unwrap();
+        ticket
+    }
+
+    fn ingest_all_raw(
+        cache: &mut RealtimePagedGrooveCache,
+        page: &PhysicalGroovePage,
+    ) -> RealtimePagedGroovePageTicket {
+        let mut descriptor = RealtimePagedGroovePageDescriptor::from_page(page);
+        descriptor.trace_admission_certificate = None;
+        let ticket = cache.begin_raw_page(descriptor).unwrap();
         for (offset, chunk) in page.lateral_displacement_m().chunks(257).enumerate() {
             cache
                 .ingest_lateral_chunk(ticket, (offset * 257) as u32, chunk)
@@ -2420,7 +3013,10 @@ mod tests {
             }
         }
         let progress = cache.finish_page_ingestion(ticket).unwrap();
-        assert_eq!(progress.phase, RealtimePagedGrooveSlotPhase::Hashing);
+        assert_eq!(
+            progress.phase,
+            RealtimePagedGrooveSlotPhase::BuildingPyramid
+        );
         ticket
     }
 
@@ -2484,7 +3080,10 @@ mod tests {
             }
         }
         let progress = cache.finish_page_ingestion(ticket).unwrap();
-        assert_eq!(progress.phase, RealtimePagedGrooveSlotPhase::Hashing);
+        assert_eq!(
+            progress.phase,
+            RealtimePagedGrooveSlotPhase::BuildingPyramid
+        );
         ticket
     }
 
@@ -2502,6 +3101,46 @@ mod tests {
         cache.publish_page(ticket).unwrap();
     }
 
+    fn staged_page_content_identity(slot: &RealtimePageSlot) -> GrooveContentIdentity {
+        let descriptor = slot.descriptor();
+        let mut hash = GrooveContentHasher::new(b"record-player-paged-groove-page-v4\0");
+        hash.u64(descriptor.generation.get());
+        hash.identity(descriptor.asset_content_identity);
+        match descriptor.trace_admission_certificate {
+            Some(certificate) => {
+                hash.u8(1);
+                hash.identity(certificate.certificate_identity());
+            }
+            None => hash.u8(0),
+        }
+        hash.u64(descriptor.core_range.start_frame());
+        hash.u64(descriptor.core_range.end_frame_exclusive());
+        hash.u64(descriptor.stored_range.start_frame());
+        hash.u64(descriptor.stored_range.end_frame_exclusive());
+        hash.u64(slot.stored_len() as u64);
+        for sample in &slot.lateral_displacement_m[..slot.stored_len()] {
+            hash.f32(*sample);
+        }
+        hash.u64(slot.stored_len() as u64);
+        for sample in &slot.vertical_displacement_m[..slot.stored_len()] {
+            hash.f32(*sample);
+        }
+        hash.u8(1);
+        hash.u32(GROOVE_SPATIAL_PYRAMID_FORMAT_VERSION);
+        hash.u64(GROOVE_SPATIAL_PYRAMID_LEVELS as u64);
+        for level in &slot.levels {
+            append_level_header(&mut hash, level);
+            for sample in level.lateral() {
+                hash.f32(*sample);
+            }
+            hash.u64(level.len as u64);
+            for sample in level.vertical() {
+                hash.f32(*sample);
+            }
+        }
+        hash.finish()
+    }
+
     fn immutable_cache(pages: Vec<PhysicalGroovePage>) -> super::super::PagedGrooveCache {
         let mut producer = PagedGrooveCacheProducer::new(
             metadata(),
@@ -2515,7 +3154,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_page_is_invisible_and_publication_is_constant_state_work() {
+    fn partial_page_is_invisible_and_publication_has_bounded_manifest_work() {
         let page = page(0, SEAM_FRAME);
         let mut cache = RealtimePagedGrooveCache::new(metadata(), config()).unwrap();
         let ticket = cache
@@ -2541,6 +3180,93 @@ mod tests {
             RealtimePagedGrooveRenderResolution::Ready(_)
         ));
         assert_eq!(cache.status().published_pages, 1);
+    }
+
+    #[test]
+    fn rejection_class_certificate_never_reaches_ready_or_publication() {
+        let page = rejected_wall_slope_page();
+        for rust_owned_certificate in [false, true] {
+            let mut cache = RealtimePagedGrooveCache::new(metadata(), config()).unwrap();
+            let ticket = if rust_owned_certificate {
+                ingest_all_raw(&mut cache, &page)
+            } else {
+                ingest_all(&mut cache, &page)
+            };
+
+            loop {
+                match cache.advance_page(ticket, 2_048) {
+                    Ok(progress) => {
+                        assert_ne!(progress.phase, RealtimePagedGrooveSlotPhase::Ready);
+                        assert_ne!(progress.phase, RealtimePagedGrooveSlotPhase::Published);
+                        if progress.phase == RealtimePagedGrooveSlotPhase::Rejected {
+                            break;
+                        }
+                    }
+                    Err(RealtimePagedGrooveError::PageRejected(failure)) => {
+                        assert_eq!(
+                            failure,
+                            RealtimePagedGroovePageFailure::TraceAdmissionNotAdmitted
+                        );
+                        break;
+                    }
+                    Err(error) => panic!("unexpected page error: {error:?}"),
+                }
+            }
+
+            let progress = cache.slot_progress(ticket.slot_index()).unwrap();
+            assert_eq!(progress.phase, RealtimePagedGrooveSlotPhase::Rejected);
+            assert_eq!(
+                progress.failure,
+                Some(RealtimePagedGroovePageFailure::TraceAdmissionNotAdmitted)
+            );
+            assert!(cache.slots[ticket.slot_index() as usize]
+                .validated_trace_admission
+                .is_none());
+            assert!(matches!(
+                cache.publish_page(ticket),
+                Err(RealtimePagedGrooveError::WrongPhase {
+                    expected: RealtimePagedGrooveSlotPhase::Ready,
+                    actual: RealtimePagedGrooveSlotPhase::Rejected,
+                })
+            ));
+            assert_eq!(cache.status().published_pages, 0);
+        }
+    }
+
+    #[test]
+    fn published_manifest_binds_ranges_page_hashes_and_certificate_hashes() {
+        let immutable_first = immutable_cache(vec![page(0, SEAM_FRAME)]);
+        let immutable_second = immutable_cache(vec![page(SEAM_FRAME, TOTAL_FRAMES)]);
+        let immutable_both =
+            immutable_cache(vec![page(0, SEAM_FRAME), page(SEAM_FRAME, TOTAL_FRAMES)]);
+        let first = page(0, SEAM_FRAME);
+        let second = page(SEAM_FRAME, TOTAL_FRAMES);
+        let mut cache = RealtimePagedGrooveCache::new(metadata(), config()).unwrap();
+        let empty_identity = cache.trace_admitted_representation_identity();
+
+        let second_ticket = ingest_all(&mut cache, &second);
+        finish_and_publish(&mut cache, second_ticket);
+        let second_identity = cache.trace_admitted_representation_identity();
+        assert_ne!(second_identity, empty_identity);
+        assert_eq!(
+            second_identity,
+            immutable_second.trace_admitted_representation_identity()
+        );
+
+        let first_ticket = ingest_all(&mut cache, &first);
+        finish_and_publish(&mut cache, first_ticket);
+        let both_identity = cache.trace_admitted_representation_identity();
+        assert_ne!(both_identity, second_identity);
+        assert_eq!(
+            both_identity,
+            immutable_both.trace_admitted_representation_identity()
+        );
+
+        cache.evict_page_containing(SEAM_FRAME).unwrap().unwrap();
+        assert_eq!(
+            cache.trace_admitted_representation_identity(),
+            immutable_first.trace_admitted_representation_identity()
+        );
     }
 
     #[test]
@@ -2763,18 +3489,46 @@ mod tests {
     }
 
     #[test]
-    fn precomputed_pyramid_corruption_never_becomes_visible() {
+    fn self_consistent_noncanonical_precomputed_pyramid_never_becomes_visible() {
         let page = page(0, SEAM_FRAME);
         let mut cache = RealtimePagedGrooveCache::new(metadata(), config()).unwrap();
         let ticket = ingest_all_precomputed(&mut cache, &page);
         let index = ticket.slot_index() as usize;
         cache.slots[index].levels[1].vertical_displacement_m[13] += 1.0e-7;
+        let expected_failure_frame = cache.slots[index].levels[1]
+            .first_source_frame
+            .saturating_add(13 * u64::from(cache.slots[index].levels[1].source_frame_step));
+        let recomputed_certificate = {
+            let binding = cache.trace_admission_binding(index);
+            let slot = &cache.slots[index];
+            let spatial_levels = slot_trace_admission_levels(slot);
+            super::super::trace_admission::certify_groove_trace_representation(
+                binding,
+                slot_base_trace_admission_level(slot),
+                &spatial_levels,
+            )
+            .unwrap()
+        };
+        cache.slots[index]
+            .descriptor
+            .as_mut()
+            .unwrap()
+            .trace_admission_certificate = Some(recomputed_certificate);
+        let self_consistent_identity = staged_page_content_identity(&cache.slots[index]);
+        cache.slots[index]
+            .descriptor
+            .as_mut()
+            .unwrap()
+            .page_content_identity = self_consistent_identity;
         while cache.slots[index].phase != RealtimePagedGrooveSlotPhase::Rejected {
             let _ = cache.advance_page(ticket, 2_048);
         }
         assert_eq!(
             cache.slot_progress(ticket.slot_index()).unwrap().failure,
-            Some(RealtimePagedGroovePageFailure::PageContentIdentityMismatch)
+            Some(RealtimePagedGroovePageFailure::NoncanonicalSpatialPyramid {
+                level_index: 1,
+                frame: expected_failure_frame,
+            })
         );
         let request = PagedGrooveRenderRequest::new(generation(), 700.25, 20.0).unwrap();
         assert!(matches!(
@@ -2783,6 +3537,69 @@ mod tests {
                 PagedGrooveRenderMiss::PageUnavailable { .. }
             )
         ));
+    }
+
+    #[test]
+    fn missing_trace_certificate_cannot_pass_a_self_consistent_page_hash() {
+        let page = page(0, SEAM_FRAME);
+        let mut cache = RealtimePagedGrooveCache::new(metadata(), config()).unwrap();
+        let ticket = ingest_all_precomputed(&mut cache, &page);
+        let index = ticket.slot_index() as usize;
+        cache.slots[index]
+            .descriptor
+            .as_mut()
+            .unwrap()
+            .trace_admission_certificate = None;
+        let page_identity = staged_page_content_identity(&cache.slots[index]);
+        cache.slots[index]
+            .descriptor
+            .as_mut()
+            .unwrap()
+            .page_content_identity = page_identity;
+        cache.start_hash(index);
+
+        while cache.slot_progress(ticket.slot_index()).unwrap().phase
+            != RealtimePagedGrooveSlotPhase::Rejected
+        {
+            let _ = cache.advance_page(ticket, 2_048);
+        }
+        assert_eq!(
+            cache.slot_progress(ticket.slot_index()).unwrap().failure,
+            Some(RealtimePagedGroovePageFailure::MissingTraceAdmissionCertificate)
+        );
+        assert!(cache.slots[index].validated_trace_admission.is_none());
+    }
+
+    #[test]
+    fn stale_page_certificate_cannot_pass_recomputation_after_its_hash_passes() {
+        let first = page(0, SEAM_FRAME);
+        let second = page(SEAM_FRAME, TOTAL_FRAMES);
+        let mut cache = RealtimePagedGrooveCache::new(metadata(), config()).unwrap();
+        let ticket = ingest_all_precomputed(&mut cache, &second);
+        let index = ticket.slot_index() as usize;
+        cache.slots[index]
+            .descriptor
+            .as_mut()
+            .unwrap()
+            .trace_admission_certificate = first.trace_admission_certificate();
+        let page_identity = staged_page_content_identity(&cache.slots[index]);
+        cache.slots[index]
+            .descriptor
+            .as_mut()
+            .unwrap()
+            .page_content_identity = page_identity;
+        cache.start_hash(index);
+
+        while cache.slot_progress(ticket.slot_index()).unwrap().phase
+            != RealtimePagedGrooveSlotPhase::Rejected
+        {
+            let _ = cache.advance_page(ticket, 2_048);
+        }
+        assert_eq!(
+            cache.slot_progress(ticket.slot_index()).unwrap().failure,
+            Some(RealtimePagedGroovePageFailure::TraceAdmissionCertificateMismatch)
+        );
+        assert!(cache.slots[index].validated_trace_admission.is_none());
     }
 
     #[test]
@@ -2854,6 +3671,82 @@ mod tests {
     }
 
     #[test]
+    fn trace_certification_is_budgeted_and_finished_pages_cannot_mix_lifecycle_bytes() {
+        let page = page(0, SEAM_FRAME);
+        let mut cache = RealtimePagedGrooveCache::new(metadata(), config()).unwrap();
+        let descriptor = RealtimePagedGroovePageDescriptor::from_page(&page);
+        let estimate = cache.page_work_estimate(descriptor, 0).unwrap();
+        let ticket = ingest_all_precomputed(&mut cache, &page);
+
+        let mut canonical_validation_work = 0_u64;
+        while cache.slot_progress(ticket.slot_index()).unwrap().phase
+            == RealtimePagedGrooveSlotPhase::BuildingPyramid
+        {
+            let progress = cache
+                .advance_page(ticket, FILTER_WORK_UNITS_PER_OUTPUT)
+                .unwrap();
+            assert!(progress.work_units_consumed <= FILTER_WORK_UNITS_PER_OUTPUT);
+            if progress.phase == RealtimePagedGrooveSlotPhase::BuildingPyramid {
+                canonical_validation_work += u64::from(progress.work_units_consumed);
+            }
+        }
+        assert_eq!(
+            canonical_validation_work,
+            estimate.precomputed_pyramid_validation_work_units
+        );
+        assert_eq!(
+            cache.slot_progress(ticket.slot_index()).unwrap().phase,
+            RealtimePagedGrooveSlotPhase::Hashing
+        );
+
+        let mut certification_work = 0_u64;
+        while cache.slot_progress(ticket.slot_index()).unwrap().phase
+            == RealtimePagedGrooveSlotPhase::Hashing
+        {
+            let progress = cache.advance_page(ticket, 1).unwrap();
+            assert!(progress.work_units_consumed <= 1);
+            if progress.phase == RealtimePagedGrooveSlotPhase::CertifyingTrace {
+                certification_work += u64::from(progress.work_units_consumed);
+            }
+        }
+        let index = ticket.slot_index() as usize;
+        assert_eq!(
+            cache.slot_progress(ticket.slot_index()).unwrap().phase,
+            RealtimePagedGrooveSlotPhase::CertifyingTrace
+        );
+        assert!(cache.slots[index].validated_trace_admission.is_none());
+        let first_sample_bits = cache.slots[index].lateral_displacement_m[0].to_bits();
+        assert!(matches!(
+            cache.ingest_lateral_chunk(ticket, 0, &[1.0e-6]),
+            Err(RealtimePagedGrooveError::WrongPhase { .. })
+        ));
+        assert_eq!(
+            cache.slots[index].lateral_displacement_m[0].to_bits(),
+            first_sample_bits
+        );
+
+        let first = cache.advance_page(ticket, 1).unwrap();
+        assert_eq!(first.work_units_consumed, 1);
+        assert_eq!(first.phase, RealtimePagedGrooveSlotPhase::CertifyingTrace);
+        assert!(cache.slots[index].validated_trace_admission.is_none());
+
+        certification_work += 1;
+        while cache.slot_progress(ticket.slot_index()).unwrap().phase
+            == RealtimePagedGrooveSlotPhase::CertifyingTrace
+        {
+            let progress = cache.advance_page(ticket, 1).unwrap();
+            assert!(progress.work_units_consumed <= 1);
+            certification_work += u64::from(progress.work_units_consumed);
+        }
+        assert_eq!(certification_work, estimate.trace_admission_work_units);
+        assert!(cache.slots[index].validated_trace_admission.is_some());
+        assert_eq!(
+            cache.slot_progress(ticket.slot_index()).unwrap().phase,
+            RealtimePagedGrooveSlotPhase::ValidatingSeams
+        );
+    }
+
+    #[test]
     fn deterministic_budget_audit_exposes_raw_build_throughput_limits() {
         let page = page(0, SEAM_FRAME);
         let cache = RealtimePagedGrooveCache::new(metadata(), config()).unwrap();
@@ -2880,10 +3773,13 @@ mod tests {
             estimate.source_frames_per_second_for_raw_budget(current_default_work_per_second)
                 < 192_000.0 * 20.0
         );
-        assert!(
-            estimate
-                .source_frames_per_second_for_precomputed_budget(current_default_work_per_second)
-                > 192_000.0 * 20.0
+        assert_eq!(
+            estimate.precomputed_pyramid_validation_work_units,
+            estimate.raw_pyramid_work_units
+        );
+        assert_eq!(
+            estimate.precomputed_total_work_units(),
+            estimate.raw_total_work_units()
         );
         assert!(estimate.precomputed_input_channel_samples > estimate.stored_frames * 2);
     }
@@ -2921,7 +3817,7 @@ mod tests {
         cache.discard_page(ticket).unwrap();
         let ticket = ingest_all(&mut cache, &page);
         let index = ticket.slot_index() as usize;
-        while cache.advance_pyramid_one_output(index).unwrap() {}
+        while cache.advance_pyramid_one_output(index).unwrap() == PyramidAdvance::OutputProcessed {}
         cache.slots[index].levels[2].lateral_displacement_m[7] += 1.0e-7;
         cache.start_hash(index);
         while cache.slots[index].phase == RealtimePagedGrooveSlotPhase::Hashing {
@@ -3007,6 +3903,79 @@ mod tests {
                 .failure,
             Some(RealtimePagedGroovePageFailure::SeamSampleMismatch {
                 frame: changed_second.stored_range().start_frame()
+            })
+        );
+        assert_eq!(cache.status().published_pages, 1);
+    }
+
+    #[test]
+    fn self_consistent_spatial_page_is_rejected_when_its_active_seam_differs() {
+        let first = page(0, SEAM_FRAME);
+        let second = page(SEAM_FRAME, TOTAL_FRAMES);
+        let mut cache = RealtimePagedGrooveCache::new(metadata(), config()).unwrap();
+        let first_ticket = ingest_all(&mut cache, &first);
+        finish_and_publish(&mut cache, first_ticket);
+        let second_ticket = ingest_all_precomputed(&mut cache, &second);
+        let index = second_ticket.slot_index() as usize;
+        let overlap_start = first
+            .stored_range()
+            .start_frame()
+            .max(second.stored_range().start_frame());
+        let overlap_end = first
+            .stored_range()
+            .end_frame_exclusive()
+            .min(second.stored_range().end_frame_exclusive());
+        let spatial_start = overlap_start + u64::from(GROOVE_SPATIAL_FILTER_RADIUS_FRAMES);
+        let spatial_end = overlap_end - u64::from(GROOVE_SPATIAL_FILTER_RADIUS_FRAMES);
+        let changed_frame = align_up(spatial_start, 2).unwrap();
+        assert!(changed_frame < spatial_end);
+        let level = &mut cache.slots[index].levels[0];
+        let changed_index = usize::try_from(
+            (changed_frame - level.first_source_frame) / u64::from(level.source_frame_step),
+        )
+        .unwrap();
+        level.lateral_displacement_m[changed_index] += 1.0e-8;
+
+        let certificate = {
+            let binding = cache.trace_admission_binding(index);
+            let slot = &cache.slots[index];
+            let levels = slot_trace_admission_levels(slot);
+            certify_groove_trace_representation(
+                binding,
+                slot_base_trace_admission_level(slot),
+                &levels,
+            )
+            .unwrap()
+        };
+        cache.slots[index]
+            .descriptor
+            .as_mut()
+            .unwrap()
+            .trace_admission_certificate = Some(certificate);
+        let page_identity = staged_page_content_identity(&cache.slots[index]);
+        cache.slots[index]
+            .descriptor
+            .as_mut()
+            .unwrap()
+            .page_content_identity = page_identity;
+        cache.start_hash(index);
+
+        while cache
+            .slot_progress(second_ticket.slot_index())
+            .unwrap()
+            .phase
+            != RealtimePagedGrooveSlotPhase::Rejected
+        {
+            let _ = cache.advance_page(second_ticket, 2_048);
+        }
+        assert_eq!(
+            cache
+                .slot_progress(second_ticket.slot_index())
+                .unwrap()
+                .failure,
+            Some(RealtimePagedGroovePageFailure::SpatialSeamSampleMismatch {
+                level_index: 0,
+                frame: changed_frame,
             })
         );
         assert_eq!(cache.status().published_pages, 1);

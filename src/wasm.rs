@@ -1539,6 +1539,7 @@ pub enum WasmPhysicalRealtimePagedPhase {
     Ready = 6,
     Published = 7,
     Rejected = 8,
+    CertifyingTrace = 9,
 }
 
 /// Identifies how one fixed-cache page receives its spatial pyramid.
@@ -1557,6 +1558,11 @@ pub enum WasmPhysicalRealtimePagedFailure {
     None = 0,
     PageContentIdentityMismatch = 1,
     SeamSampleMismatch = 2,
+    MissingTraceAdmissionCertificate = 3,
+    TraceAdmissionCertificateMismatch = 4,
+    SpatialSeamSampleMismatch = 5,
+    NoncanonicalSpatialPyramid = 6,
+    TraceAdmissionNotAdmitted = 7,
 }
 
 /// Identifies the last paged render miss without serialization.
@@ -1587,6 +1593,7 @@ struct WasmPagedPrefetchRange {
 const MAXIMUM_WASM_PREPARED_PAGE_FRAMES: u32 = 1_048_576;
 const MAXIMUM_WASM_MATERIALIZED_PAGE_FRAMES: u32 = 4 * 1_024 * 1_024;
 const MAXIMUM_WASM_REALTIME_PAGE_SLOTS: usize = 64;
+const MAXIMUM_WASM_REALTIME_CHUNK_FRAMES: usize = 64 * 1_024;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1661,6 +1668,7 @@ pub struct WasmPhysicalHostRenderer {
         [Option<RealtimePagedGroovePageTicket>; MAXIMUM_WASM_REALTIME_PAGE_SLOTS],
     realtime_paged_reservations:
         [Option<RealtimePagedGrooveChunkReservation>; MAXIMUM_WASM_REALTIME_PAGE_SLOTS],
+    realtime_paged_chunk_staging: Box<[f32]>,
     realtime_paged_last_ticket: Option<RealtimePagedGroovePageTicket>,
     realtime_paged_last_progress: Option<RealtimePagedGroovePageProgress>,
     realtime_paged_last_level_layout: Option<RealtimePagedGrooveLevelLayout>,
@@ -2269,9 +2277,11 @@ impl WasmPhysicalHostRenderer {
             .map_or(0, RealtimePagedGrooveChunkReservation::frame_count)
     }
 
-    /// Returns one active fixed-storage address in WASM memory.
+    /// Returns one active ingress-staging address in WASM memory.
     ///
-    /// Use this pointer only until its matching commit or cancel call.
+    /// Commit copies this data into private cache storage.
+    /// Use this pointer only until the matching commit or cancel operation.
+    /// Do not retain or write through the pointer after that operation.
     #[wasm_bindgen(js_name = realtimePagedReservedChunkPtr)]
     pub fn realtime_paged_reserved_chunk_ptr(
         &mut self,
@@ -2286,10 +2296,10 @@ impl WasmPhysicalHostRenderer {
         ) else {
             return std::ptr::null_mut();
         };
-        self.inner
-            .realtime_paged_cache_mut()
-            .and_then(|cache| cache.reserved_chunk_mut(reservation).ok())
-            .map_or(std::ptr::null_mut(), |samples| samples.as_mut_ptr())
+        if reservation.frame_count() as usize > self.realtime_paged_chunk_staging.len() {
+            return std::ptr::null_mut();
+        }
+        self.realtime_paged_chunk_staging.as_mut_ptr()
     }
 
     /// Validates and commits one completed in-place write.
@@ -2307,11 +2317,17 @@ impl WasmPhysicalHostRenderer {
         ) else {
             return WasmPhysicalRealtimePagedStatus::StaleChunkReservation;
         };
+        let frame_count = reservation.frame_count() as usize;
+        let staged = &self.realtime_paged_chunk_staging[..frame_count];
         let result = self
             .inner
             .realtime_paged_cache_mut()
             .ok_or(WasmPhysicalRealtimePagedStatus::NoLoadedCache)
             .and_then(|cache| {
+                cache
+                    .reserved_chunk_mut(reservation)
+                    .map_err(|error| realtime_paged_error_status(&error))?
+                    .copy_from_slice(staged);
                 cache
                     .commit_reserved_chunk(reservation)
                     .map_err(|error| realtime_paged_error_status(&error))
@@ -2681,6 +2697,8 @@ impl WasmPhysicalHostRenderer {
             .and_then(|progress| progress.failure)
         {
             Some(RealtimePagedGroovePageFailure::SeamSampleMismatch { frame }) => frame,
+            Some(RealtimePagedGroovePageFailure::SpatialSeamSampleMismatch { frame, .. }) => frame,
+            Some(RealtimePagedGroovePageFailure::NoncanonicalSpatialPyramid { frame, .. }) => frame,
             _ => 0,
         }
     }
@@ -3414,6 +3432,8 @@ impl WasmPhysicalHostRenderer {
             prepared_page_vertical_displacement_m: Box::new([]),
             realtime_paged_tickets: [None; MAXIMUM_WASM_REALTIME_PAGE_SLOTS],
             realtime_paged_reservations: [None; MAXIMUM_WASM_REALTIME_PAGE_SLOTS],
+            realtime_paged_chunk_staging: vec![0.0; MAXIMUM_WASM_REALTIME_CHUNK_FRAMES]
+                .into_boxed_slice(),
             realtime_paged_last_ticket: None,
             realtime_paged_last_progress: None,
             realtime_paged_last_level_layout: None,
@@ -3457,13 +3477,14 @@ impl WasmPhysicalHostRenderer {
             page_content_identity: GrooveContentIdentity::from_sha256(identity_words_to_sha256(
                 digest_words,
             )),
+            trace_admission_certificate: None,
             core_range,
             stored_range,
         };
         let result = if precomputed_pyramid {
-            cache.begin_page_with_precomputed_pyramid(descriptor)
+            cache.begin_raw_page_with_precomputed_pyramid(descriptor)
         } else {
-            cache.begin_page(descriptor)
+            cache.begin_raw_page(descriptor)
         };
         match result {
             Ok(ticket) => {
@@ -3534,7 +3555,7 @@ impl WasmPhysicalHostRenderer {
             Ok(ticket) => ticket,
             Err(status) => return status,
         };
-        if self.realtime_paged_reservations[slot_index as usize].is_some() {
+        if self.realtime_paged_reservations.iter().any(Option::is_some) {
             return WasmPhysicalRealtimePagedStatus::ChunkReservationActive;
         }
         let Some(cache) = self.inner.realtime_paged_cache_mut() else {
@@ -3951,7 +3972,8 @@ fn realtime_paged_error_status(
         | RealtimePagedGrooveError::InvalidSourceFrameAdvance
         | RealtimePagedGrooveError::PagedGroove(_)
         | RealtimePagedGrooveError::Groove(_)
-        | RealtimePagedGrooveError::Stylus(_) => WasmPhysicalRealtimePagedStatus::CoreError,
+        | RealtimePagedGrooveError::Stylus(_)
+        | RealtimePagedGrooveError::TraceAdmission(_) => WasmPhysicalRealtimePagedStatus::CoreError,
     }
 }
 
@@ -3963,6 +3985,9 @@ fn realtime_paged_phase(value: RealtimePagedGrooveSlotPhase) -> WasmPhysicalReal
             WasmPhysicalRealtimePagedPhase::BuildingPyramid
         }
         RealtimePagedGrooveSlotPhase::Hashing => WasmPhysicalRealtimePagedPhase::Hashing,
+        RealtimePagedGrooveSlotPhase::CertifyingTrace => {
+            WasmPhysicalRealtimePagedPhase::CertifyingTrace
+        }
         RealtimePagedGrooveSlotPhase::ValidatingSeams => {
             WasmPhysicalRealtimePagedPhase::ValidatingSeams
         }
@@ -3994,6 +4019,21 @@ fn realtime_paged_failure(
         }
         RealtimePagedGroovePageFailure::SeamSampleMismatch { .. } => {
             WasmPhysicalRealtimePagedFailure::SeamSampleMismatch
+        }
+        RealtimePagedGroovePageFailure::MissingTraceAdmissionCertificate => {
+            WasmPhysicalRealtimePagedFailure::MissingTraceAdmissionCertificate
+        }
+        RealtimePagedGroovePageFailure::TraceAdmissionCertificateMismatch => {
+            WasmPhysicalRealtimePagedFailure::TraceAdmissionCertificateMismatch
+        }
+        RealtimePagedGroovePageFailure::TraceAdmissionNotAdmitted => {
+            WasmPhysicalRealtimePagedFailure::TraceAdmissionNotAdmitted
+        }
+        RealtimePagedGroovePageFailure::SpatialSeamSampleMismatch { .. } => {
+            WasmPhysicalRealtimePagedFailure::SpatialSeamSampleMismatch
+        }
+        RealtimePagedGroovePageFailure::NoncanonicalSpatialPyramid { .. } => {
+            WasmPhysicalRealtimePagedFailure::NoncanonicalSpatialPyramid
         }
     }
 }
@@ -4776,6 +4816,147 @@ mod tests {
     }
 
     #[test]
+    fn realtime_facade_allows_only_one_global_wasm_staging_reservation() {
+        let (seed_metadata, _) = canonical_page_fixture();
+        let seed_storage_halo = seed_metadata.required_storage_halo_frames();
+        let fixture_renderer = renderer(48_000);
+        let pcm = vec![0.0_f32; seed_storage_halo as usize * 16 + 64];
+        let groove = fixture_renderer
+            .cut_interleaved_pcm(&pcm, 1, 192_000.0)
+            .unwrap();
+        let generation = GrooveGenerationId::new(702).unwrap();
+        let seed_metadata =
+            PhysicalGrooveMetadata::from_groove_asset(generation, &groove, 1).unwrap();
+        let tracing_halo = seed_metadata
+            .minimum_tracing_halo_frames(fixture_renderer.inner.profile().config.stylus)
+            .unwrap()
+            .max(1);
+        let metadata =
+            PhysicalGrooveMetadata::from_groove_asset(generation, &groove, tracing_halo).unwrap();
+        let storage_halo = u64::from(metadata.required_storage_halo_frames());
+        let maximum_stored_frames = u32::try_from(storage_halo * 2 + 1).unwrap();
+        let cache = RealtimePagedGrooveCache::new(
+            metadata,
+            RealtimePagedGrooveCacheConfig {
+                page_slots: 2,
+                maximum_stored_frames_per_page: maximum_stored_frames,
+                maximum_chunk_frames: 1,
+                maximum_work_units_per_call: 262_144,
+                maximum_resident_bytes: 128 * 1_024 * 1_024,
+            },
+        )
+        .unwrap();
+        let mut renderer = renderer(48_000);
+        renderer.inner.load_realtime_paged_groove(cache).unwrap();
+
+        let total_frames = metadata.total_frame_count();
+        let second_core_start = storage_halo * 2 + 1;
+        let second_core_end = second_core_start + 1;
+        assert!(second_core_end + storage_halo <= total_frames);
+        let identity_version = GrooveContentIdentity::from_sha256([0; 32]).identity_version();
+        let begin = |renderer: &mut WasmPhysicalHostRenderer,
+                     digest_byte: u8,
+                     core_start: u64,
+                     core_end: u64,
+                     stored_start: u64,
+                     stored_end: u64| {
+            let digest = [digest_byte; 32];
+            let digest_words = std::array::from_fn(|index| sha256_word(digest, index as u32));
+            assert_eq!(
+                renderer.begin_realtime_paged_page_internal(
+                    true,
+                    identity_version,
+                    digest_words,
+                    core_start,
+                    core_end,
+                    stored_start,
+                    stored_end,
+                ),
+                WasmPhysicalRealtimePagedStatus::Ok
+            );
+            (
+                renderer.realtime_paged_last_ticket_slot_index(),
+                renderer.realtime_paged_last_ticket_sequence(),
+            )
+        };
+        let (first_slot, first_ticket) = begin(&mut renderer, 0x31, 0, 1, 0, storage_halo + 1);
+        let (second_slot, second_ticket) = begin(
+            &mut renderer,
+            0x32,
+            second_core_start,
+            second_core_end,
+            storage_halo + 1,
+            second_core_end + storage_halo,
+        );
+        assert_ne!(first_slot, second_slot);
+
+        assert_eq!(
+            renderer.reserve_realtime_paged_chunk(
+                first_slot,
+                first_ticket,
+                WasmRealtimePagedChunkTarget::BaseLateral,
+                0,
+                1,
+            ),
+            WasmPhysicalRealtimePagedStatus::Ok
+        );
+        let first_reservation =
+            renderer.realtime_paged_reservation_sequence(first_slot, first_ticket);
+        let first_pointer =
+            renderer.realtime_paged_reserved_chunk_ptr(first_slot, first_ticket, first_reservation);
+        assert!(!first_pointer.is_null());
+        assert_eq!(
+            renderer.reserve_realtime_paged_chunk(
+                second_slot,
+                second_ticket,
+                WasmRealtimePagedChunkTarget::BaseLateral,
+                0,
+                1,
+            ),
+            WasmPhysicalRealtimePagedStatus::ChunkReservationActive
+        );
+        assert_eq!(
+            renderer.realtime_paged_reservation_sequence(second_slot, second_ticket),
+            0
+        );
+        assert_eq!(
+            renderer.cancel_realtime_paged_reserved_chunk(
+                first_slot,
+                first_ticket,
+                first_reservation,
+            ),
+            WasmPhysicalRealtimePagedStatus::Ok
+        );
+
+        assert_eq!(
+            renderer.reserve_realtime_paged_chunk(
+                second_slot,
+                second_ticket,
+                WasmRealtimePagedChunkTarget::BaseLateral,
+                0,
+                1,
+            ),
+            WasmPhysicalRealtimePagedStatus::Ok
+        );
+        let second_reservation =
+            renderer.realtime_paged_reservation_sequence(second_slot, second_ticket);
+        let second_pointer = renderer.realtime_paged_reserved_chunk_ptr(
+            second_slot,
+            second_ticket,
+            second_reservation,
+        );
+        assert_eq!(second_pointer, first_pointer);
+        assert_eq!(
+            renderer.cancel_realtime_paged_reserved_chunk(
+                second_slot,
+                second_ticket,
+                second_reservation,
+            ),
+            WasmPhysicalRealtimePagedStatus::Ok
+        );
+    }
+
+    #[test]
     fn realtime_facade_reserves_wasm_storage_and_publishes_precomputed_page() {
         let (metadata, page) = canonical_page_fixture();
         let stored_frames = page.lateral_displacement_m().len() as u32;
@@ -4830,6 +5011,7 @@ mod tests {
                 reservation_sequence,
             );
             assert!(!pointer.is_null());
+            assert_eq!(pointer, renderer.realtime_paged_chunk_staging.as_mut_ptr());
             assert_eq!(
                 renderer.realtime_paged_reserved_chunk_len(
                     slot,
@@ -4838,14 +5020,7 @@ mod tests {
                 ) as usize,
                 samples.len()
             );
-            let reservation = renderer.realtime_paged_reservations[slot as usize].unwrap();
-            renderer
-                .inner
-                .realtime_paged_cache_mut()
-                .unwrap()
-                .reserved_chunk_mut(reservation)
-                .unwrap()
-                .copy_from_slice(samples);
+            renderer.realtime_paged_chunk_staging[..samples.len()].copy_from_slice(samples);
             assert_eq!(
                 renderer.commit_realtime_paged_reserved_chunk(
                     slot,
@@ -4854,6 +5029,10 @@ mod tests {
                 ),
                 WasmPhysicalRealtimePagedStatus::Ok
             );
+            renderer.realtime_paged_chunk_staging[0] = f32::NAN;
+            assert!(renderer
+                .realtime_paged_reserved_chunk_ptr(slot, ticket_sequence, reservation_sequence,)
+                .is_null());
         };
 
         transfer(

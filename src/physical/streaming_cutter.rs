@@ -1403,7 +1403,7 @@ mod tests {
             layout: GrooveLayout::default(),
             cut: RecordCutConfig::default(),
             page_core_frame_count: 257,
-            tracing_halo_frames: 8,
+            tracing_halo_frames: 64,
         }
     }
 

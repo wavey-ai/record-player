@@ -4,17 +4,28 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use super::groove::{
-    GrooveContentHasher, GrooveContentIdentity, GrooveSpatialLevelSelection, GrooveSpatialPyramid,
-    GROOVE_SPATIAL_FILTER_RADIUS_FRAMES, GROOVE_SPATIAL_PYRAMID_LEVELS,
+    align_up, GrooveContentHasher, GrooveContentIdentity, GrooveSpatialLevelSelection,
+    GrooveSpatialPyramid, GROOVE_SPATIAL_FILTER_RADIUS_FRAMES,
+    GROOVE_SPATIAL_PYRAMID_FORMAT_VERSION, GROOVE_SPATIAL_PYRAMID_LEVELS,
 };
+#[cfg(test)]
+use super::stylus::trace_spherical_45_45_wall_multiresolution_contacts;
 use super::stylus::{
-    trace_spherical_45_45_wall_multiresolution_contacts, StylusGeometry, StylusTraceContactSet,
-    StylusTraceError,
+    trace_spherical_45_45_wall_multiresolution_contacts_certified_concave,
+    trace_spherical_45_45_wall_multiresolution_contacts_certified_piecewise, StylusGeometry,
+    StylusTraceContactSet, StylusTraceError,
+};
+use super::trace_admission::{
+    certify_groove_trace_representation, GrooveTraceAdmissionBinding,
+    GrooveTraceAdmissionCertificate, GrooveTraceAdmissionClass, GrooveTraceAdmissionError,
+    GrooveTraceAdmissionLevel, GrooveTraceAdmissionPolicy, GrooveTraceEdgeCoverage,
+    GrooveTraceRepresentationKind, ValidatedGrooveTraceAdmissionCertificate,
+    PAGED_TRACE_REPRESENTATION_FORMAT_VERSION,
 };
 use super::{GrooveAsset, GrooveCutReport, GrooveError, GrooveLayout, RecordCutConfig};
 
 pub const PHYSICAL_GROOVE_SAMPLE_RATE_HZ: u32 = 192_000;
-pub const PAGED_GROOVE_FORMAT_VERSION: u32 = 3;
+pub const PAGED_GROOVE_FORMAT_VERSION: u32 = PAGED_TRACE_REPRESENTATION_FORMAT_VERSION;
 
 const MIN_TOTAL_FRAME_COUNT: u64 = 4;
 pub const MAX_PAGED_GROOVE_TRACING_HALO_FRAMES: u32 = 4_096;
@@ -262,6 +273,7 @@ pub struct PhysicalGrooveMetadata {
     cut: PhysicalGrooveCutMetadata,
     total_frame_count: u64,
     tracing_halo_frames: u32,
+    trace_admission_policy: GrooveTraceAdmissionPolicy,
 }
 
 impl PhysicalGrooveMetadata {
@@ -272,6 +284,7 @@ impl PhysicalGrooveMetadata {
         total_frame_count: u64,
         tracing_halo_frames: u32,
     ) -> Result<Self, PagedGrooveError> {
+        let trace_admission_policy = GrooveTraceAdmissionPolicy::standard(source_content_identity)?;
         let mut metadata = Self {
             generation,
             format: PhysicalGrooveFormat::physical_current(),
@@ -280,6 +293,7 @@ impl PhysicalGrooveMetadata {
             cut,
             total_frame_count,
             tracing_halo_frames,
+            trace_admission_policy,
         };
         metadata.content_identity = metadata.calculate_content_identity();
         metadata.validate()?;
@@ -339,6 +353,10 @@ impl PhysicalGrooveMetadata {
         self.tracing_halo_frames
     }
 
+    pub fn trace_admission_policy(self) -> GrooveTraceAdmissionPolicy {
+        self.trace_admission_policy
+    }
+
     /// Returns the worst-case halo for one stylus over this record and pyramid.
     pub fn minimum_tracing_halo_frames(
         self,
@@ -358,6 +376,18 @@ impl PhysicalGrooveMetadata {
         self,
         geometry: StylusGeometry,
     ) -> Result<(), PagedGrooveError> {
+        self.trace_admission_policy
+            .validate(self.source_content_identity)?;
+        if geometry.validate()?.tracing_radius_m
+            > self
+                .trace_admission_policy
+                .maximum_geometry()
+                .tracing_radius_m
+        {
+            return Err(PagedGrooveError::TraceAdmission(
+                GrooveTraceAdmissionError::GeometryOutsideCertificate,
+            ));
+        }
         let required_frames = self.minimum_tracing_halo_frames(geometry)?;
         if required_frames > self.tracing_halo_frames {
             return Err(PagedGrooveError::InsufficientDeclaredTracingHalo {
@@ -408,6 +438,8 @@ impl PhysicalGrooveMetadata {
             return Err(PagedGrooveError::InvalidTracingHalo);
         }
         self.cut.validate(self.total_frame_count)?;
+        self.trace_admission_policy
+            .validate(self.source_content_identity)?;
         if self.content_identity != self.calculate_content_identity() {
             return Err(PagedGrooveError::MetadataContentIdentityMismatch);
         }
@@ -425,6 +457,7 @@ impl PhysicalGrooveMetadata {
             GrooveSampleEncoding::Float32Meters => 0,
         });
         hash.identity(self.source_content_identity);
+        hash.identity(self.trace_admission_policy.policy_identity());
         for value in [
             self.cut.layout.outer_program_radius_m,
             self.cut.layout.inner_program_radius_m,
@@ -473,7 +506,7 @@ impl PhysicalGrooveMetadata {
 }
 
 /// Stores one immutable core page and its tracing overlap.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PhysicalGroovePage {
     generation: GrooveGenerationId,
@@ -483,10 +516,95 @@ pub struct PhysicalGroovePage {
     stored_range: GrooveFrameRange,
     lateral_displacement_m: Box<[f32]>,
     vertical_displacement_m: Box<[f32]>,
-    #[serde(default)]
     spatial_pyramid: Option<GrooveSpatialPyramid>,
+    trace_admission_certificate: Option<GrooveTraceAdmissionCertificate>,
     #[serde(skip)]
     spatial_pyramid_validated: bool,
+    #[serde(skip)]
+    validated_trace_admission: Option<ValidatedGrooveTraceAdmissionCertificate>,
+}
+
+impl<'de> Deserialize<'de> for PhysicalGroovePage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct WirePage {
+            generation: GrooveGenerationId,
+            asset_content_identity: GrooveContentIdentity,
+            content_identity: GrooveContentIdentity,
+            core_range: GrooveFrameRange,
+            stored_range: GrooveFrameRange,
+            lateral_displacement_m: Box<[f32]>,
+            vertical_displacement_m: Box<[f32]>,
+            spatial_pyramid: GrooveSpatialPyramid,
+            trace_admission_certificate: GrooveTraceAdmissionCertificate,
+        }
+
+        let wire = WirePage::deserialize(deserializer)?;
+        let mut page = Self {
+            generation: wire.generation,
+            asset_content_identity: wire.asset_content_identity,
+            content_identity: wire.content_identity,
+            core_range: wire.core_range,
+            stored_range: wire.stored_range,
+            lateral_displacement_m: wire.lateral_displacement_m,
+            vertical_displacement_m: wire.vertical_displacement_m,
+            spatial_pyramid: Some(wire.spatial_pyramid),
+            trace_admission_certificate: Some(wire.trace_admission_certificate),
+            spatial_pyramid_validated: false,
+            validated_trace_admission: None,
+        };
+        page.core_range
+            .validate()
+            .map_err(serde::de::Error::custom)?;
+        page.stored_range
+            .validate()
+            .map_err(serde::de::Error::custom)?;
+        if !page.stored_range.contains_range(page.core_range) {
+            return Err(serde::de::Error::custom(
+                PagedGrooveError::StoredRangeDoesNotContainCore,
+            ));
+        }
+        if page.lateral_displacement_m.len() != page.vertical_displacement_m.len() {
+            return Err(serde::de::Error::custom(
+                PagedGrooveError::ChannelLengthMismatch,
+            ));
+        }
+        if page.stored_range.frame_count() != page.lateral_displacement_m.len() as u64 {
+            return Err(serde::de::Error::custom(
+                PagedGrooveError::StoredLengthMismatch,
+            ));
+        }
+        if page
+            .lateral_displacement_m
+            .iter()
+            .chain(page.vertical_displacement_m.iter())
+            .any(|sample| !sample.is_finite())
+        {
+            return Err(serde::de::Error::custom(
+                PagedGrooveError::NonfiniteDisplacement,
+            ));
+        }
+        page.asset_content_identity
+            .validate_current()
+            .map_err(serde::de::Error::custom)?;
+        page.content_identity
+            .validate_current()
+            .map_err(serde::de::Error::custom)?;
+        wire.trace_admission_certificate
+            .validate_static()
+            .map_err(serde::de::Error::custom)?;
+        validate_spatial_pyramid(&mut page).map_err(serde::de::Error::custom)?;
+        if page.content_identity != page.calculate_content_identity() {
+            return Err(serde::de::Error::custom(
+                PagedGrooveError::PageContentIdentityMismatch { page_index: 0 },
+            ));
+        }
+        Ok(page)
+    }
 }
 
 impl PhysicalGroovePage {
@@ -530,8 +648,13 @@ impl PhysicalGroovePage {
             lateral_displacement_m: lateral_displacement_m.into_boxed_slice(),
             vertical_displacement_m: vertical_displacement_m.into_boxed_slice(),
             spatial_pyramid: Some(spatial_pyramid),
+            trace_admission_certificate: None,
             spatial_pyramid_validated: true,
+            validated_trace_admission: None,
         };
+        let certificate = page.calculate_trace_admission_certificate(metadata)?;
+        page.validated_trace_admission = Some(certificate.validate_recomputed(certificate)?);
+        page.trace_admission_certificate = Some(certificate);
         page.content_identity = page.calculate_content_identity();
         Ok(page)
     }
@@ -584,6 +707,10 @@ impl PhysicalGroovePage {
         self.spatial_pyramid.as_ref()
     }
 
+    pub fn trace_admission_certificate(&self) -> Option<GrooveTraceAdmissionCertificate> {
+        self.trace_admission_certificate
+    }
+
     /// Returns the page data size that counts against a cache limit.
     pub fn resident_size_bytes(&self) -> u64 {
         self.checked_resident_size_bytes().unwrap_or(u64::MAX)
@@ -632,8 +759,16 @@ impl PhysicalGroovePage {
     }
 
     fn calculate_content_identity(&self) -> GrooveContentIdentity {
-        let mut hash = GrooveContentHasher::new(b"record-player-paged-groove-page\0");
+        let mut hash = GrooveContentHasher::new(b"record-player-paged-groove-page-v4\0");
+        hash.u64(self.generation.get());
         hash.identity(self.asset_content_identity);
+        match self.trace_admission_certificate {
+            Some(certificate) => {
+                hash.u8(1);
+                hash.identity(certificate.certificate_identity());
+            }
+            None => hash.u8(0),
+        }
         hash.u64(self.core_range.start_frame);
         hash.u64(self.core_range.end_frame_exclusive);
         hash.u64(self.stored_range.start_frame);
@@ -667,6 +802,79 @@ impl PhysicalGroovePage {
             None => hash.u8(0),
         }
         hash.finish()
+    }
+
+    fn calculate_trace_admission_certificate(
+        &self,
+        metadata: PhysicalGrooveMetadata,
+    ) -> Result<GrooveTraceAdmissionCertificate, PagedGrooveError> {
+        let pyramid = self
+            .spatial_pyramid
+            .as_ref()
+            .ok_or(PagedGrooveError::MissingSpatialPyramid)?;
+        if pyramid.levels().len() != GROOVE_SPATIAL_PYRAMID_LEVELS {
+            return Err(PagedGrooveError::TraceAdmission(
+                GrooveTraceAdmissionError::InvalidRepresentation,
+            ));
+        }
+        let levels = pyramid.levels();
+        let spatial_levels = std::array::from_fn(|index| GrooveTraceAdmissionLevel {
+            first_source_frame: levels[index].first_source_frame(),
+            source_frame_step: levels[index].source_frame_step(),
+            lateral_displacement_m: levels[index].lateral_displacement_m(),
+            vertical_displacement_m: levels[index].vertical_displacement_m(),
+        });
+        let final_frame = metadata.total_frame_count.saturating_sub(1) as f64;
+        Ok(certify_groove_trace_representation(
+            GrooveTraceAdmissionBinding {
+                representation_kind: GrooveTraceRepresentationKind::Paged,
+                representation_format_version: PAGED_GROOVE_FORMAT_VERSION,
+                source_content_identity: metadata.source_content_identity,
+                generation: self.generation.get(),
+                core_start_frame: self.core_range.start_frame,
+                core_end_frame_exclusive: self.core_range.end_frame_exclusive,
+                stored_start_frame: self.stored_range.start_frame,
+                stored_end_frame_exclusive: self.stored_range.end_frame_exclusive,
+                record_end_frame_exclusive: metadata.total_frame_count,
+                minimum_meters_per_source_frame: metadata.cut.layout.meters_per_frame_at(
+                    final_frame,
+                    metadata.cut.cut.groove_pitch_m_per_revolution,
+                ),
+                maximum_geometry: metadata.trace_admission_policy.maximum_geometry(),
+                edge_coverage: GrooveTraceEdgeCoverage::paged(
+                    self.stored_range.start_frame == 0,
+                    self.stored_range.end_frame_exclusive == metadata.total_frame_count,
+                ),
+            },
+            GrooveTraceAdmissionLevel {
+                first_source_frame: self.stored_range.start_frame,
+                source_frame_step: 1,
+                lateral_displacement_m: &self.lateral_displacement_m,
+                vertical_displacement_m: &self.vertical_displacement_m,
+            },
+            &spatial_levels,
+        )?)
+    }
+
+    pub(crate) fn validate_trace_admission(
+        &mut self,
+        metadata: PhysicalGrooveMetadata,
+    ) -> Result<(), PagedGrooveError> {
+        let certificate = self
+            .trace_admission_certificate
+            .ok_or(PagedGrooveError::MissingTraceAdmissionCertificate)?;
+        self.validated_trace_admission = Some(
+            certificate
+                .validate_recomputed(self.calculate_trace_admission_certificate(metadata)?)?,
+        );
+        Ok(())
+    }
+
+    pub(crate) fn validated_trace_admission(
+        &self,
+    ) -> Result<ValidatedGrooveTraceAdmissionCertificate, PagedGrooveError> {
+        self.validated_trace_admission
+            .ok_or(PagedGrooveError::MissingTraceAdmissionCertificate)
     }
 }
 
@@ -727,7 +935,7 @@ impl<'a> AntiAliasedGrooveTraceView<'a> {
         wall_index: usize,
         meters_per_source_frame: f64,
         geometry: StylusGeometry,
-    ) -> Result<StylusTraceContactSet, StylusTraceError> {
+    ) -> Result<StylusTraceContactSet, PagedGrooveError> {
         let lower = self.selection.lower();
         let upper = self.selection.upper();
         let maximum_level_step = lower.source_frame_step().max(upper.source_frame_step());
@@ -735,26 +943,57 @@ impl<'a> AntiAliasedGrooveTraceView<'a> {
             geometry.multiresolution_support(meters_per_source_frame, maximum_level_step)?;
         let required_frames = support.symmetric_halo_source_frames();
         if required_frames > self.available_tracing_halo_frames {
-            return Err(StylusTraceError::InsufficientPageHalo {
-                required_frames,
-                available_frames: self.available_tracing_halo_frames,
-            });
+            return Err(PagedGrooveError::Stylus(
+                super::StylusTraceError::InsufficientPageHalo {
+                    required_frames,
+                    available_frames: self.available_tracing_halo_frames,
+                },
+            ));
         }
-        trace_spherical_45_45_wall_multiresolution_contacts(
-            lower.lateral_displacement_m(),
-            lower.vertical_displacement_m(),
-            lower.first_source_frame(),
-            lower.source_frame_step(),
-            upper.lateral_displacement_m(),
-            upper.vertical_displacement_m(),
-            upper.first_source_frame(),
-            upper.source_frame_step(),
-            self.selection.upper_level_blend(),
-            wall_index,
-            self.absolute_frame_position,
-            meters_per_source_frame,
-            geometry,
-        )
+        let admission = self.page.validated_trace_admission()?;
+        admission.validate_for_active_tracing(geometry)?;
+        match admission.certificate().admission_class() {
+            GrooveTraceAdmissionClass::StrictConcavity => Ok(
+                trace_spherical_45_45_wall_multiresolution_contacts_certified_concave(
+                    lower.lateral_displacement_m(),
+                    lower.vertical_displacement_m(),
+                    lower.first_source_frame(),
+                    lower.source_frame_step(),
+                    upper.lateral_displacement_m(),
+                    upper.vertical_displacement_m(),
+                    upper.first_source_frame(),
+                    upper.source_frame_step(),
+                    self.selection.upper_level_blend(),
+                    wall_index,
+                    self.absolute_frame_position,
+                    meters_per_source_frame,
+                    geometry,
+                    admission.certified_concave_trace_bounds(geometry)?,
+                )?,
+            ),
+            GrooveTraceAdmissionClass::FixedCapPiecewise => Ok(
+                trace_spherical_45_45_wall_multiresolution_contacts_certified_piecewise(
+                    lower.lateral_displacement_m(),
+                    lower.vertical_displacement_m(),
+                    lower.first_source_frame(),
+                    lower.source_frame_step(),
+                    upper.lateral_displacement_m(),
+                    upper.vertical_displacement_m(),
+                    upper.first_source_frame(),
+                    upper.source_frame_step(),
+                    self.selection.upper_level_blend(),
+                    wall_index,
+                    self.absolute_frame_position,
+                    meters_per_source_frame,
+                    geometry,
+                    admission.fixed_cap_piecewise_trace_bounds(geometry)?,
+                )?,
+            ),
+            rejected => Err(rejected
+                .rejection_error()
+                .expect("non-trace admission classes have a typed rejection")
+                .into()),
+        }
     }
 }
 
@@ -1125,7 +1364,7 @@ impl PagedGrooveCacheProducer {
         validate_page(
             self.metadata,
             self.metadata.total_range(),
-            &page,
+            &mut page,
             insertion_index,
         )?;
         validate_spatial_pyramid(&mut page)?;
@@ -1185,12 +1424,67 @@ impl PagedGrooveCacheProducer {
 
     /// Publishes an immutable cache without materializing the complete record.
     pub fn publish(self) -> PagedGrooveCache {
+        let mut manifest =
+            PagedTraceRepresentationManifestHasher::new(self.metadata, self.pages.len() as u64);
+        let mut maximum_certified_absolute_wall_slope = 0.0_f64;
+        for page in &self.pages {
+            let certificate = page
+                .trace_admission_certificate()
+                .expect("a cached page has a trace-admission certificate");
+            maximum_certified_absolute_wall_slope = maximum_certified_absolute_wall_slope
+                .max(certificate.maximum_absolute_wall_slope());
+            manifest.append(
+                page.core_range,
+                page.stored_range,
+                page.content_identity,
+                certificate.certificate_identity(),
+            );
+        }
+        let trace_admitted_representation_identity = manifest.finish();
         PagedGrooveCache {
             metadata: self.metadata,
             limits: self.limits,
             pages: self.pages.into_boxed_slice(),
             resident_page_bytes: self.resident_page_bytes,
+            trace_admitted_representation_identity,
+            maximum_certified_absolute_wall_slope,
         }
+    }
+}
+
+pub(crate) struct PagedTraceRepresentationManifestHasher {
+    hash: GrooveContentHasher,
+}
+
+impl PagedTraceRepresentationManifestHasher {
+    pub(crate) fn new(metadata: PhysicalGrooveMetadata, page_count: u64) -> Self {
+        let mut hash =
+            GrooveContentHasher::new(b"record-player-paged-trace-representation-manifest-v1\0");
+        hash.u32(PAGED_GROOVE_FORMAT_VERSION);
+        hash.u32(GROOVE_SPATIAL_PYRAMID_FORMAT_VERSION);
+        hash.identity(metadata.content_identity());
+        hash.u64(metadata.generation().get());
+        hash.u64(page_count);
+        Self { hash }
+    }
+
+    pub(crate) fn append(
+        &mut self,
+        core_range: GrooveFrameRange,
+        stored_range: GrooveFrameRange,
+        page_content_identity: GrooveContentIdentity,
+        certificate_identity: GrooveContentIdentity,
+    ) {
+        self.hash.u64(core_range.start_frame());
+        self.hash.u64(core_range.end_frame_exclusive());
+        self.hash.u64(stored_range.start_frame());
+        self.hash.u64(stored_range.end_frame_exclusive());
+        self.hash.identity(page_content_identity);
+        self.hash.identity(certificate_identity);
+    }
+
+    pub(crate) fn finish(self) -> GrooveContentIdentity {
+        self.hash.finish()
     }
 }
 
@@ -1201,6 +1495,8 @@ pub struct PagedGrooveCache {
     limits: PagedGrooveCacheLimits,
     pages: Box<[Arc<PhysicalGroovePage>]>,
     resident_page_bytes: u64,
+    trace_admitted_representation_identity: GrooveContentIdentity,
+    maximum_certified_absolute_wall_slope: f64,
 }
 
 impl PagedGrooveCache {
@@ -1214,6 +1510,14 @@ impl PagedGrooveCache {
 
     pub fn content_identity(&self) -> GrooveContentIdentity {
         self.metadata.content_identity
+    }
+
+    pub fn trace_admitted_representation_identity(&self) -> GrooveContentIdentity {
+        self.trace_admitted_representation_identity
+    }
+
+    pub(crate) fn maximum_certified_absolute_wall_slope(&self) -> f64 {
+        self.maximum_certified_absolute_wall_slope
     }
 
     pub fn limits(&self) -> PagedGrooveCacheLimits {
@@ -1230,6 +1534,35 @@ impl PagedGrooveCache {
 
     pub fn pages(&self) -> impl ExactSizeIterator<Item = &PhysicalGroovePage> {
         self.pages.iter().map(Arc::as_ref)
+    }
+
+    pub(crate) fn is_immutable_extension_of(&self, previous: &Self) -> bool {
+        let mut next_page_index = 0;
+        for previous_page in &previous.pages {
+            while next_page_index < self.pages.len()
+                && self.pages[next_page_index].core_range.start_frame
+                    < previous_page.core_range.start_frame
+            {
+                next_page_index += 1;
+            }
+            let Some(next_page) = self.pages.get(next_page_index) else {
+                return false;
+            };
+            if next_page.core_range != previous_page.core_range
+                || next_page.stored_range != previous_page.stored_range
+                || next_page.content_identity != previous_page.content_identity
+                || next_page
+                    .trace_admission_certificate()
+                    .map(|certificate| certificate.certificate_identity())
+                    != previous_page
+                        .trace_admission_certificate()
+                        .map(|certificate| certificate.certificate_identity())
+            {
+                return false;
+            }
+            next_page_index += 1;
+        }
+        true
     }
 
     /// Resolves one render position without allocation or synchronization.
@@ -1577,7 +1910,7 @@ fn validate_spatial_pyramid(page: &mut PhysicalGroovePage) -> Result<(), PagedGr
 fn validate_page(
     metadata: PhysicalGrooveMetadata,
     available_range: GrooveFrameRange,
-    page: &PhysicalGroovePage,
+    page: &mut PhysicalGroovePage,
     page_index: usize,
 ) -> Result<(), PagedGrooveError> {
     page.core_range.validate()?;
@@ -1615,6 +1948,7 @@ fn validate_page(
     if page.content_identity != page.calculate_content_identity() {
         return Err(PagedGrooveError::PageContentIdentityMismatch { page_index });
     }
+    page.validate_trace_admission(metadata)?;
 
     let halo = u64::from(metadata.required_storage_halo_frames());
     let required_start = page.core_range.start_frame.saturating_sub(halo);
@@ -1675,6 +2009,62 @@ fn validate_overlap(
                 right_page_index,
                 frame,
             });
+        }
+    }
+    let spatial_start = start.saturating_add(u64::from(GROOVE_SPATIAL_FILTER_RADIUS_FRAMES));
+    let spatial_end = end.saturating_sub(u64::from(GROOVE_SPATIAL_FILTER_RADIUS_FRAMES));
+    if spatial_start < spatial_end {
+        let left_levels = left
+            .spatial_pyramid
+            .as_ref()
+            .ok_or(PagedGrooveError::MissingSpatialPyramid)?
+            .levels();
+        let right_levels = right
+            .spatial_pyramid
+            .as_ref()
+            .ok_or(PagedGrooveError::MissingSpatialPyramid)?
+            .levels();
+        if left_levels.len() != right_levels.len() {
+            return Err(PagedGrooveError::InternalPageMap);
+        }
+        for (level_index, (left_level, right_level)) in
+            left_levels.iter().zip(right_levels).enumerate()
+        {
+            let step = u64::from(left_level.source_frame_step());
+            if step == 0 || right_level.source_frame_step() != left_level.source_frame_step() {
+                return Err(PagedGrooveError::InternalPageMap);
+            }
+            let mut frame =
+                align_up(spatial_start, step).ok_or(PagedGrooveError::InternalPageMap)?;
+            while frame < spatial_end {
+                let left_index = frame
+                    .checked_sub(left_level.first_source_frame())
+                    .filter(|offset| offset % step == 0)
+                    .and_then(|offset| usize::try_from(offset / step).ok())
+                    .filter(|index| *index < left_level.lateral_displacement_m().len())
+                    .ok_or(PagedGrooveError::InternalPageMap)?;
+                let right_index = frame
+                    .checked_sub(right_level.first_source_frame())
+                    .filter(|offset| offset % step == 0)
+                    .and_then(|offset| usize::try_from(offset / step).ok())
+                    .filter(|index| *index < right_level.lateral_displacement_m().len())
+                    .ok_or(PagedGrooveError::InternalPageMap)?;
+                if left_level.lateral_displacement_m()[left_index].to_bits()
+                    != right_level.lateral_displacement_m()[right_index].to_bits()
+                    || left_level.vertical_displacement_m()[left_index].to_bits()
+                        != right_level.vertical_displacement_m()[right_index].to_bits()
+                {
+                    return Err(PagedGrooveError::SpatialSeamSampleMismatch {
+                        left_page_index,
+                        right_page_index,
+                        level_index: level_index as u8,
+                        frame,
+                    });
+                }
+                frame = frame
+                    .checked_add(step)
+                    .ok_or(PagedGrooveError::InternalPageMap)?;
+            }
         }
     }
     Ok(())
@@ -1759,6 +2149,8 @@ pub enum PagedGrooveError {
     NonfiniteDisplacement,
     #[error("groove page has no spatial pyramid")]
     MissingSpatialPyramid,
+    #[error("groove page has no trace-admission certificate")]
+    MissingTraceAdmissionCertificate,
     #[error("page {page_index} does not contain the required earlier tracing halo")]
     InsufficientLeftHalo { page_index: usize },
     #[error("page {page_index} contains data before its declared tracing halo")]
@@ -1786,6 +2178,15 @@ pub enum PagedGrooveError {
     SeamSampleMismatch {
         left_page_index: usize,
         right_page_index: usize,
+        frame: u64,
+    },
+    #[error(
+        "pages {left_page_index} and {right_page_index} disagree in spatial level {level_index} at frame {frame}"
+    )]
+    SpatialSeamSampleMismatch {
+        left_page_index: usize,
+        right_page_index: usize,
+        level_index: u8,
         frame: u64,
     },
     #[error("frame {frame} is outside available range {available_range:?}")]
@@ -1831,6 +2232,8 @@ pub enum PagedGrooveError {
     Groove(#[from] GrooveError),
     #[error(transparent)]
     Stylus(#[from] StylusTraceError),
+    #[error(transparent)]
+    TraceAdmission(#[from] GrooveTraceAdmissionError),
 }
 
 #[cfg(test)]
@@ -2551,6 +2954,15 @@ mod tests {
         let geometry = StylusGeometry {
             tracing_radius_m: 10.0e-6,
         };
+        let whole_admission = whole.validated_trace_admission().unwrap();
+        whole_admission
+            .validate_for_active_tracing(geometry)
+            .unwrap();
+        let whole_admission_class = whole_admission.certificate().admission_class();
+        assert_eq!(
+            whole_admission_class,
+            GrooveTraceAdmissionClass::FixedCapPiecewise
+        );
         for position in [
             3.25,
             731.75,
@@ -2560,42 +2972,75 @@ mod tests {
         ] {
             for source_frame_advance in [-20.0, -3.5, 1.0, 8.0, 20.0] {
                 let cached = cache_trace(&cache, position, source_frame_advance);
+                let page = cache
+                    .pages()
+                    .find(|page| page.core_range().contains(position.floor() as u64))
+                    .unwrap();
+                let page_admission_class = page
+                    .validated_trace_admission()
+                    .unwrap()
+                    .certificate()
+                    .admission_class();
+                assert_eq!(
+                    page_admission_class, whole_admission_class,
+                    "position {position}, source advance {source_frame_advance}"
+                );
                 let selection = whole.spatial_level_selection(source_frame_advance).unwrap();
                 let lower = selection.lower();
                 let upper = selection.upper();
                 let meters_per_source_frame = whole.meters_per_frame_at(position);
                 for wall in 0..2 {
-                    let expected = trace_spherical_45_45_wall_multiresolution_contacts(
-                        lower.lateral_displacement_m(),
-                        lower.vertical_displacement_m(),
-                        lower.first_source_frame(),
-                        lower.source_frame_step(),
-                        upper.lateral_displacement_m(),
-                        upper.vertical_displacement_m(),
-                        upper.first_source_frame(),
-                        upper.source_frame_step(),
-                        selection.upper_level_blend(),
-                        wall,
-                        position,
-                        meters_per_source_frame,
-                        geometry,
-                    )
+                    let expected = match whole_admission_class {
+                        GrooveTraceAdmissionClass::StrictConcavity => {
+                            trace_spherical_45_45_wall_multiresolution_contacts_certified_concave(
+                                lower.lateral_displacement_m(),
+                                lower.vertical_displacement_m(),
+                                lower.first_source_frame(),
+                                lower.source_frame_step(),
+                                upper.lateral_displacement_m(),
+                                upper.vertical_displacement_m(),
+                                upper.first_source_frame(),
+                                upper.source_frame_step(),
+                                selection.upper_level_blend(),
+                                wall,
+                                position,
+                                meters_per_source_frame,
+                                geometry,
+                                whole_admission
+                                    .certified_concave_trace_bounds(geometry)
+                                    .unwrap(),
+                            )
+                        }
+                        GrooveTraceAdmissionClass::FixedCapPiecewise => {
+                            trace_spherical_45_45_wall_multiresolution_contacts_certified_piecewise(
+                                lower.lateral_displacement_m(),
+                                lower.vertical_displacement_m(),
+                                lower.first_source_frame(),
+                                lower.source_frame_step(),
+                                upper.lateral_displacement_m(),
+                                upper.vertical_displacement_m(),
+                                upper.first_source_frame(),
+                                upper.source_frame_step(),
+                                selection.upper_level_blend(),
+                                wall,
+                                position,
+                                meters_per_source_frame,
+                                geometry,
+                                whole_admission
+                                    .fixed_cap_piecewise_trace_bounds(geometry)
+                                    .unwrap(),
+                            )
+                        }
+                        rejected => {
+                            panic!("monolithic fixture was not trace-admitted: {rejected:?}")
+                        }
+                    }
                     .unwrap();
                     let actual = cached.wall_contacts[wall];
-                    assert!(
-                        (actual.center_displacement_m - expected.center_displacement_m).abs()
-                            <= 1.0e-12
+                    assert_eq!(
+                        actual, expected,
+                        "position {position}, source advance {source_frame_advance}, wall {wall}"
                     );
-                    assert_eq!(actual.contact_count, expected.contact_count);
-                    let actual = actual.contacts[0];
-                    let expected = expected.contacts[0];
-                    assert!((actual.contact_offset_m - expected.contact_offset_m).abs() <= 1.0e-12);
-                    assert!(
-                        (actual.groove_displacement_m - expected.groove_displacement_m).abs()
-                            <= 1.0e-12
-                    );
-                    assert!((actual.groove_slope - expected.groove_slope).abs() <= 1.0e-12);
-                    assert!((actual.tangent_residual - expected.tangent_residual).abs() <= 1.0e-12);
                 }
             }
         }
@@ -2622,7 +3067,7 @@ mod tests {
     }
 
     #[test]
-    fn trace_rejects_a_halo_that_cannot_support_the_selected_resolution() {
+    fn trace_admission_rejects_a_halo_that_cannot_support_the_policy() {
         let generation = generation(44);
         let declared_halo = 12;
         let metadata = PhysicalGrooveMetadata::new(
@@ -2645,42 +3090,24 @@ mod tests {
         ));
 
         let storage_halo = u64::from(metadata.required_storage_halo_frames());
-        let mut producer =
-            PagedGrooveCacheProducer::new(metadata, PagedGrooveCacheLimits::default()).unwrap();
-        producer
-            .insert_page(page_for_metadata(
-                metadata,
-                0,
-                SEAM_FRAME,
-                0,
-                SEAM_FRAME + storage_halo,
-            ))
-            .unwrap();
-        producer
-            .insert_page(page_for_metadata(
-                metadata,
-                SEAM_FRAME,
-                TOTAL_FRAMES,
-                SEAM_FRAME - storage_halo,
-                TOTAL_FRAMES,
-            ))
-            .unwrap();
-        let cache = producer.publish();
-        let position = SEAM_FRAME as f64 + 0.25;
-        let low_resolution = PagedGrooveRenderRequest::new(generation, position, 1.0).unwrap();
+        let stored_end = SEAM_FRAME + storage_halo;
+        let samples: Vec<_> = (0..stored_end).map(master_sample).collect();
         assert!(matches!(
-            cache.trace(low_resolution, geometry).unwrap(),
-            PagedGrooveTraceResolution::Ready(_)
-        ));
-
-        let high_resolution = PagedGrooveRenderRequest::new(generation, position, 20.0).unwrap();
-        assert!(matches!(
-            cache.trace(high_resolution, geometry),
-            Err(PagedGrooveError::Stylus(
-                StylusTraceError::InsufficientPageHalo {
-                    available_frames: 12,
-                    ..
-                }
+            PhysicalGroovePage::new(
+                metadata,
+                GrooveFrameRange::new(0, SEAM_FRAME).unwrap(),
+                GrooveFrameRange::new(0, stored_end).unwrap(),
+                samples
+                    .iter()
+                    .map(|sample| sample.lateral_displacement_m)
+                    .collect(),
+                samples
+                    .iter()
+                    .map(|sample| sample.vertical_displacement_m)
+                    .collect(),
+            ),
+            Err(PagedGrooveError::TraceAdmission(
+                GrooveTraceAdmissionError::InvalidBinding
             ))
         ));
     }
@@ -3015,5 +3442,30 @@ mod tests {
         changed["pages"][0]["spatialPyramid"]["levels"][0]["lateralDisplacementM"][10] =
             serde_json::json!(0.5);
         assert!(serde_json::from_value::<PagedGrooveAsset>(changed).is_err());
+    }
+
+    #[test]
+    fn direct_page_deserialization_requires_pyramid_and_trace_certificate() {
+        let asset = complete_asset();
+        let value = serde_json::to_value(&asset.pages()[0]).unwrap();
+        let round_trip: PhysicalGroovePage = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            round_trip.content_identity(),
+            asset.pages()[0].content_identity()
+        );
+
+        let mut missing_pyramid = value.clone();
+        missing_pyramid
+            .as_object_mut()
+            .unwrap()
+            .remove("spatialPyramid");
+        assert!(serde_json::from_value::<PhysicalGroovePage>(missing_pyramid).is_err());
+
+        let mut missing_certificate = value;
+        missing_certificate
+            .as_object_mut()
+            .unwrap()
+            .remove("traceAdmissionCertificate");
+        assert!(serde_json::from_value::<PhysicalGroovePage>(missing_certificate).is_err());
     }
 }

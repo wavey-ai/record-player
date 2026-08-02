@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use super::trace_admission::{CertifiedConcaveTraceBounds, CertifiedPiecewiseTraceBounds};
+
 const MIN_TRACING_RADIUS_M: f64 = 0.5e-6;
 const MAX_TRACING_RADIUS_M: f64 = 100.0e-6;
 const MIN_METERS_PER_FRAME: f64 = 1.0e-9;
@@ -11,6 +13,7 @@ const MAX_ROOT_BRACKETS_PER_PIECE: usize = 8;
 const ROOT_SEARCH_STACK_CAPACITY: usize = 64;
 const ROOT_BRACKET_WIDTH_M: f64 = 1.0e-15;
 const MAX_GLOBAL_CONTENDERS: usize = 64;
+const CERTIFIED_CONCAVE_ROOT_ITERATIONS: usize = 64;
 
 /// Maximum envelope-height error accepted by the spherical tracer.
 pub const SPHERICAL_TRACE_HEIGHT_ERROR_BOUND_M: f64 = 1.0e-12;
@@ -29,6 +32,15 @@ pub const SPHERICAL_TRACE_MAX_PIECES: usize = MAX_TRACE_PIECES;
 
 /// Maximum interval-search nodes examined for one spline piece.
 pub const SPHERICAL_TRACE_MAX_ROOT_NODES_PER_PIECE: usize = MAX_ROOT_SEARCH_NODES_PER_PIECE;
+
+/// Maximum stationary-root brackets retained for one spline piece.
+pub const SPHERICAL_TRACE_MAX_ROOT_BRACKETS_PER_PIECE: usize = MAX_ROOT_BRACKETS_PER_PIECE;
+
+/// Maximum global-height contenders retained by one trace.
+pub const SPHERICAL_TRACE_MAX_GLOBAL_CONTENDERS: usize = MAX_GLOBAL_CONTENDERS;
+
+/// Maximum `C(x)` monotone branches for one cubic groove piece.
+pub const SPHERICAL_TRACE_MAX_MONOTONE_BRANCHES_PER_PIECE: usize = 6;
 
 /// Maximum certified same-wall contacts returned by one trace.
 pub const MAX_SPHERICAL_TRACE_CONTACTS_PER_WALL: usize = 8;
@@ -70,7 +82,9 @@ impl StylusGeometry {
             return Err(StylusTraceError::InvalidLevelCoordinates);
         }
         let search_half_span_source_frames =
-            (geometry.tracing_radius_m / meters_per_source_frame).ceil() as usize;
+            positive_ratio_bounds(geometry.tracing_radius_m, meters_per_source_frame)
+                .upper
+                .ceil() as usize;
         if search_half_span_source_frames > MAX_SEARCH_SAMPLES {
             return Err(StylusTraceError::SearchLimitExceeded);
         }
@@ -512,6 +526,119 @@ pub fn trace_spherical_45_45_wall_multiresolution_contacts(
     meters_per_source_frame: f64,
     geometry: StylusGeometry,
 ) -> Result<StylusTraceContactSet, StylusTraceError> {
+    trace_spherical_45_45_wall_multiresolution_contacts_with_proof(
+        lower_lateral_displacement_m,
+        lower_vertical_displacement_m,
+        lower_first_source_frame,
+        lower_source_frame_step,
+        upper_lateral_displacement_m,
+        upper_vertical_displacement_m,
+        upper_first_source_frame,
+        upper_source_frame_step,
+        upper_level_blend,
+        wall_index,
+        absolute_center_frame,
+        meters_per_source_frame,
+        geometry,
+        SphericalTraceProof::Exhaustive,
+    )
+}
+
+/// Uses a recomputed strict-concavity proof for fixed-work tracing.
+///
+/// Only trace-admission lifecycle code can obtain `CertifiedConcaveTraceBounds`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn trace_spherical_45_45_wall_multiresolution_contacts_certified_concave(
+    lower_lateral_displacement_m: &[f32],
+    lower_vertical_displacement_m: &[f32],
+    lower_first_source_frame: u64,
+    lower_source_frame_step: u32,
+    upper_lateral_displacement_m: &[f32],
+    upper_vertical_displacement_m: &[f32],
+    upper_first_source_frame: u64,
+    upper_source_frame_step: u32,
+    upper_level_blend: f64,
+    wall_index: usize,
+    absolute_center_frame: f64,
+    meters_per_source_frame: f64,
+    geometry: StylusGeometry,
+    certified_bounds: CertifiedConcaveTraceBounds,
+) -> Result<StylusTraceContactSet, StylusTraceError> {
+    trace_spherical_45_45_wall_multiresolution_contacts_with_proof(
+        lower_lateral_displacement_m,
+        lower_vertical_displacement_m,
+        lower_first_source_frame,
+        lower_source_frame_step,
+        upper_lateral_displacement_m,
+        upper_vertical_displacement_m,
+        upper_first_source_frame,
+        upper_source_frame_step,
+        upper_level_blend,
+        wall_index,
+        absolute_center_frame,
+        meters_per_source_frame,
+        geometry,
+        SphericalTraceProof::CertifiedConcave(CertifiedConcaveTraceProof::from_admission(
+            certified_bounds,
+        )),
+    )
+}
+
+/// Uses recomputed structural caps for transactional piecewise tracing.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn trace_spherical_45_45_wall_multiresolution_contacts_certified_piecewise(
+    lower_lateral_displacement_m: &[f32],
+    lower_vertical_displacement_m: &[f32],
+    lower_first_source_frame: u64,
+    lower_source_frame_step: u32,
+    upper_lateral_displacement_m: &[f32],
+    upper_vertical_displacement_m: &[f32],
+    upper_first_source_frame: u64,
+    upper_source_frame_step: u32,
+    upper_level_blend: f64,
+    wall_index: usize,
+    absolute_center_frame: f64,
+    meters_per_source_frame: f64,
+    geometry: StylusGeometry,
+    certified_bounds: CertifiedPiecewiseTraceBounds,
+) -> Result<StylusTraceContactSet, StylusTraceError> {
+    trace_spherical_45_45_wall_multiresolution_contacts_with_proof(
+        lower_lateral_displacement_m,
+        lower_vertical_displacement_m,
+        lower_first_source_frame,
+        lower_source_frame_step,
+        upper_lateral_displacement_m,
+        upper_vertical_displacement_m,
+        upper_first_source_frame,
+        upper_source_frame_step,
+        upper_level_blend,
+        wall_index,
+        absolute_center_frame,
+        meters_per_source_frame,
+        geometry,
+        SphericalTraceProof::CertifiedPiecewise(CertifiedPiecewiseTraceProof::from_admission(
+            certified_bounds,
+        )),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn trace_spherical_45_45_wall_multiresolution_contacts_with_proof(
+    lower_lateral_displacement_m: &[f32],
+    lower_vertical_displacement_m: &[f32],
+    lower_first_source_frame: u64,
+    lower_source_frame_step: u32,
+    upper_lateral_displacement_m: &[f32],
+    upper_vertical_displacement_m: &[f32],
+    upper_first_source_frame: u64,
+    upper_source_frame_step: u32,
+    upper_level_blend: f64,
+    wall_index: usize,
+    absolute_center_frame: f64,
+    meters_per_source_frame: f64,
+    geometry: StylusGeometry,
+    proof: SphericalTraceProof,
+) -> Result<StylusTraceContactSet, StylusTraceError> {
     if lower_lateral_displacement_m.len() != lower_vertical_displacement_m.len()
         || upper_lateral_displacement_m.len() != upper_vertical_displacement_m.len()
     {
@@ -541,7 +668,7 @@ pub fn trace_spherical_45_45_wall_multiresolution_contacts(
         upper_lateral_displacement_m.len(),
     )?;
     if upper_level_blend == 0.0 {
-        return trace_spherical_45_45_wall_level_contacts(
+        return trace_spherical_45_45_wall_level_contacts_with_proof(
             lower_lateral_displacement_m,
             lower_vertical_displacement_m,
             lower_first_source_frame,
@@ -552,10 +679,11 @@ pub fn trace_spherical_45_45_wall_multiresolution_contacts(
             absolute_center_frame,
             meters_per_source_frame,
             geometry,
+            proof,
         );
     }
     if upper_level_blend == 1.0 {
-        return trace_spherical_45_45_wall_level_contacts(
+        return trace_spherical_45_45_wall_level_contacts_with_proof(
             upper_lateral_displacement_m,
             upper_vertical_displacement_m,
             upper_first_source_frame,
@@ -566,6 +694,7 @@ pub fn trace_spherical_45_45_wall_multiresolution_contacts(
             absolute_center_frame,
             meters_per_source_frame,
             geometry,
+            proof,
         );
     }
     let domain_first_source_frame = lower_first_source_frame.min(upper_first_source_frame);
@@ -577,11 +706,12 @@ pub fn trace_spherical_45_45_wall_multiresolution_contacts(
     )
     .unwrap_or(usize::MAX);
     let local_center_frame = absolute_center_frame - domain_first_source_frame as f64;
-    trace_spherical_piecewise_contacts(
+    trace_spherical_piecewise_contacts_with_proof(
         domain_sample_count,
         local_center_frame,
         meters_per_source_frame,
         geometry,
+        proof,
         |local_segment_start| {
             let absolute_segment_start = domain_first_source_frame as f64 + local_segment_start;
             let lower_wall = level_combined_cubic_for_source_segment(
@@ -610,7 +740,7 @@ pub fn trace_spherical_45_45_wall_multiresolution_contacts(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn trace_spherical_45_45_wall_level_contacts(
+fn trace_spherical_45_45_wall_level_contacts_with_proof(
     lateral_displacement_m: &[f32],
     vertical_displacement_m: &[f32],
     first_source_frame: u64,
@@ -621,6 +751,7 @@ fn trace_spherical_45_45_wall_level_contacts(
     absolute_center_frame: f64,
     meters_per_source_frame: f64,
     geometry: StylusGeometry,
+    proof: SphericalTraceProof,
 ) -> Result<StylusTraceContactSet, StylusTraceError> {
     let domain_sample_count = usize::try_from(
         last_source_frame
@@ -629,11 +760,12 @@ fn trace_spherical_45_45_wall_level_contacts(
     )
     .unwrap_or(usize::MAX);
     let local_center_frame = absolute_center_frame - first_source_frame as f64;
-    trace_spherical_piecewise_contacts(
+    trace_spherical_piecewise_contacts_with_proof(
         domain_sample_count,
         local_center_frame,
         meters_per_source_frame,
         geometry,
+        proof,
         |local_segment_start| {
             level_combined_cubic_for_source_segment(
                 lateral_displacement_m,
@@ -675,6 +807,66 @@ fn level_last_source_frame(
     first_source_frame
         .checked_add(source_span)
         .ok_or(StylusTraceError::InvalidLevelCoordinates)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SphericalTraceProof {
+    Exhaustive,
+    CertifiedConcave(CertifiedConcaveTraceProof),
+    CertifiedPiecewise(CertifiedPiecewiseTraceProof),
+}
+
+/// Contains only the numerical theorem needed by the monotone solver.
+///
+/// Trace admission owns certificate validation and creates the source bounds.
+#[derive(Debug, Clone, Copy)]
+struct CertifiedConcaveTraceProof {
+    strict_concavity_margin_per_m: f64,
+}
+
+impl CertifiedConcaveTraceProof {
+    fn from_admission(bounds: CertifiedConcaveTraceBounds) -> Self {
+        let strict_concavity_margin_per_m = bounds.strict_concavity_margin_per_m();
+        debug_assert!(strict_concavity_margin_per_m.is_finite());
+        debug_assert!(strict_concavity_margin_per_m > 0.0);
+        Self {
+            strict_concavity_margin_per_m,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CertifiedPiecewiseTraceProof {
+    maximum_trace_pieces: usize,
+    maximum_monotone_branches_per_piece: usize,
+    maximum_endpoint_contenders_per_piece: usize,
+    maximum_root_brackets_per_piece: usize,
+    maximum_root_nodes_per_piece: usize,
+    maximum_retained_contenders: usize,
+    maximum_internal_displacement_join_enclosure_m: f64,
+    height_error_bound_m: f64,
+    contact_position_error_bound_m: f64,
+    groove_slope_error_bound: f64,
+    tangent_residual_error_bound: f64,
+}
+
+impl CertifiedPiecewiseTraceProof {
+    fn from_admission(bounds: CertifiedPiecewiseTraceBounds) -> Self {
+        Self {
+            maximum_trace_pieces: bounds.maximum_trace_pieces(),
+            maximum_monotone_branches_per_piece: bounds.maximum_monotone_branches_per_piece(),
+            maximum_endpoint_contenders_per_piece: bounds.maximum_endpoint_contenders_per_piece(),
+            maximum_root_brackets_per_piece: bounds.maximum_root_brackets_per_piece(),
+            maximum_root_nodes_per_piece: bounds.maximum_root_nodes_per_piece(),
+            maximum_retained_contenders: bounds.maximum_retained_contenders(),
+            maximum_internal_displacement_join_enclosure_m: bounds
+                .maximum_internal_displacement_join_enclosure_m(),
+            height_error_bound_m: bounds.height_error_bound_m(),
+            contact_position_error_bound_m: bounds.contact_position_error_bound_m(),
+            groove_slope_error_bound: bounds.groove_slope_error_bound(),
+            tangent_residual_error_bound: bounds.tangent_residual_error_bound(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -874,6 +1066,13 @@ impl OutwardInterval {
         (lower <= upper).then_some(Self { lower, upper })
     }
 
+    fn hull(self, other: Self) -> Self {
+        Self {
+            lower: self.lower.min(other.lower),
+            upper: self.upper.max(other.upper),
+        }
+    }
+
     fn contains_zero(self) -> bool {
         self.lower <= 0.0 && self.upper >= 0.0
     }
@@ -913,6 +1112,7 @@ struct BestCandidate {
 #[derive(Debug, Clone, Copy)]
 struct CertifiedContender {
     segment_start: f64,
+    frame: OutwardInterval,
     height: OutwardInterval,
     offset_m: OutwardInterval,
     groove_slope: OutwardInterval,
@@ -920,9 +1120,36 @@ struct CertifiedContender {
     contact: StylusTraceContact,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CertifiedTraceOutputBounds {
+    height: OutwardInterval,
+    offset_m: OutwardInterval,
+    groove_slope: OutwardInterval,
+    tangent_residual: OutwardInterval,
+}
+
+impl CertifiedTraceOutputBounds {
+    fn from_contender(contender: CertifiedContender) -> Self {
+        Self {
+            height: contender.height,
+            offset_m: contender.offset_m,
+            groove_slope: contender.groove_slope,
+            tangent_residual: contender.tangent_residual,
+        }
+    }
+
+    fn include(&mut self, contender: CertifiedContender) {
+        self.height = self.height.hull(contender.height);
+        self.offset_m = self.offset_m.hull(contender.offset_m);
+        self.groove_slope = self.groove_slope.hull(contender.groove_slope);
+        self.tangent_residual = self.tangent_residual.hull(contender.tangent_residual);
+    }
+}
+
 impl CertifiedContender {
     const ZERO: Self = Self {
         segment_start: 0.0,
+        frame: OutwardInterval::ZERO,
         height: OutwardInterval::ZERO,
         offset_m: OutwardInterval::ZERO,
         groove_slope: OutwardInterval::ZERO,
@@ -952,8 +1179,15 @@ impl ContenderSet {
         }
     }
 
-    fn insert(&mut self, contender: CertifiedContender) {
-        if self.len < self.entries.len() {
+    /// Retains the contenders with the greatest certified height upper bounds.
+    ///
+    /// `omitted_height_upper` is an upper bound for every contender that this
+    /// fixed-size set does not retain. A caller can certify a global winner
+    /// when that bound is below the winner's certified height lower bound.
+    fn insert(&mut self, contender: CertifiedContender, retention_limit: usize) {
+        debug_assert!(retention_limit > 0);
+        debug_assert!(retention_limit <= self.entries.len());
+        if self.len < retention_limit {
             self.entries[self.len] = contender;
             self.len += 1;
             return;
@@ -973,6 +1207,17 @@ impl ContenderSet {
             self.omitted_height_upper = self.omitted_height_upper.max(contender.height.upper);
         }
     }
+
+    fn certifies_no_omitted_contender_at_or_above(&self, height_lower_bound: f64) -> bool {
+        self.omitted_height_upper < height_lower_bound
+    }
+}
+
+fn contender_can_reach_selected_height(
+    contender_height: OutwardInterval,
+    selected_height_lower: f64,
+) -> bool {
+    contender_height.upper >= selected_height_lower
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1006,6 +1251,685 @@ impl RootBrackets {
     }
 }
 
+fn trace_spherical_piecewise_contacts_with_proof<F>(
+    sample_count: usize,
+    center_frame: f64,
+    meters_per_frame: f64,
+    geometry: StylusGeometry,
+    proof: SphericalTraceProof,
+    cubic_for_segment: F,
+) -> Result<StylusTraceContactSet, StylusTraceError>
+where
+    F: Fn(f64) -> Cubic,
+{
+    match proof {
+        SphericalTraceProof::Exhaustive => trace_spherical_piecewise_contacts(
+            sample_count,
+            center_frame,
+            meters_per_frame,
+            geometry,
+            cubic_for_segment,
+        ),
+        SphericalTraceProof::CertifiedConcave(certified) => {
+            trace_spherical_piecewise_contacts_certified_concave(
+                sample_count,
+                center_frame,
+                meters_per_frame,
+                geometry,
+                certified,
+                &cubic_for_segment,
+            )
+        }
+        SphericalTraceProof::CertifiedPiecewise(certified) => {
+            trace_spherical_piecewise_contacts_certified_piecewise(
+                sample_count,
+                center_frame,
+                meters_per_frame,
+                geometry,
+                certified,
+                &cubic_for_segment,
+            )
+        }
+    }
+}
+
+fn trace_spherical_piecewise_contacts_certified_concave<F>(
+    sample_count: usize,
+    center_frame: f64,
+    meters_per_frame: f64,
+    geometry: StylusGeometry,
+    proof: CertifiedConcaveTraceProof,
+    cubic_for_segment: &F,
+) -> Result<StylusTraceContactSet, StylusTraceError>
+where
+    F: Fn(f64) -> Cubic,
+{
+    let geometry = geometry.validate()?;
+    if sample_count < 4 {
+        return Err(StylusTraceError::InsufficientSamples);
+    }
+    if !center_frame.is_finite() {
+        return Err(StylusTraceError::InvalidCenterFrame);
+    }
+    if !meters_per_frame.is_finite() || meters_per_frame < MIN_METERS_PER_FRAME {
+        return Err(StylusTraceError::InvalidSpatialStep);
+    }
+
+    let radius = geometry.tracing_radius_m;
+    let radius_frames = positive_ratio_bounds(radius, meters_per_frame);
+    let half_span_frames = radius_frames.upper.ceil() as usize;
+    if half_span_frames > MAX_SEARCH_SAMPLES {
+        return Err(StylusTraceError::SearchLimitExceeded);
+    }
+    let center_map_derivative_lower = OutwardInterval::point(radius)
+        .multiply(OutwardInterval::point(proof.strict_concavity_margin_per_m))
+        .lower;
+    if !center_map_derivative_lower.is_finite() || center_map_derivative_lower <= 0.0 {
+        return Err(StylusTraceError::StationaryContactNotIsolated);
+    }
+
+    let mut root = trace_search_frame_bounds(center_frame, radius, meters_per_frame);
+    if !root.lower.is_finite() || !root.upper.is_finite() {
+        return Err(StylusTraceError::InvalidCenterFrame);
+    }
+    for _ in 0..CERTIFIED_CONCAVE_ROOT_ITERATIONS {
+        if physical_interval_width_upper(root, meters_per_frame) <= ROOT_BRACKET_WIDTH_M {
+            break;
+        }
+        let midpoint = root.midpoint();
+        if midpoint == root.lower || midpoint == root.upper {
+            break;
+        }
+        let segment_start = midpoint.floor();
+        let cubic = cubic_for_segment(segment_start);
+        if !cubic.is_finite() {
+            return Err(StylusTraceError::InvalidGrooveDisplacement);
+        }
+        let residual = contact_center_map_residual_bounds(
+            cubic,
+            segment_start,
+            OutwardInterval::point(midpoint - segment_start),
+            center_frame,
+            meters_per_frame,
+            radius,
+        );
+        if !residual.lower.is_finite() || !residual.upper.is_finite() {
+            return Err(StylusTraceError::StationaryContactNotIsolated);
+        }
+        if residual.upper < 0.0 {
+            root.lower = midpoint;
+            continue;
+        }
+        if residual.lower > 0.0 {
+            root.upper = midpoint;
+            continue;
+        }
+
+        let maximum_left_distance =
+            nonnegative_ratio_upper(residual.upper.max(0.0), center_map_derivative_lower);
+        let maximum_right_distance =
+            nonnegative_ratio_upper((-residual.lower).max(0.0), center_map_derivative_lower);
+        let contracted = OutwardInterval::ordered(
+            outward_lower(midpoint - maximum_left_distance),
+            outward_upper(midpoint + maximum_right_distance),
+        );
+        let Some(contracted) = root.intersection(contracted) else {
+            return Err(StylusTraceError::StationaryContactNotIsolated);
+        };
+        if contracted.lower == root.lower && contracted.upper == root.upper {
+            return Err(StylusTraceError::StationaryContactNotIsolated);
+        }
+        root = contracted;
+    }
+    if physical_interval_width_upper(root, meters_per_frame) > ROOT_BRACKET_WIDTH_M {
+        return Err(StylusTraceError::StationaryContactNotIsolated);
+    }
+
+    let contact_frame = root.midpoint();
+    let segment_start = contact_frame.floor();
+    let fraction = contact_frame - segment_start;
+    let cubic = cubic_for_segment(segment_start);
+    if !cubic.is_finite() {
+        return Err(StylusTraceError::InvalidGrooveDisplacement);
+    }
+    let groove_displacement_m = cubic.value(fraction);
+    let groove_slope = cubic.slope_per_frame(fraction) / meters_per_frame;
+    if !groove_displacement_m.is_finite() || !groove_slope.is_finite() {
+        return Err(StylusTraceError::InvalidGrooveDisplacement);
+    }
+    let slope_norm = groove_slope.hypot(1.0);
+    let contact_offset_m = radius * groove_slope / slope_norm;
+    let circle_height_m = radius / slope_norm;
+    let circle_slope = contact_offset_m / circle_height_m;
+    let tangent_residual = groove_slope - circle_slope;
+    let height_m = groove_displacement_m + circle_height_m;
+    let output_bounds = certified_concave_output_bounds(
+        root,
+        center_frame,
+        meters_per_frame,
+        radius,
+        cubic_for_segment,
+    )?;
+    if interval_error_from_value(output_bounds.height, height_m)
+        > SPHERICAL_TRACE_HEIGHT_ERROR_BOUND_M
+    {
+        return Err(StylusTraceError::EnvelopeHeightBoundNotMet);
+    }
+    if interval_error_from_value(output_bounds.offset_m, contact_offset_m)
+        > SPHERICAL_TRACE_CONTACT_POSITION_ERROR_BOUND_M
+    {
+        return Err(StylusTraceError::StationaryContactNotIsolated);
+    }
+    if interval_error_from_value(output_bounds.groove_slope, groove_slope)
+        > SPHERICAL_TRACE_GROOVE_SLOPE_ERROR_BOUND
+    {
+        return Err(StylusTraceError::GrooveSlopeBoundNotMet);
+    }
+    if interval_error_from_value(output_bounds.tangent_residual, tangent_residual)
+        > SPHERICAL_TRACE_TANGENT_RESIDUAL_ERROR_BOUND
+    {
+        return Err(StylusTraceError::TangentResidualBoundNotMet);
+    }
+
+    let mut contacts = [StylusTraceContact::default(); MAX_SPHERICAL_TRACE_CONTACTS_PER_WALL];
+    contacts[0] = StylusTraceContact {
+        contact_offset_m,
+        groove_displacement_m,
+        groove_slope,
+        tangent_residual,
+    };
+    Ok(StylusTraceContactSet {
+        center_displacement_m: height_m - radius,
+        contact_count: 1,
+        contacts,
+    })
+}
+
+fn trace_spherical_piecewise_contacts_certified_piecewise<F>(
+    sample_count: usize,
+    center_frame: f64,
+    meters_per_frame: f64,
+    geometry: StylusGeometry,
+    proof: CertifiedPiecewiseTraceProof,
+    cubic_for_segment: &F,
+) -> Result<StylusTraceContactSet, StylusTraceError>
+where
+    F: Fn(f64) -> Cubic,
+{
+    let geometry = geometry.validate()?;
+    if sample_count < 4 {
+        return Err(StylusTraceError::InsufficientSamples);
+    }
+    if !center_frame.is_finite() {
+        return Err(StylusTraceError::InvalidCenterFrame);
+    }
+    if !meters_per_frame.is_finite() || meters_per_frame < MIN_METERS_PER_FRAME {
+        return Err(StylusTraceError::InvalidSpatialStep);
+    }
+    if proof.maximum_trace_pieces == 0
+        || proof.maximum_trace_pieces > MAX_TRACE_PIECES
+        || proof.maximum_monotone_branches_per_piece == 0
+        || proof.maximum_monotone_branches_per_piece
+            > SPHERICAL_TRACE_MAX_MONOTONE_BRANCHES_PER_PIECE
+        || proof.maximum_endpoint_contenders_per_piece == 0
+        || proof.maximum_endpoint_contenders_per_piece > 2
+        || proof.maximum_root_brackets_per_piece == 0
+        || proof.maximum_root_brackets_per_piece > MAX_ROOT_BRACKETS_PER_PIECE
+        || proof.maximum_root_nodes_per_piece == 0
+        || proof.maximum_root_nodes_per_piece > MAX_ROOT_SEARCH_NODES_PER_PIECE
+        || proof.maximum_retained_contenders == 0
+        || proof.maximum_retained_contenders > MAX_GLOBAL_CONTENDERS
+        || !proof
+            .maximum_internal_displacement_join_enclosure_m
+            .is_finite()
+        || proof.maximum_internal_displacement_join_enclosure_m < 0.0
+        || proof.maximum_internal_displacement_join_enclosure_m > proof.height_error_bound_m
+        || certified_structural_contender_bound(proof).is_none()
+    {
+        return Err(StylusTraceError::SearchLimitExceeded);
+    }
+    let maximum_structural_contenders =
+        certified_structural_contender_bound(proof).ok_or(StylusTraceError::SearchLimitExceeded)?;
+
+    let radius = geometry.tracing_radius_m;
+    let radius_frames = positive_ratio_bounds(radius, meters_per_frame);
+    let half_span_frames = radius_frames.upper.ceil() as usize;
+    if half_span_frames > MAX_SEARCH_SAMPLES {
+        return Err(StylusTraceError::SearchLimitExceeded);
+    }
+    let search = trace_search_frame_bounds(center_frame, radius, meters_per_frame);
+    let search_lower = search.lower;
+    let search_upper = search.upper;
+    if !search_lower.is_finite() || !search_upper.is_finite() {
+        return Err(StylusTraceError::InvalidCenterFrame);
+    }
+
+    let mut best: Option<BestCandidate> = None;
+    let mut contenders = ContenderSet::new();
+    let mut processed_contenders = 0_usize;
+    let mut process_candidate = |candidate: TraceCandidate| {
+        processed_contenders = processed_contenders
+            .checked_add(1)
+            .ok_or(StylusTraceError::SearchLimitExceeded)?;
+        if processed_contenders > maximum_structural_contenders {
+            return Err(StylusTraceError::SearchLimitExceeded);
+        }
+        let fraction = candidate.fraction.midpoint();
+        let contact_offset_m = candidate_offset_m(
+            candidate.segment_start,
+            fraction,
+            center_frame,
+            meters_per_frame,
+            radius,
+        );
+        let height_m = candidate.cubic.value(fraction) + circle_height(radius, contact_offset_m);
+        if !height_m.is_finite() {
+            return Err(StylusTraceError::InvalidGrooveDisplacement);
+        }
+        let contender = certified_contender(candidate, center_frame, meters_per_frame, radius);
+        if !contender.height.lower.is_finite() || !contender.height.upper.is_finite() {
+            return Err(StylusTraceError::InvalidGrooveDisplacement);
+        }
+        contenders.insert(contender, proof.maximum_retained_contenders);
+        let replace = best.is_none_or(|current| {
+            height_m > current.height_m
+                || (height_m == current.height_m && contact_offset_m < current.contact_offset_m)
+        });
+        if replace {
+            best = Some(BestCandidate {
+                candidate,
+                fraction,
+                contact_offset_m,
+                height_m,
+            });
+        }
+        Ok(())
+    };
+    for_each_nonsmooth_join_candidate(
+        search_lower,
+        search_upper,
+        proof.maximum_trace_pieces,
+        proof.maximum_endpoint_contenders_per_piece,
+        cubic_for_segment,
+        &mut process_candidate,
+    )?;
+    let mut segment_start = search_lower.floor();
+    for piece_index in 0..proof.maximum_trace_pieces {
+        let fraction_lower = (search_lower - segment_start).clamp(0.0, 1.0);
+        let fraction_upper = (search_upper - segment_start).clamp(0.0, 1.0);
+        if fraction_upper > fraction_lower {
+            let cubic = cubic_for_segment(segment_start);
+            if !cubic.is_finite() {
+                return Err(StylusTraceError::InvalidGrooveDisplacement);
+            }
+            let roots = isolate_contact_center_roots(
+                cubic,
+                segment_start,
+                center_frame,
+                meters_per_frame,
+                radius,
+                OutwardInterval::ordered(fraction_lower, fraction_upper),
+                proof,
+            )?;
+            if roots.len > proof.maximum_monotone_branches_per_piece
+                || roots.len > proof.maximum_root_brackets_per_piece
+            {
+                return Err(StylusTraceError::StationaryContactNotIsolated);
+            }
+            for root in roots.brackets[..roots.len].iter().copied() {
+                process_candidate(TraceCandidate {
+                    segment_start,
+                    fraction: root,
+                    cubic,
+                })?;
+            }
+        }
+        let next_segment = segment_start + 1.0;
+        if next_segment >= search_upper {
+            break;
+        }
+        if next_segment == segment_start {
+            return Err(StylusTraceError::InvalidCenterFrame);
+        }
+        segment_start = next_segment;
+        if piece_index + 1 == proof.maximum_trace_pieces {
+            return Err(StylusTraceError::SearchLimitExceeded);
+        }
+    }
+
+    let best = best.ok_or(StylusTraceError::StationaryContactNotIsolated)?;
+    let selected_height_bounds = candidate_height_bounds(
+        TraceCandidate {
+            fraction: OutwardInterval::point(best.fraction),
+            ..best.candidate
+        },
+        center_frame,
+        meters_per_frame,
+        radius,
+    );
+    if !selected_height_bounds.lower.is_finite() || !selected_height_bounds.upper.is_finite() {
+        return Err(StylusTraceError::InvalidGrooveDisplacement);
+    }
+    if !contenders.certifies_no_omitted_contender_at_or_above(selected_height_bounds.lower) {
+        return Err(StylusTraceError::ContactHeightOrderNotIsolated);
+    }
+
+    let mut global_height_upper = selected_height_bounds.upper;
+    let mut selected = [CertifiedContender::ZERO; MAX_SPHERICAL_TRACE_CONTACTS_PER_WALL];
+    let mut selected_len = 0;
+    for contender in contenders.entries[..contenders.len].iter().copied() {
+        global_height_upper = global_height_upper.max(contender.height.upper);
+        if !contender_can_reach_selected_height(contender.height, selected_height_bounds.lower) {
+            continue;
+        }
+        if interval_error_from_value(contender.offset_m, contender.contact.contact_offset_m)
+            > proof.contact_position_error_bound_m
+        {
+            return Err(StylusTraceError::StationaryContactNotIsolated);
+        }
+        if interval_error_from_value(contender.groove_slope, contender.contact.groove_slope)
+            > proof.groove_slope_error_bound
+        {
+            return Err(StylusTraceError::GrooveSlopeBoundNotMet);
+        }
+        if interval_error_from_value(
+            contender.tangent_residual,
+            contender.contact.tangent_residual,
+        ) > proof.tangent_residual_error_bound
+        {
+            return Err(StylusTraceError::TangentResidualBoundNotMet);
+        }
+        insert_global_contact(
+            &mut selected,
+            &mut selected_len,
+            contender,
+            radius,
+            proof.contact_position_error_bound_m,
+            proof.groove_slope_error_bound,
+            proof.tangent_residual_error_bound,
+        )?;
+        if selected_len > 1 {
+            return Err(StylusTraceError::ContactHeightOrderNotIsolated);
+        }
+    }
+    let certified_height_error_upper = outward_sum_upper(
+        outward_difference_upper(global_height_upper, selected_height_bounds.lower),
+        proof.maximum_internal_displacement_join_enclosure_m,
+    );
+    if certified_height_error_upper > proof.height_error_bound_m {
+        return Err(StylusTraceError::EnvelopeHeightBoundNotMet);
+    }
+    if selected_len == 0 {
+        return Err(StylusTraceError::StationaryContactNotIsolated);
+    }
+    let mut contacts = [StylusTraceContact::default(); MAX_SPHERICAL_TRACE_CONTACTS_PER_WALL];
+    contacts[0] = selected[0].contact;
+    Ok(StylusTraceContactSet {
+        center_displacement_m: best.height_m - radius,
+        contact_count: 1,
+        contacts,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn isolate_contact_center_roots(
+    cubic: Cubic,
+    segment_start: f64,
+    center_frame: f64,
+    meters_per_frame: f64,
+    radius: f64,
+    domain: OutwardInterval,
+    proof: CertifiedPiecewiseTraceProof,
+) -> Result<RootBrackets, StylusTraceError> {
+    let mut roots = RootBrackets::new();
+    let mut stack = [OutwardInterval::ZERO; ROOT_SEARCH_STACK_CAPACITY];
+    stack[0] = domain;
+    let mut stack_len = 1;
+    while stack_len > 0 {
+        stack_len -= 1;
+        let mut interval = stack[stack_len];
+        roots.searched_nodes += 1;
+        if roots.searched_nodes > proof.maximum_root_nodes_per_piece {
+            return Err(StylusTraceError::StationaryContactNotIsolated);
+        }
+        let residual = contact_center_map_residual_bounds(
+            cubic,
+            segment_start,
+            interval,
+            center_frame,
+            meters_per_frame,
+            radius,
+        );
+        if !residual.contains_zero() {
+            continue;
+        }
+        let midpoint = interval.midpoint();
+        let derivative =
+            contact_center_map_derivative_bounds(cubic, interval, meters_per_frame, radius);
+        if derivative.lower.is_finite() && derivative.upper.is_finite() {
+            if let Some(quotient) = contact_center_map_residual_bounds(
+                cubic,
+                segment_start,
+                OutwardInterval::point(midpoint),
+                center_frame,
+                meters_per_frame,
+                radius,
+            )
+            .divide_by_nonzero(derivative)
+            {
+                let newton = OutwardInterval::point(midpoint).subtract(quotient);
+                let Some(contracted) = interval.intersection(newton) else {
+                    continue;
+                };
+                if contracted.upper - contracted.lower < (interval.upper - interval.lower) * 0.875 {
+                    interval = contracted;
+                }
+            }
+        }
+        let physical_width = physical_interval_width_upper(interval, meters_per_frame);
+        let midpoint = interval.midpoint();
+        if physical_width <= ROOT_BRACKET_WIDTH_M
+            || midpoint == interval.lower
+            || midpoint == interval.upper
+        {
+            let derivative =
+                contact_center_map_derivative_bounds(cubic, interval, meters_per_frame, radius);
+            if derivative.contains_zero() {
+                return Err(StylusTraceError::StationaryContactNotIsolated);
+            }
+            roots.push_or_merge(interval)?;
+            if roots.len > proof.maximum_root_brackets_per_piece
+                || roots.len > proof.maximum_monotone_branches_per_piece
+            {
+                return Err(StylusTraceError::StationaryContactNotIsolated);
+            }
+            continue;
+        }
+        if stack_len + 2 > stack.len() {
+            return Err(StylusTraceError::StationaryContactNotIsolated);
+        }
+        stack[stack_len] = OutwardInterval::ordered(midpoint, interval.upper);
+        stack[stack_len + 1] = OutwardInterval::ordered(interval.lower, midpoint);
+        stack_len += 2;
+    }
+    Ok(roots)
+}
+
+fn contact_center_map_derivative_bounds(
+    cubic: Cubic,
+    fraction: OutwardInterval,
+    meters_per_frame: f64,
+    radius: f64,
+) -> OutwardInterval {
+    let meters_per_frame = OutwardInterval::point(meters_per_frame);
+    let groove_slope = cubic
+        .slope_bounds(fraction)
+        .divide_by_positive(meters_per_frame);
+    let normalized_derivative = normalized_slope_derivative_bounds(groove_slope);
+    let groove_curvature = OutwardInterval::point(cubic.a)
+        .multiply(OutwardInterval::point(6.0))
+        .multiply(fraction)
+        .add(OutwardInterval::point(cubic.b).multiply(OutwardInterval::point(2.0)))
+        .divide_by_positive(meters_per_frame.multiply(meters_per_frame));
+    OutwardInterval::point(1.0).subtract(
+        OutwardInterval::point(radius)
+            .multiply(groove_curvature)
+            .multiply(normalized_derivative),
+    )
+}
+
+fn normalized_slope_derivative_bounds(slope: OutwardInterval) -> OutwardInterval {
+    let maximum_absolute = slope.lower.abs().max(slope.upper.abs());
+    let minimum_absolute = if slope.contains_zero() {
+        0.0
+    } else {
+        slope.lower.abs().min(slope.upper.abs())
+    };
+    let derivative = |absolute_slope: f64| {
+        let slope = OutwardInterval::point(absolute_slope);
+        let norm = OutwardInterval::point(1.0)
+            .add(slope.multiply(slope))
+            .sqrt_nonnegative();
+        OutwardInterval::point(1.0).divide_by_positive(norm.multiply(norm).multiply(norm))
+    };
+    let lower = derivative(maximum_absolute);
+    let upper = derivative(minimum_absolute);
+    OutwardInterval::ordered(lower.lower, upper.upper)
+}
+
+fn positive_ratio_bounds(numerator: f64, denominator: f64) -> OutwardInterval {
+    OutwardInterval::point(numerator).divide_by_positive(OutwardInterval::point(denominator))
+}
+
+fn nonnegative_ratio_upper(numerator: f64, positive_denominator: f64) -> f64 {
+    debug_assert!(numerator >= 0.0);
+    debug_assert!(positive_denominator > 0.0);
+    OutwardInterval::point(numerator)
+        .divide_by_positive(OutwardInterval::point(positive_denominator))
+        .upper
+}
+
+fn physical_interval_width_upper(interval: OutwardInterval, meters_per_frame: f64) -> f64 {
+    OutwardInterval::point(interval.upper)
+        .subtract(OutwardInterval::point(interval.lower))
+        .multiply(OutwardInterval::point(meters_per_frame))
+        .upper
+}
+
+fn outward_difference_upper(upper_value: f64, lower_value: f64) -> f64 {
+    OutwardInterval::point(upper_value)
+        .subtract(OutwardInterval::point(lower_value))
+        .upper
+}
+
+fn outward_sum_upper(first: f64, second: f64) -> f64 {
+    OutwardInterval::point(first)
+        .add(OutwardInterval::point(second))
+        .upper
+}
+
+fn certified_structural_contender_bound(proof: CertifiedPiecewiseTraceProof) -> Option<usize> {
+    let maximum_roots_per_piece = proof
+        .maximum_monotone_branches_per_piece
+        .min(proof.maximum_root_brackets_per_piece);
+    proof.maximum_trace_pieces.checked_mul(
+        maximum_roots_per_piece.checked_add(proof.maximum_endpoint_contenders_per_piece)?,
+    )
+}
+
+fn trace_search_frame_bounds(
+    center_frame: f64,
+    radius: f64,
+    meters_per_frame: f64,
+) -> OutwardInterval {
+    let radius_frames = positive_ratio_bounds(radius, meters_per_frame);
+    let center = OutwardInterval::point(center_frame);
+    OutwardInterval::ordered(
+        center.subtract(radius_frames).lower,
+        center.add(radius_frames).upper,
+    )
+}
+
+fn contact_center_map_residual_bounds(
+    cubic: Cubic,
+    segment_start: f64,
+    fraction: OutwardInterval,
+    center_frame: f64,
+    meters_per_frame: f64,
+    radius: f64,
+) -> OutwardInterval {
+    let meters_per_frame = OutwardInterval::point(meters_per_frame);
+    let groove_slope = cubic
+        .slope_bounds(fraction)
+        .divide_by_positive(meters_per_frame);
+    let normalized_slope = normalized_slope_bounds(groove_slope);
+    let radius_frames = OutwardInterval::point(radius).divide_by_positive(meters_per_frame);
+    OutwardInterval::point(segment_start)
+        .subtract(OutwardInterval::point(center_frame))
+        .add(fraction)
+        .subtract(normalized_slope.multiply(radius_frames))
+}
+
+fn normalized_slope_bounds(slope: OutwardInterval) -> OutwardInterval {
+    let normalized = |value: f64| {
+        let value = OutwardInterval::point(value);
+        let norm = OutwardInterval::point(1.0)
+            .add(value.multiply(value))
+            .sqrt_nonnegative();
+        value.divide_by_positive(norm)
+    };
+    let lower = normalized(slope.lower);
+    let upper = normalized(slope.upper);
+    OutwardInterval::ordered(lower.lower, upper.upper)
+}
+
+fn certified_concave_output_bounds<F>(
+    root_frame: OutwardInterval,
+    center_frame: f64,
+    meters_per_frame: f64,
+    radius: f64,
+    cubic_for_segment: &F,
+) -> Result<CertifiedTraceOutputBounds, StylusTraceError>
+where
+    F: Fn(f64) -> Cubic,
+{
+    let final_segment = root_frame.upper.floor();
+    let mut segment_start = root_frame.lower.floor();
+    let mut output: Option<CertifiedTraceOutputBounds> = None;
+    for _ in 0..3 {
+        if segment_start > final_segment {
+            break;
+        }
+        let cubic = cubic_for_segment(segment_start);
+        if !cubic.is_finite() {
+            return Err(StylusTraceError::InvalidGrooveDisplacement);
+        }
+        let fraction = OutwardInterval::ordered(
+            (root_frame.lower - segment_start).clamp(0.0, 1.0),
+            (root_frame.upper - segment_start).clamp(0.0, 1.0),
+        );
+        let contender = certified_contender(
+            TraceCandidate {
+                segment_start,
+                fraction,
+                cubic,
+            },
+            center_frame,
+            meters_per_frame,
+            radius,
+        );
+        match &mut output {
+            Some(output) => output.include(contender),
+            None => output = Some(CertifiedTraceOutputBounds::from_contender(contender)),
+        }
+        segment_start += 1.0;
+    }
+    if segment_start <= final_segment {
+        return Err(StylusTraceError::StationaryContactNotIsolated);
+    }
+    output.ok_or(StylusTraceError::StationaryContactNotIsolated)
+}
+
 fn trace_spherical_piecewise_contacts<F>(
     sample_count: usize,
     center_frame: f64,
@@ -1028,7 +1952,7 @@ where
     }
 
     let radius = geometry.tracing_radius_m;
-    let half_span_frames = (radius / meters_per_frame).ceil() as usize;
+    let half_span_frames = positive_ratio_bounds(radius, meters_per_frame).upper.ceil() as usize;
     if half_span_frames > MAX_SEARCH_SAMPLES {
         return Err(StylusTraceError::SearchLimitExceeded);
     }
@@ -1052,7 +1976,7 @@ where
         if !contender.height.lower.is_finite() || !contender.height.upper.is_finite() {
             return Err(StylusTraceError::InvalidGrooveDisplacement);
         }
-        contenders.insert(contender);
+        contenders.insert(contender, MAX_GLOBAL_CONTENDERS);
         let replace = best.is_none_or(|current| {
             height_m > current.height_m
                 || (height_m == current.height_m && contact_offset_m < current.contact_offset_m)
@@ -1067,16 +1991,15 @@ where
         }
         Ok(())
     };
-    let center_segment = center_frame.floor();
-    let center_cubic = cubic_for_segment(center_segment);
-    if !center_cubic.is_finite() {
-        return Err(StylusTraceError::InvalidGrooveDisplacement);
-    }
-    process_candidate(TraceCandidate {
-        segment_start: center_segment,
-        fraction: OutwardInterval::point(center_frame - center_segment),
-        cubic: center_cubic,
-    })?;
+    let search = trace_search_frame_bounds(center_frame, radius, meters_per_frame);
+    for_each_nonsmooth_join_candidate(
+        search.lower,
+        search.upper,
+        MAX_TRACE_PIECES,
+        2,
+        &cubic_for_segment,
+        &mut process_candidate,
+    )?;
     for_each_trace_candidate(
         center_frame,
         meters_per_frame,
@@ -1106,7 +2029,7 @@ where
     let mut selected_len = 0;
     for contender in contenders.entries[..contenders.len].iter().copied() {
         global_height_upper = global_height_upper.max(contender.height.upper);
-        if contender.height.upper < selected_height_bounds.lower {
+        if !contender_can_reach_selected_height(contender.height, selected_height_bounds.lower) {
             continue;
         }
         if interval_error_from_value(contender.offset_m, contender.contact.contact_offset_m)
@@ -1130,15 +2053,18 @@ where
             &mut selected,
             &mut selected_len,
             contender,
-            center_frame,
-            meters_per_frame,
             radius,
+            SPHERICAL_TRACE_CONTACT_POSITION_ERROR_BOUND_M,
+            SPHERICAL_TRACE_GROOVE_SLOPE_ERROR_BOUND,
+            SPHERICAL_TRACE_TANGENT_RESIDUAL_ERROR_BOUND,
         )?;
         if selected_len > 1 {
             return Err(StylusTraceError::ContactHeightOrderNotIsolated);
         }
     }
-    if global_height_upper - selected_height_bounds.lower > SPHERICAL_TRACE_HEIGHT_ERROR_BOUND_M {
+    if outward_difference_upper(global_height_upper, selected_height_bounds.lower)
+        > SPHERICAL_TRACE_HEIGHT_ERROR_BOUND_M
+    {
         return Err(StylusTraceError::EnvelopeHeightBoundNotMet);
     }
     if selected_len == 0 {
@@ -1159,16 +2085,18 @@ fn insert_global_contact(
     selected: &mut [CertifiedContender; MAX_SPHERICAL_TRACE_CONTACTS_PER_WALL],
     selected_len: &mut usize,
     contender: CertifiedContender,
-    center_frame: f64,
-    meters_per_frame: f64,
     radius: f64,
+    contact_position_error_bound_m: f64,
+    groove_slope_error_bound: f64,
+    tangent_residual_error_bound: f64,
 ) -> Result<(), StylusTraceError> {
     for existing in &mut selected[..*selected_len] {
-        if existing.offset_m.intersection(contender.offset_m).is_none() {
+        let offsets_overlap = existing.offset_m.intersection(contender.offset_m).is_some();
+        if !same_stationary_contact(*existing, contender, contact_position_error_bound_m) {
+            if offsets_overlap {
+                return Err(StylusTraceError::ContactOrderNotIsolated);
+            }
             continue;
-        }
-        if !same_stationary_contact(*existing, contender, center_frame, meters_per_frame, radius) {
-            return Err(StylusTraceError::ContactOrderNotIsolated);
         }
         let existing_height = existing.contact.groove_displacement_m
             + circle_height(radius, existing.contact.contact_offset_m);
@@ -1180,6 +2108,7 @@ fn insert_global_contact(
         }
         existing.height.lower = existing.height.lower.min(contender.height.lower);
         existing.height.upper = existing.height.upper.max(contender.height.upper);
+        existing.frame = existing.frame.hull(contender.frame);
         existing.offset_m.lower = existing.offset_m.lower.min(contender.offset_m.lower);
         existing.offset_m.upper = existing.offset_m.upper.max(contender.offset_m.upper);
         existing.groove_slope.lower = existing
@@ -1198,6 +2127,16 @@ fn insert_global_contact(
             .tangent_residual
             .upper
             .max(contender.tangent_residual.upper);
+        if interval_error_from_value(existing.groove_slope, existing.contact.groove_slope)
+            > groove_slope_error_bound
+        {
+            return Err(StylusTraceError::GrooveSlopeBoundNotMet);
+        }
+        if interval_error_from_value(existing.tangent_residual, existing.contact.tangent_residual)
+            > tangent_residual_error_bound
+        {
+            return Err(StylusTraceError::TangentResidualBoundNotMet);
+        }
         return Ok(());
     }
     if *selected_len == selected.len() {
@@ -1226,23 +2165,68 @@ fn insert_global_contact(
 fn same_stationary_contact(
     first: CertifiedContender,
     second: CertifiedContender,
-    center_frame: f64,
-    meters_per_frame: f64,
-    radius: f64,
+    contact_position_error_bound_m: f64,
 ) -> bool {
-    if first.segment_start == second.segment_start {
+    if first.frame.intersection(second.frame).is_some() {
         return true;
     }
-    if (first.segment_start - second.segment_start).abs() != 1.0 {
+    if (first.segment_start - second.segment_start).abs() > 1.0 {
         return false;
     }
-    let boundary_frame = first.segment_start.max(second.segment_start);
-    let boundary_offset =
-        ((boundary_frame - center_frame) * meters_per_frame).clamp(-radius, radius);
-    first.offset_m.lower <= boundary_offset
-        && boundary_offset <= first.offset_m.upper
-        && second.offset_m.lower <= boundary_offset
-        && boundary_offset <= second.offset_m.upper
+    let position_hull = first.offset_m.hull(second.offset_m);
+    outward_difference_upper(position_hull.upper, position_hull.lower)
+        <= contact_position_error_bound_m
+}
+
+fn for_each_nonsmooth_join_candidate<F, V>(
+    search_lower: f64,
+    search_upper: f64,
+    maximum_pieces: usize,
+    maximum_endpoint_contenders_per_piece: usize,
+    cubic_for_segment: &F,
+    visit: &mut V,
+) -> Result<(), StylusTraceError>
+where
+    F: Fn(f64) -> Cubic,
+    V: FnMut(TraceCandidate) -> Result<(), StylusTraceError>,
+{
+    if maximum_endpoint_contenders_per_piece < 2 {
+        return Err(StylusTraceError::SearchLimitExceeded);
+    }
+    let mut join_frame = search_lower.ceil();
+    for join_index in 0..maximum_pieces {
+        if join_frame > search_upper {
+            return Ok(());
+        }
+        let left = cubic_for_segment(join_frame - 1.0);
+        let right = cubic_for_segment(join_frame);
+        if !left.is_finite() || !right.is_finite() {
+            return Err(StylusTraceError::InvalidGrooveDisplacement);
+        }
+        let c0_exact = left.value(1.0) == right.value(0.0);
+        let c1_exact = left.slope_per_frame(1.0) == right.slope_per_frame(0.0);
+        if !c0_exact || !c1_exact {
+            visit(TraceCandidate {
+                segment_start: join_frame - 1.0,
+                fraction: OutwardInterval::point(1.0),
+                cubic: left,
+            })?;
+            visit(TraceCandidate {
+                segment_start: join_frame,
+                fraction: OutwardInterval::point(0.0),
+                cubic: right,
+            })?;
+        }
+        let next_join = join_frame + 1.0;
+        if next_join == join_frame {
+            return Err(StylusTraceError::InvalidCenterFrame);
+        }
+        join_frame = next_join;
+        if join_index + 1 == maximum_pieces && join_frame <= search_upper {
+            return Err(StylusTraceError::SearchLimitExceeded);
+        }
+    }
+    Ok(())
 }
 
 fn for_each_trace_candidate<F, V>(
@@ -1256,9 +2240,9 @@ where
     F: Fn(f64) -> Cubic,
     V: FnMut(TraceCandidate) -> Result<(), StylusTraceError>,
 {
-    let radius_frames = radius / meters_per_frame;
-    let search_lower = center_frame - radius_frames;
-    let search_upper = center_frame + radius_frames;
+    let search = trace_search_frame_bounds(center_frame, radius, meters_per_frame);
+    let search_lower = search.lower;
+    let search_upper = search.upper;
     if !search_lower.is_finite() || !search_upper.is_finite() {
         return Err(StylusTraceError::InvalidCenterFrame);
     }
@@ -1380,7 +2364,7 @@ fn isolate_stationary_contacts(
                 }
             }
         }
-        let physical_width = (interval.upper - interval.lower) * meters_per_frame;
+        let physical_width = physical_interval_width_upper(interval, meters_per_frame);
         let midpoint = interval.midpoint();
         if physical_width <= ROOT_BRACKET_WIDTH_M
             || midpoint == interval.lower
@@ -1547,6 +2531,7 @@ fn certified_contender(
     };
     CertifiedContender {
         segment_start: candidate.segment_start,
+        frame: OutwardInterval::point(candidate.segment_start).add(candidate.fraction),
         height: candidate_height_bounds(candidate, center_frame, meters_per_frame, radius),
         offset_m,
         groove_slope,
@@ -1574,8 +2559,8 @@ fn candidate_offset_bounds(
     radius: f64,
 ) -> OutwardInterval {
     OutwardInterval::point(segment_start)
-        .add(fraction)
         .subtract(OutwardInterval::point(center_frame))
+        .add(fraction)
         .multiply(OutwardInterval::point(meters_per_frame))
         .clamp(-radius, radius)
 }
@@ -1587,7 +2572,7 @@ fn candidate_offset_m(
     meters_per_frame: f64,
     radius: f64,
 ) -> f64 {
-    ((segment_start + fraction - center_frame) * meters_per_frame).clamp(-radius, radius)
+    (((segment_start - center_frame) + fraction) * meters_per_frame).clamp(-radius, radius)
 }
 
 fn circle_height(radius: f64, offset_m: f64) -> f64 {
@@ -1676,9 +2661,12 @@ fn catmull_rom_combined_cubic(
 }
 
 fn cubic_from_catmull_rom_points(y0: f64, y1: f64, y2: f64, y3: f64) -> Cubic {
-    let a = -0.5 * y0 + 1.5 * y1 - 1.5 * y2 + 0.5 * y3;
-    let b = y0 - 2.5 * y1 + 2.0 * y2 - 0.5 * y3;
-    let c = -0.5 * y0 + 0.5 * y2;
+    let d0 = y0 - y1;
+    let d2 = y2 - y1;
+    let d3 = y3 - y1;
+    let a = -0.5 * d0 - 1.5 * d2 + 0.5 * d3;
+    let b = d0 + 2.0 * d2 - 0.5 * d3;
+    let c = 0.5 * (d2 - d0);
     Cubic { a, b, c, d: y1 }
 }
 
@@ -1801,6 +2789,95 @@ mod tests {
         (best_height, best_offset)
     }
 
+    fn maximum_positive_catmull_curvature_per_m(samples: &[f32], meters_per_frame: f64) -> f64 {
+        let mut maximum = 0.0_f64;
+        for segment_start in 0..samples.len().saturating_sub(1) {
+            let cubic = catmull_rom_cubic(samples, segment_start as f64);
+            maximum = maximum
+                .max(2.0 * cubic.b)
+                .max(6.0 * cubic.a + 2.0 * cubic.b);
+        }
+        maximum / (meters_per_frame * meters_per_frame)
+    }
+
+    fn trace_uniform_certified_concave(
+        samples: &[f32],
+        center_frame: f64,
+        meters_per_frame: f64,
+        geometry: StylusGeometry,
+    ) -> Result<StylusTraceContactSet, StylusTraceError> {
+        let maximum_curvature = maximum_positive_catmull_curvature_per_m(samples, meters_per_frame);
+        let available_margin = 1.0 / geometry.tracing_radius_m - maximum_curvature;
+        assert!(available_margin > 0.0, "curvature {maximum_curvature}");
+        trace_spherical_piecewise_contacts_certified_concave(
+            samples.len(),
+            center_frame,
+            meters_per_frame,
+            geometry,
+            CertifiedConcaveTraceProof {
+                strict_concavity_margin_per_m: available_margin * 0.5,
+            },
+            &|segment_start| catmull_rom_cubic(samples, segment_start),
+        )
+    }
+
+    fn fixed_cap_piecewise_test_proof() -> CertifiedPiecewiseTraceProof {
+        CertifiedPiecewiseTraceProof {
+            maximum_trace_pieces: SPHERICAL_TRACE_MAX_PIECES,
+            maximum_monotone_branches_per_piece: SPHERICAL_TRACE_MAX_MONOTONE_BRANCHES_PER_PIECE,
+            maximum_endpoint_contenders_per_piece: 2,
+            maximum_root_brackets_per_piece: SPHERICAL_TRACE_MAX_ROOT_BRACKETS_PER_PIECE,
+            maximum_root_nodes_per_piece: SPHERICAL_TRACE_MAX_ROOT_NODES_PER_PIECE,
+            maximum_retained_contenders: SPHERICAL_TRACE_MAX_GLOBAL_CONTENDERS,
+            maximum_internal_displacement_join_enclosure_m: 0.0,
+            height_error_bound_m: SPHERICAL_TRACE_HEIGHT_ERROR_BOUND_M,
+            contact_position_error_bound_m: SPHERICAL_TRACE_CONTACT_POSITION_ERROR_BOUND_M,
+            groove_slope_error_bound: SPHERICAL_TRACE_GROOVE_SLOPE_ERROR_BOUND,
+            tangent_residual_error_bound: SPHERICAL_TRACE_TANGENT_RESIDUAL_ERROR_BOUND,
+        }
+    }
+
+    fn trace_uniform_certified_piecewise(
+        samples: &[f32],
+        center_frame: f64,
+        meters_per_frame: f64,
+        geometry: StylusGeometry,
+    ) -> Result<StylusTraceContactSet, StylusTraceError> {
+        trace_spherical_piecewise_contacts_certified_piecewise(
+            samples.len(),
+            center_frame,
+            meters_per_frame,
+            geometry,
+            fixed_cap_piecewise_test_proof(),
+            &|segment_start| catmull_rom_cubic(samples, segment_start),
+        )
+    }
+
+    fn assert_trace_sets_within_declared_bounds(
+        certified: StylusTraceContactSet,
+        exhaustive: StylusTraceContactSet,
+    ) {
+        assert_eq!(certified.contact_count, 1);
+        assert_eq!(exhaustive.contact_count, 1);
+        assert!(
+            (certified.center_displacement_m - exhaustive.center_displacement_m).abs()
+                <= SPHERICAL_TRACE_HEIGHT_ERROR_BOUND_M
+        );
+        assert!(
+            (certified.contacts[0].contact_offset_m - exhaustive.contacts[0].contact_offset_m)
+                .abs()
+                <= SPHERICAL_TRACE_CONTACT_POSITION_ERROR_BOUND_M
+        );
+        assert!(
+            (certified.contacts[0].groove_slope - exhaustive.contacts[0].groove_slope).abs()
+                <= SPHERICAL_TRACE_GROOVE_SLOPE_ERROR_BOUND
+        );
+        assert!(
+            certified.contacts[0].tangent_residual.abs()
+                <= SPHERICAL_TRACE_TANGENT_RESIDUAL_ERROR_BOUND
+        );
+    }
+
     #[test]
     fn multiresolution_support_includes_search_and_cubic_interpolation() {
         let support = StylusGeometry {
@@ -1808,10 +2885,11 @@ mod tests {
         }
         .multiresolution_support(2.0e-6, 16)
         .unwrap();
-        assert_eq!(support.search_half_span_source_frames(), 9);
-        assert_eq!(support.left_source_frames(), 25);
-        assert_eq!(support.right_source_frames(), 41);
-        assert_eq!(support.symmetric_halo_source_frames(), 41);
+        // The stored f64 radius is slightly greater than nine stored frame steps.
+        assert_eq!(support.search_half_span_source_frames(), 10);
+        assert_eq!(support.left_source_frames(), 26);
+        assert_eq!(support.right_source_frames(), 42);
+        assert_eq!(support.symmetric_halo_source_frames(), 42);
     }
 
     #[test]
@@ -1842,6 +2920,134 @@ mod tests {
         assert!(traced.center_displacement_m.abs() < 1.0e-15);
         assert!(traced.contact_offset_m.abs() < 1.0e-10);
         assert!(traced.groove_slope.abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn constant_catmull_points_produce_bit_exact_zero_derivatives() {
+        let value = f64::from(2.857_494_8e-10_f32) * std::f64::consts::FRAC_1_SQRT_2;
+        let cubic = cubic_from_catmull_rom_points(value, value, value, value);
+        assert_eq!(cubic.a.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(cubic.b.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(cubic.c.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(cubic.d.to_bits(), value.to_bits());
+    }
+
+    #[test]
+    fn certified_concave_trace_matches_exhaustive_flat_and_clamped_edges() {
+        let samples = vec![0.0_f32; 128];
+        for center_frame in [0.0, 64.375, 127.0] {
+            let certified = trace_uniform_certified_concave(
+                &samples,
+                center_frame,
+                2.0e-6,
+                StylusGeometry::default(),
+            )
+            .unwrap();
+            let exhaustive = trace_spherical_uniform_contacts(
+                &samples,
+                center_frame,
+                2.0e-6,
+                StylusGeometry::default(),
+            )
+            .unwrap();
+            assert_trace_sets_within_declared_bounds(certified, exhaustive);
+        }
+    }
+
+    #[test]
+    fn certified_concave_flat_trace_is_stable_at_large_absolute_frames() {
+        let geometry = StylusGeometry::default();
+        let traced = trace_spherical_piecewise_contacts_certified_concave(
+            4,
+            345_602.0,
+            2.65e-6,
+            geometry,
+            CertifiedConcaveTraceProof {
+                strict_concavity_margin_per_m: 0.5 / geometry.tracing_radius_m,
+            },
+            &|_| Cubic::constant(0.0),
+        )
+        .unwrap();
+        assert_eq!(traced.contact_count, 1);
+        assert!(traced.center_displacement_m.abs() <= SPHERICAL_TRACE_HEIGHT_ERROR_BOUND_M);
+        assert!(
+            traced.contacts[0].contact_offset_m.abs()
+                <= SPHERICAL_TRACE_CONTACT_POSITION_ERROR_BOUND_M
+        );
+    }
+
+    #[test]
+    fn certified_concave_trace_matches_exhaustive_inner_groove_tone() {
+        let meters_per_frame = 1.1e-6;
+        let samples: Vec<f32> = (0..1_024)
+            .map(|frame| {
+                let phase = std::f64::consts::TAU * 3_000.0 * frame as f64 / 192_000.0;
+                let edge_distance = frame.min(1_023 - frame);
+                let gain = if edge_distance < 2 {
+                    0.0
+                } else if edge_distance < 130 {
+                    let fade = (edge_distance - 2) as f64 / 128.0;
+                    0.5 - 0.5 * (std::f64::consts::PI * fade).cos()
+                } else {
+                    1.0
+                };
+                (gain * 1.0e-6 * phase.sin()) as f32
+            })
+            .collect();
+        for center_frame in [128.0, 255.375, 511.875, 800.125] {
+            let certified = trace_uniform_certified_concave(
+                &samples,
+                center_frame,
+                meters_per_frame,
+                StylusGeometry::default(),
+            )
+            .unwrap();
+            let exhaustive = trace_spherical_uniform_contacts(
+                &samples,
+                center_frame,
+                meters_per_frame,
+                StylusGeometry::default(),
+            )
+            .unwrap();
+            assert_trace_sets_within_declared_bounds(certified, exhaustive);
+        }
+    }
+
+    #[test]
+    fn certified_concave_trace_does_not_allocate() {
+        let samples = vec![0.0_f32; 128];
+        let mut result = None;
+        assert_no_alloc::assert_no_alloc(|| {
+            result = Some(trace_uniform_certified_concave(
+                &samples,
+                64.375,
+                2.0e-6,
+                StylusGeometry::default(),
+            ));
+        });
+        assert!(result.unwrap().is_ok());
+    }
+
+    #[test]
+    fn certified_concave_numeric_failure_does_not_run_exhaustive_fallback() {
+        use std::cell::Cell;
+
+        let cubic_calls = Cell::new(0_usize);
+        let result = trace_spherical_piecewise_contacts_with_proof(
+            128,
+            64.0,
+            2.0e-6,
+            StylusGeometry::default(),
+            SphericalTraceProof::CertifiedConcave(CertifiedConcaveTraceProof {
+                strict_concavity_margin_per_m: f64::MIN_POSITIVE,
+            }),
+            |_| {
+                cubic_calls.set(cubic_calls.get() + 1);
+                Cubic::constant(0.0)
+            },
+        );
+        assert_eq!(result, Err(StylusTraceError::StationaryContactNotIsolated));
+        assert_eq!(cubic_calls.get(), 1);
     }
 
     #[test]
@@ -2162,6 +3368,374 @@ mod tests {
         );
         assert!((traced.center_displacement_m + 18.0e-6 - dense_height).abs() < 1.0e-12);
         assert!((traced.contact_offset_m - dense_offset).abs() < 2.0e-10);
+    }
+
+    #[test]
+    fn certified_piecewise_trace_matches_pvc_001_global_peak() {
+        let samples = PVC_001_BITS.map(f32::from_bits);
+        let certified =
+            trace_uniform_certified_piecewise(&samples, 16.37, 1.5e-6, StylusGeometry::default())
+                .unwrap();
+        let exhaustive =
+            trace_spherical_uniform_contacts(&samples, 16.37, 1.5e-6, StylusGeometry::default())
+                .unwrap();
+        assert_trace_sets_within_declared_bounds(certified, exhaustive);
+    }
+
+    #[test]
+    fn certified_piecewise_trace_rejects_pvc_004_height_order() {
+        let sample_rate = 192_000.0;
+        let frequency = 8_000.0;
+        let amplitude = 0.05 / (std::f64::consts::TAU * frequency);
+        let samples: Vec<f32> = (0..512)
+            .map(|index| {
+                (amplitude * (std::f64::consts::TAU * frequency * index as f64 / sample_rate).sin())
+                    as f32
+            })
+            .collect();
+        let meters_per_frame =
+            std::f64::consts::TAU * (33.333_333_333_333_336 / 60.0) * 0.060 / sample_rate;
+        assert_eq!(
+            trace_uniform_certified_piecewise(
+                &samples,
+                258.0,
+                meters_per_frame,
+                StylusGeometry::default(),
+            ),
+            Err(StylusTraceError::ContactHeightOrderNotIsolated)
+        );
+    }
+
+    #[test]
+    fn certified_piecewise_trace_matches_adversarial_dense_peak() {
+        let certified = trace_uniform_certified_piecewise(
+            &ADVERSARIAL_ENVELOPE,
+            16.37,
+            1.5e-6,
+            StylusGeometry::default(),
+        )
+        .unwrap();
+        let exhaustive = trace_spherical_uniform_contacts(
+            &ADVERSARIAL_ENVELOPE,
+            16.37,
+            1.5e-6,
+            StylusGeometry::default(),
+        )
+        .unwrap();
+        assert_trace_sets_within_declared_bounds(certified, exhaustive);
+    }
+
+    #[test]
+    fn certified_piecewise_trace_matches_exhaustive_across_deterministic_catmull_fields() {
+        const FIELD_COUNT: usize = 12;
+        const CENTERS: [f64; 5] = [18.125, 27.375, 36.625, 45.875, 53.25];
+
+        let mut random_state = 0x98e7_421b_6c35_d0af_u64;
+        let mut attempted = 0_usize;
+        let mut certified = 0_usize;
+        let mut ambiguous = 0_usize;
+        for field_index in 0..FIELD_COUNT {
+            let meters_per_frame = 1.4e-6 + field_index as f64 * 0.07e-6;
+            let amplitude_m = 0.25e-6 + field_index as f64 * 0.09e-6;
+            let period_frames = 10.0 + field_index as f64 * 1.25;
+            let phase = field_index as f64 * 0.37;
+            let mut filtered_noise = 0.0_f64;
+            let mut samples = Vec::with_capacity(72);
+            for frame in 0..72 {
+                random_state = random_state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let unit = (random_state >> 11) as f64 * (1.0 / ((1_u64 << 53) as f64));
+                filtered_noise = 0.82 * filtered_noise + 0.18 * (2.0 * unit - 1.0);
+                let angle = std::f64::consts::TAU * frame as f64 / period_frames + phase;
+                let displacement = amplitude_m
+                    * (0.58 * angle.sin()
+                        + 0.27 * (0.47 * angle + 0.3 * phase).cos()
+                        + 0.15 * filtered_noise);
+                samples.push(displacement as f32);
+            }
+
+            for center_frame in CENTERS {
+                attempted += 1;
+                match trace_uniform_certified_piecewise(
+                    &samples,
+                    center_frame,
+                    meters_per_frame,
+                    StylusGeometry::default(),
+                ) {
+                    Ok(class_b) => {
+                        let exhaustive = trace_spherical_uniform_contacts(
+                            &samples,
+                            center_frame,
+                            meters_per_frame,
+                            StylusGeometry::default(),
+                        )
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "field {field_index}, center {center_frame}: \
+                                 Class-B succeeded but exhaustive tracing returned {error:?}"
+                            )
+                        });
+                        assert_trace_sets_within_declared_bounds(class_b, exhaustive);
+                        certified += 1;
+                    }
+                    Err(
+                        StylusTraceError::StationaryContactNotIsolated
+                        | StylusTraceError::ContactHeightOrderNotIsolated
+                        | StylusTraceError::ContactCapacityExceeded
+                        | StylusTraceError::ContactOrderNotIsolated
+                        | StylusTraceError::EnvelopeHeightBoundNotMet
+                        | StylusTraceError::GrooveSlopeBoundNotMet
+                        | StylusTraceError::TangentResidualBoundNotMet,
+                    ) => ambiguous += 1,
+                    Err(error) => panic!(
+                        "field {field_index}, center {center_frame}: unexpected Class-B error: \
+                         {error:?}"
+                    ),
+                }
+            }
+        }
+
+        assert_eq!(attempted, FIELD_COUNT * CENTERS.len());
+        assert_eq!(certified + ambiguous, attempted);
+        assert!(
+            certified >= 30,
+            "only {certified} of {attempted} varied traces produced certified results"
+        );
+        eprintln!(
+            "deterministic Class-B differential coverage: \
+             {certified} certified and {ambiguous} typed ambiguities across {attempted} traces"
+        );
+    }
+
+    #[test]
+    fn certified_piecewise_trace_does_not_allocate() {
+        let samples = PVC_001_BITS.map(f32::from_bits);
+        let mut result = None;
+        assert_no_alloc::assert_no_alloc(|| {
+            result = Some(trace_uniform_certified_piecewise(
+                &samples,
+                16.37,
+                1.5e-6,
+                StylusGeometry::default(),
+            ));
+        });
+        assert!(result.unwrap().is_ok());
+    }
+
+    #[test]
+    fn certified_piecewise_node_cap_failure_is_transactional() {
+        let samples = PVC_001_BITS.map(f32::from_bits);
+        let mut proof = fixed_cap_piecewise_test_proof();
+        proof.maximum_root_nodes_per_piece = 1;
+        assert_eq!(
+            trace_spherical_piecewise_contacts_certified_piecewise(
+                samples.len(),
+                16.37,
+                1.5e-6,
+                StylusGeometry::default(),
+                proof,
+                &|segment_start| catmull_rom_cubic(&samples, segment_start),
+            ),
+            Err(StylusTraceError::StationaryContactNotIsolated)
+        );
+    }
+
+    #[test]
+    fn certified_piecewise_streaming_retention_covers_the_structural_boundary() {
+        let mut proof = fixed_cap_piecewise_test_proof();
+        proof.maximum_trace_pieces = 28;
+        proof.maximum_retained_contenders = 64;
+        let structural_bound = certified_structural_contender_bound(proof).unwrap();
+        assert_eq!(structural_bound, 28 * (6 + 2));
+        assert!(28 * 6 + 29 > proof.maximum_retained_contenders);
+
+        let mut contenders = ContenderSet::new();
+        for index in 0..structural_bound {
+            let height_upper = if index == 0 {
+                2.0
+            } else {
+                1.0 - index as f64 * 1.0e-6
+            };
+            let mut contender = CertifiedContender::ZERO;
+            contender.height = OutwardInterval::ordered(height_upper - 1.0e-9, height_upper);
+            contenders.insert(contender, proof.maximum_retained_contenders);
+        }
+        assert_eq!(contenders.len, proof.maximum_retained_contenders);
+        assert!(contenders.omitted_height_upper.is_finite());
+        assert!(contenders.certifies_no_omitted_contender_at_or_above(2.0 - 1.0e-9));
+        assert!(
+            !contenders.certifies_no_omitted_contender_at_or_above(contenders.omitted_height_upper)
+        );
+    }
+
+    #[test]
+    fn asymmetric_root_bracket_cannot_hide_a_midpoint_ranking_reversal() {
+        let selected_midpoint_height: f64 = 1.0e-6;
+        let selected_height = OutwardInterval::ordered(
+            selected_midpoint_height.next_down(),
+            selected_midpoint_height.next_up(),
+        );
+        let competing_midpoint_height = selected_midpoint_height - 2.0e-13;
+        let competing_bracket_height = OutwardInterval::ordered(
+            competing_midpoint_height - 1.0e-13,
+            selected_midpoint_height + 5.0e-13,
+        );
+        assert!(competing_midpoint_height < selected_midpoint_height);
+        assert!(contender_can_reach_selected_height(
+            competing_bracket_height,
+            selected_height.lower,
+        ));
+
+        let mut retained = ContenderSet::new();
+        let mut selected = CertifiedContender::ZERO;
+        selected.height = selected_height;
+        retained.insert(selected, 1);
+        let mut competing = CertifiedContender::ZERO;
+        competing.height = competing_bracket_height;
+        retained.insert(competing, 1);
+        assert!(!retained.certifies_no_omitted_contender_at_or_above(selected_height.lower));
+    }
+
+    #[test]
+    fn numerically_equivalent_contacts_merge_only_inside_the_position_contract() {
+        let mut first = CertifiedContender::ZERO;
+        first.segment_start = 10.0;
+        first.frame = OutwardInterval::point(10.25);
+        first.offset_m = OutwardInterval::point(0.0);
+        let mut within = first;
+        within.frame = OutwardInterval::point(10.250_001);
+        within.offset_m =
+            OutwardInterval::point(SPHERICAL_TRACE_CONTACT_POSITION_ERROR_BOUND_M * 0.5);
+        assert!(same_stationary_contact(
+            first,
+            within,
+            SPHERICAL_TRACE_CONTACT_POSITION_ERROR_BOUND_M,
+        ));
+
+        let mut outside = within;
+        outside.offset_m =
+            OutwardInterval::point(SPHERICAL_TRACE_CONTACT_POSITION_ERROR_BOUND_M * 2.0);
+        assert!(!same_stationary_contact(
+            first,
+            outside,
+            SPHERICAL_TRACE_CONTACT_POSITION_ERROR_BOUND_M,
+        ));
+    }
+
+    #[test]
+    fn certified_piecewise_trace_rejects_an_unresolved_clamped_edge_normal() {
+        let meters_per_frame = 1.0e-6;
+        let geometry = StylusGeometry::default();
+        let samples: Vec<f32> = (0..64)
+            .map(|index| -(index as f64 * meters_per_frame) as f32)
+            .collect();
+        assert_eq!(
+            trace_uniform_certified_piecewise(&samples, 4.0, meters_per_frame, geometry),
+            Err(StylusTraceError::GrooveSlopeBoundNotMet)
+        );
+    }
+
+    #[test]
+    fn six_root_squared_adversary_retains_all_valid_unsquared_contacts() {
+        let meters_per_frame = 2.0e-6;
+        let radius_frames = 0.342_386_954_920_890_83;
+        let radius = radius_frames * meters_per_frame;
+        let center_frame = 0.530_987_471_118_665_3;
+        let normalized_a = 485.350_886_677_061_8;
+        let normalized_b = -295.431_220_992_598_24;
+        let normalized_c = 43.456_644_759_021_97;
+        let cubic = Cubic {
+            a: normalized_a * meters_per_frame / 3.0,
+            b: normalized_b * meters_per_frame / 2.0,
+            c: normalized_c * meters_per_frame,
+            d: 0.0,
+        };
+        let squared_roots = [
+            0.199_910_511_757_295_66,
+            0.214_355_229_404_300_7,
+            0.276_151_841_953_246_77,
+            0.346_453_689_934_533_2,
+            0.369_128_629_439_966_7,
+            0.873_367_359_829_066_2,
+        ];
+        for root in squared_roots {
+            let slope = normalized_a * root * root + normalized_b * root + normalized_c;
+            let offset = root - center_frame;
+            let residual = offset * offset * (1.0 + slope * slope)
+                - radius_frames * radius_frames * slope * slope;
+            assert!(residual.abs() < 1.0e-8, "root {root}: {residual}");
+        }
+
+        let roots = isolate_contact_center_roots(
+            cubic,
+            0.0,
+            center_frame,
+            meters_per_frame,
+            radius,
+            OutwardInterval::ordered(0.0, 1.0),
+            fixed_cap_piecewise_test_proof(),
+        )
+        .unwrap();
+        let valid_unsquared_roots = [
+            0.276_151_841_953_246_77,
+            0.346_453_689_934_533_2,
+            0.873_367_359_829_066_2,
+        ];
+        assert_eq!(roots.len, valid_unsquared_roots.len());
+        for (bracket, expected) in roots.brackets[..roots.len]
+            .iter()
+            .zip(valid_unsquared_roots)
+        {
+            assert!((bracket.midpoint() - expected).abs() < 1.0e-8);
+        }
+    }
+
+    #[test]
+    fn outward_derived_constants_cover_one_ulp_contact_decisions() {
+        let meters_per_frame = 1.1e-6;
+        let radius = 18.0e-6;
+        let fraction = 0.625;
+        let normalized_slope = 0.3;
+        let cubic = Cubic {
+            a: 0.0,
+            b: 0.0,
+            c: normalized_slope * meters_per_frame,
+            d: 0.0,
+        };
+        let center_frame = fraction
+            - radius / meters_per_frame * normalized_slope
+                / (1.0_f64 + normalized_slope * normalized_slope).sqrt();
+        let exact = contact_center_map_residual_bounds(
+            cubic,
+            0.0,
+            OutwardInterval::point(fraction),
+            center_frame,
+            meters_per_frame,
+            radius,
+        );
+        let center_one_ulp_below = contact_center_map_residual_bounds(
+            cubic,
+            0.0,
+            OutwardInterval::point(fraction),
+            center_frame.next_down(),
+            meters_per_frame,
+            radius,
+        );
+        let center_one_ulp_above = contact_center_map_residual_bounds(
+            cubic,
+            0.0,
+            OutwardInterval::point(fraction),
+            center_frame.next_up(),
+            meters_per_frame,
+            radius,
+        );
+        assert!(exact.contains_zero());
+        assert!(center_one_ulp_below.upper >= 0.0);
+        assert!(center_one_ulp_above.lower <= 0.0);
+        let ratio = positive_ratio_bounds(radius, meters_per_frame);
+        assert!(ratio.lower <= radius / meters_per_frame);
+        assert!(ratio.upper >= radius / meters_per_frame);
     }
 
     #[test]

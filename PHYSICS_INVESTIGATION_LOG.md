@@ -18,6 +18,11 @@ Store exact fixtures, artifacts, error bounds, and reproduction commands in `PHY
 - **Measured**: A repeatable test on identified hardware gives the value.
 - **Seed profile**: A usable parameter set that contains estimates and needs measurement.
 - **Calibrated profile**: A parameter set that passes its specified hardware measurements.
+- **C1 join**: A join where displacement and its first derivative match.
+- **Class A**: The trace class that proves strict spherical-envelope concavity.
+- **Class B**: The trace class that uses bounded piecewise isolation during each trace.
+- **Normal cone**: The set of possible surface-normal directions at a non-smooth contact.
+- **Projected wall force**: The contact multiplier along one 45-degree wall coordinate.
 
 ## Confidence Scale
 
@@ -51,8 +56,8 @@ Use this ledger to track requirements across the chronological findings.
 - **RP-020 — Calibration gate**: Do not call a seed profile calibrated. Require identified measurements, uncertainties, artifacts, and digests. **Status**: Implemented in Rust.
 - **RP-021 — Leadership claim**: Do not claim physical leadership until comparative hardware tests pass with stated uncertainty. **Status**: Open.
 - **RP-022 — Contrary evidence**: Retain failed tests, rejected hypotheses, and conflicting sources. Update their status when evidence changes. **Status**: Required.
-- **RP-023 — Certified tracing**: Find the global stylus envelope with bounded work. Do not depend on an unproved local optimum. **Status**: Replacement passes exact fixtures; certificate admission and work limits remain open.
-- **RP-024 — Cartridge detail**: Measure and model complex impedance, crosstalk phase, level dependence, magnetic loss, and temperature dependence. **Status**: Open.
+- **RP-023 — Certified tracing**: Find the global stylus envelope with bounded work. Do not depend on an unproved local optimum. **Status**: Implemented for current spherical tracing sources.
+- **RP-024 — Cartridge detail**: Model complex impedance, crosstalk phase, magnetic loss, level dependence, and temperature dependence. **Status**: Linear passive coupling and magnetic loss are implemented. Measurements and nonlinear effects remain open.
 - **RP-025 — Structural motion**: Add profile-required arm geometry, spindle play, eccentricity, warp, record flexure, and distributed hand contact. **Status**: Open.
 - **RP-026 — Material contact**: Add measured wall compliance, speed-dependent friction, temperature, wear, damage, and contamination when required. **Status**: Open.
 - **RP-027 — Reference convergence**: Compare rapid contact with a converged high-rate solver. Register numeric error limits before release. **Status**: In progress.
@@ -63,6 +68,10 @@ Use this ledger to track requirements across the chronological findings.
 - **RP-032 — Host voltage calibration**: Keep phono output in volts inside physics. Convert volts through an explicit host full-scale boundary. **Status**: Boundary implemented in Rust, C, WASM, and native Swift. Product calibration evidence remains open.
 - **RP-033 — Same-wall multiple contact**: Detect separated possible global positions. Do not treat interval overlap as equality. **Status**: Contact sets propagate through production paths. Unqualified sets reject safely. Certified equality and measured compliance remain open.
 - **RP-034 — Canonical scratch techniques**: Keep the catalog, prediction, and automatic crossfader policy in Rust. Use exact same-sample physical travel. **Status**: Rust core implemented. Player, calibration, iOS, and browser integration remain open.
+- **RP-035 — Non-smooth contact**: Reject unresolved normal cones until the contact solve represents their complete force set. **Status**: In progress.
+- **RP-036 — Surface friction geometry**: Resolve friction in the complete local surface basis. Couple all components in the same contact solve. **Status**: Sliding surface and skating-port coupling are implemented. Sloped sticking, coupled uniqueness proof, and measurements remain open.
+- **RP-037 — Trace asset admission**: Bind fixed trace work, representation bytes, page identity, geometry, and actual wall-slope bounds. **Status**: Implemented. An authoritative full-record catalog remains open.
+- **RP-038 — Tangential contact memory**: Add identified along-groove pickup motion and local tangential material state. Preserve that state through reversals. **Status**: Required for sloped sticking.
 
 ## 2026-08-01: Repository and History Investigation
 
@@ -455,8 +464,58 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Confidence**: High.
 - **Evidence**: The active-set solver treats each groove wall as rigid.
 - **Physical effect**: Vinyl deformation changes high-frequency response, force, and resonance.
+- **Published evidence**: Bastiaans reports elastic and plastic wall penetration under a playback stylus.
+- Source: <https://secure.aes.org/forum/pubs/journal/?elib=1082>
+- **Published evidence**: White measured complex groove impedance against tracking force and groove speed.
+- Source: <https://secure.aes.org/forum/pubs/journal/?elib=1480>
+- **Published warning**: White states that classical elasticity assumptions do not represent stylus-groove contact sufficiently.
+- **Published evidence**: Barlow and Garside measured load-dependent penetration for multiple indenter profiles.
+- Source: <https://secure.aes.org/forum/pubs/journal/?elib=3264>
+- **Effect**: Their reported deformation changes tracing distortion differently across the treble range.
+- **Decision**: Do not use an unmeasured Hertz spring as the production compliance law.
+- **Requirement**: Measure complex wall impedance across force, speed, frequency, temperature, and identified vinyl compound.
+- **Requirement**: Measure static penetration and the elastic-to-plastic transition separately.
+- **Model hypothesis**: Fit a passive positive-real wall impedance to the measured complex response.
+- **Model hypothesis**: Use positive spring and dashpot elements so stored energy and loss remain explicit.
+- **Registered topology**: Use a groove-coordinate generalized Kelvin creep field with positive-semidefinite reciprocal compliance matrices.
+- **Registered port**: Use projected wall force and positive indentation as one conjugate material port.
+- **Registered solve**: Condense endpoint compliance into the same normal complementarity step.
+- **Registered energy**: Report elastic storage and nonnegative retardation loss with an exact trapezoidal identity.
+- **Nonlinear extension**: Use a measured monotone elastic curve derived from a convex stored-energy potential.
+- **Fit rejection**: Reject the model if relaxation subtraction makes the instantaneous elastic curve non-monotone.
+- **Risk**: A linear impedance can miss force-dependent penetration and plastic flow.
+- **State-location risk**: Viscoelastic memory belongs to the contacted groove material.
+- A stylus-attached state moves old wall deformation into new groove material.
+- Rapid scratching can revisit material before its deformation decays.
+- **Requirement**: Bind recoverable material state to certified groove position when measurements show material memory is significant.
+- **Alternative**: Calibrate a moving-contact impedance and state its speed and revisit-time limits.
+- **Requirement**: Keep the immutable cut geometry separate from reversible deformation and irreversible damage.
+- **Requirement**: Keep irreversible damage outside the elastic compliance state until repeated-pass measurements identify it.
 - **Possible error**: A calibrated suspension can absorb part of the missing response over a narrow band.
 - **Disproof test**: Match force and frequency sweeps across tracking force and groove velocity.
+- **Validation case**: `PVC-007` in `PHYSICS_VALIDATION_CASES.md` contains the complete registered contract.
+
+### Multiple-contact compliance reduction
+
+- **Status**: The `N+1` prefix reduction is rejected as a general solution.
+- **Confidence**: High for coupled material memory.
+- Each isolated contact candidate has a rigid center-height threshold.
+- A compliant wall can load candidates below the highest rigid threshold.
+- With linear local compliance, contact force is zero below its penetration threshold.
+- Above that threshold, contact force increases monotonically with penetration.
+- **Historical hypothesis**: Active contacts can form prefixes ordered by rigid threshold height.
+- **Historical benefit**: One wall then has only `N+1` active-count regimes for `N` candidates.
+- **Contrary evidence**: Viscoelastic state and cross-compliance can produce non-prefix active sets.
+- **Contrary evidence**: Independent local springs can count one deforming volume more than once.
+- **Decision**: Do not use the prefix reduction without a theorem for the identified material operator.
+- **Requirement**: Use a deterministic fixed-cap complementarity solver for the identified coupled operator.
+- **Requirement**: Include contact-height gaps and local slopes in the certified tracer output.
+- **Requirement**: Retain each candidate within the profile's maximum certified penetration below the rigid global height.
+- **Reason**: A lower rigid candidate can load after a higher patch deforms.
+- **Requirement**: Bind the maximum penetration and candidate capacity to the trace certificate.
+- **Requirement**: Prove nonnegative force, nonpositive loss power, fixed work, and transactional failure.
+- **Requirement**: Measure spatial transfer impedance before enabling calibrated multiple-patch compliance.
+- **Disproof test**: Compare the reduced solver with a resolved finite-element or measured multi-contact case.
 
 ### Wear, damage, dust, and temperature
 
@@ -492,16 +551,32 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Effect**: The error can change wall displacement, slope, force, torque, and contact state.
 - **Correction**: The replacement uses a bounded global envelope search.
 - **Test**: Executable assertions call only the replacement tracer.
-- **Requirement**: Bind any derived trace certificate to the page identity.
+- **Correction**: Each admitted representation binds its trace certificate to its identity.
 - **Validation case**: `PVC-001` in `PHYSICS_VALIDATION_CASES.md`.
 - **Limit**: The source is valid production input, but physical cutter feasibility is not proved.
-- **Limit**: The test oracle is not a page-bound production certificate.
+- **Limit**: The test oracle remains independent from the page-bound production certificate.
 - **Result**: The extreme numeric-domain fixture now passes the certified tracer and outward reference bounds.
 - **Limit**: Its kinematics remain outside a supported physical-record claim.
 - **Result**: The rapid-scratch reference fixture now completes without a trace error.
 - **Limit**: This passing fixture does not prove the callback deadline.
-- **Limit**: No page certificate rejects content that exceeds the trace work limit.
-- **Conclusion**: The exact local-maximum defect is fixed, but `PVC-001` remains open at the product boundary.
+- **Result**: Asset admission rejects content that exceeds the fixed trace caps.
+- **Result**: Contiguous, paged, and real-time paged sources require validated admission.
+- **Conclusion**: The exact local-maximum defect and its current production boundary are corrected.
+- **Limit**: The page producer remains trusted until an authoritative full-record catalog exists.
+
+### Constant-segment Catmull-Rom arithmetic
+
+- **Status**: Confirmed numerical defect and corrected production arithmetic.
+- **Confidence**: High from exact coefficient bits and a permanent test.
+- **Fixture**: Four equal points each have value `2.0205539476957236e-10` meters.
+- **Former result**: Coefficient `a` was `-1.2924697071141057e-26` meters.
+- **Former result**: Coefficient `b` was `6.462348535570529e-26` meters.
+- **Required result**: A constant segment has bit-exact positive-zero derivative coefficients.
+- **Effect**: The false derivative blocked a valid bit-exact C1 edge certificate.
+- **Limit**: This coefficient size is not a material physical groove error.
+- **Correction**: Construct the cubic from differences relative to `y1`.
+- **Requirement**: Use the same coefficient arithmetic in tracing and admission.
+- **Validation case**: `PVC-001` in `PHYSICS_VALIDATION_CASES.md`.
 
 ### Friction law
 
@@ -510,6 +585,103 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Evidence**: Friction does not depend on speed, normal load, material state, or temperature.
 - **Possible error**: One coefficient can fit a small operating region.
 - **Disproof test**: Measure tangential force during forward, stop, and reverse sweeps at several tracking forces.
+
+### Three-dimensional groove friction
+
+- **Status**: Local surface-vector sliding is implemented.
+- **Confidence**: High for force signs at one unique contact.
+- **Definition**: Let `p` be wall displacement change divided by along-groove distance.
+- **Definition**: Let `lambda` be the projected wall force.
+- **Derivation**: The surface-normal force magnitude is `lambda * sqrt(1 + p^2)`.
+- **Derivation**: Isotropic Coulomb friction has magnitude `mu * lambda * sqrt(1 + p^2)`.
+- **Derivation**: Its along-groove component has magnitude `mu * lambda`.
+- **Derivation**: Its signed wall-coordinate component is the along-groove component multiplied by `p`.
+- **Former finding**: The solve used the complete friction magnitude as an along-groove force.
+- **Former effect**: This increased record torque by `sqrt(1 + p^2)`.
+- **Example**: A slope magnitude of `0.5` gives a torque factor of `1.118033988749895`.
+- **Example**: The former possible torque error was approximately `11.8034` percent.
+- **Correction**: The solve now uses projected force for the record-tangent component.
+- **Correction**: It puts the signed wall-coordinate component inside the same momentum solve.
+- **Correction**: Local friction power includes the record and wall-coordinate components.
+- **Correction**: Forward and reverse sliding produce nonpositive local friction power.
+- **Alternative**: The existing coefficient can represent an effective along-groove coefficient.
+- **Rejected alternative**: Do not reinterpret the coefficient without measurements and a profile-schema change.
+- **Local inward condition**: Require `mu * maximum_abs_slope < 1 - 1e-6`.
+- **Reason**: This condition keeps each local wall-force component strictly inward.
+- **Limit**: This scalar condition is not a coupled Painlevé well-posedness proof.
+- **Reason**: The coupled response also depends on arm geometry, mass, damping, deck inertia, and both contacts.
+- **Requirement**: Prove the active Delassus matrix is a P-matrix over the admitted profile domain.
+- **Finding**: The general trace slope cap is `16`.
+- **Finding**: The default groove friction coefficient is `0.25`.
+- **Consequence**: Those two general limits do not prove the friction condition.
+- **Requirement**: Bind the selected coefficient to the certificate's actual maximum absolute slope.
+- **Reference result**: The rapid fixture maximum slope is approximately `0.491673`.
+- **Reference result**: Its product with `0.25` is approximately `0.12291825`.
+- **Reference result**: `PVC-004` has a maximum slope of approximately `0.440791`.
+- **Reference result**: Its product with `0.25` is approximately `0.11019775`.
+- **Limit**: The present pickup has no along-groove coordinate or tangential material state.
+- **Correction**: The solve maps along-groove force into lateral arm-body force through `skating_factor`.
+- **Correction**: Relative velocity includes the reciprocal lateral arm-body velocity.
+- **Correction**: Friction power includes record, body, and cross-plane ports.
+- **Result**: Snapshot restore rejects a Coulomb mode, sign, or magnitude that the configured law cannot produce.
+- **Finding**: The test-qualified same-wall reduction uses one mean slope in the momentum solve.
+- **Finding**: Its detailed power telemetry uses each contact's squared slope.
+- **Consequence**: Those power values disagree when same-wall slopes differ.
+- **Current protection**: Production rejects same-wall sets without a physical qualification.
+- **Requirement**: Keep that rejection until each accepted contact has one represented port.
+- **Result**: Exact-zero sloped sticking returns `UnsupportedGrooveWallSticking`.
+- **Reason**: Two wall tractions have one global sticking constraint.
+- **Reason**: A single longitudinal coordinate does not identify their distribution.
+- **Rejected hypothesis**: Divide static force in proportion to normal force.
+- **Reason**: That rule has no measured tangential constitutive law.
+- **Requirement**: Add measured per-contact tangential compliance and relaxation state.
+- **Requirement**: Keep this state at stable groove coordinates across reversals.
+- **Requirement**: Add an along-groove pickup coordinate and its power-conjugate force.
+- **Claim limit**: Sliding geometry is corrected, but rapid reversal fidelity is not complete.
+- **Working hypothesis**: Use one passive Jenkins tangential element for each unique wall contact.
+- **Working hypothesis**: Enumerate elastic and two sliding branches independently for both walls.
+- **Calculated cap**: The complete current mode product would contain 2,916 candidate branches.
+- **Identity requirement**: Key material state by source, generation, wall, and canonical groove cell.
+- **Rejected identity**: Do not key material state by contact-array order or floating-point midpoint bits.
+- **Persistence limit**: A finite state bank cannot retain energetic cells for unlimited playback.
+- **Requirement**: Measure recovery and register a residual-energy retirement rule.
+- **Requirement**: Account retired recoverable energy as loss.
+- **Reference**: `PVC-007` records equations, state rules, measurements, and disproof tests.
+
+### Certified contact identity audit
+
+- **Status**: Design complete. Production propagation is not implemented.
+- **Finding**: Certified tracers already calculate outward contact-coordinate intervals.
+- **Finding**: Current result types discard those intervals.
+- **Requirement**: Preserve each interval and translate it to the absolute base-source coordinate.
+- **Material key**: Use source identity, generation, wall, and canonical cell index.
+- **Exclusion**: Do not include page, direction, representation kind, contact order, or midpoint bits.
+- **Isolation rule**: Both closed interval bounds must select one versioned canonical cell.
+- **Failure**: Return `TangentialContactIdentityNotIsolated` before state changes when the interval straddles a cell boundary.
+- **First implementation grid**: Use base spline cells only for deterministic plumbing tests.
+- **Claim limit**: Base spline cells do not prove a physical contact footprint.
+- **State placement**: Keep the material bank outside the copied pickup candidate state.
+- **Commit rule**: Commit at most two material updates after the complete coupled candidate passes.
+- **Capacity rule**: Prefer an exact key, then an empty slot, then a measured recovered slot.
+- **Rejected policy**: Do not evict energetic state by proximity, direction, page, or recency.
+- **Snapshot effect**: Persistent Jenkins state requires new pickup, player, and renderer snapshot versions.
+- **Trust limit**: The key lineage still depends on the page producer until a full-record root exists.
+
+### Non-smooth contact normal
+
+- **Status**: A scalar shortcut was rejected before the trace checkpoint.
+- **Confidence**: High for the representational gap.
+- **Finding**: A clamp junction can have one contact position and more than one valid normal direction.
+- **Finding**: Its one-sided groove slopes define a normal cone.
+- **Rejected hypothesis**: Use the spherical-envelope tangent inside the cone as one effective groove slope.
+- **Reason**: Geometry does not make that tangent the unique downstream force direction.
+- **Effect**: A selected scalar can change modulation force, record torque, skating force, and friction.
+- **Requirement**: Return `GrooveSlopeBoundNotMet` when one scalar slope cannot represent the contact.
+- **Requirement**: Keep smooth duplicate endpoint roots as one contact only when their slope enclosure passes its registered bound.
+- **Future correction**: Carry the complete normal cone into the contact active set.
+- **Future correction**: Solve nonnegative one-sided contact multipliers with the other same-sample modes.
+- **Permanent fixture**: One clamp side has zero slope, and the adjacent side has slope `-0.5`.
+- **Expected result**: The scalar tracer rejects the fixture with `GrooveSlopeBoundNotMet`.
 
 ### Tonearm motion
 
@@ -967,6 +1139,50 @@ This section records a design hypothesis. Tests can reject this design.
 - **Possible error**: A manufacturer document can use a different reference for the cartridge output value.
 - **Disproof test**: Measure the identified reference track with a traceable velocity calibration.
 
+### Cartridge output reference remains unresolved
+
+- **Date**: 2026-08-02.
+- **Status**: Open generator-scale ambiguity.
+- **Evidence**: Ortofon specifies 10 millivolts at 1 kilohertz and 5 centimeters per second for the Concorde MKII Scratch.
+- Source: <https://ortofon.com/products/concorde-mkii-scratch>
+- **Limit**: The product page does not identify the velocity value as peak or RMS.
+- **Limit**: The test-record convention does not prove the product-rating convention.
+- **Effect**: The wrong convention changes the derived generator coefficient by a factor of square root of two.
+- **Decision**: Do not change the seed coefficient without primary evidence or a traceable cartridge measurement.
+- **Disproof test**: Measure loaded output with a groove that has traceable peak and RMS velocity.
+
+### Passive cartridge magnetic-loss checkpoint
+
+- **Date**: 2026-08-02.
+- **Commit**: `49cd9424b129d79ee7d3ec40f8d5bf11543e30a2`.
+- **Status**: A passive parameterized topology is implemented.
+- The coil uses one residual coupled inductor and as many as four series relaxation sections.
+- Each relaxation section contains a resistor in parallel with an inductor.
+- At low frequency, the relaxation inductors restore the declared total self-inductance.
+- At high frequency, each section adds its loss resistance.
+- The apparent self-inductance then approaches the positive residual inductance.
+- **Passivity rule**: `L0 - sum(Lk) - abs(M)` must be at least 0.000000001 henry.
+- **Canonical rule**: Active slots are contiguous and have increasing relaxation time.
+- **Seed result**: All four Concorde magnetic-loss slots are zero and `Estimated`.
+- **Replacement rule**: Zero slots use the checkpoint `6791e90` circuit equations without numerical changes.
+- **Evidence**: One test compares every affine coefficient with `f64::to_bits` for 10000 coupled samples.
+- **Energy test**: Three coupling ratios each use 20000 alternating rapid reversals.
+- **Coupling ratios**: -0.72, 0.0, and 0.72.
+- **Energy bound**: The residual is at most `8e-11 * scale + 3e-27` joules.
+- **Frequency test**: The complex impedance matches its low-frequency and high-frequency limits.
+- **Transfer test**: The public two-by-two transfer agrees with the independent complex circuit equations.
+- **Time test**: The trapezoidal response agrees with the frequency response after bilinear frequency warping.
+- **Allocation test**: The active network and coupled pickup path allocate no memory during processing.
+- **Snapshot result**: Snapshot schema version 4 stores every branch current and interval average.
+- **Calibration rule**: Branch values require `CartridgeMagneticLossLevelAndTemperature` evidence.
+- **Limit**: The model is a linear small-signal network with identical branches in both channels.
+- **Limit**: It does not model saturation, nonlinear hysteresis, thermal drift, or channel-asymmetric magnetic loss.
+- **Limit**: Four fitted poles can omit additional eddy-current or magnetic spatial modes.
+- **Limit**: Loaded response alone confounds coil loss with the cable and preamplifier network.
+- **Limit**: Total separation cannot identify generator leakage separately from mutual inductance.
+- **Requirement**: Fit complex coil impedance first under a known resistance and capacitance fixture.
+- **Requirement**: Then measure generator reciprocity, level, temperature, balance, separation magnitude, and separation phase.
+
 ## 2026-08-01: Real-Time Page Ingestion Requirements
 
 ### Raw pyramid construction
@@ -1031,11 +1247,35 @@ This section records a design hypothesis. Tests can reject this design.
 - **Limit**: Filtered traced geometry can still hide dynamic contact loss and force impulses.
 - **Decision**: Test this option against swept high-rate dynamic contact before adoption.
 
+### Rapid-contact piece-event hypothesis
+
+- **Date**: 2026-08-02.
+- **Status**: Solver design hypothesis.
+- **Confidence**: Low until a convergence test passes.
+- A 20x sample crosses at most 20 base source-frame intervals under the declared speed limit.
+- The current reference instead uses as many as 160 uniform substeps for one physical sample.
+- **Hypothesis**: Split work at certified spline, envelope-branch, contact, and friction events.
+- **Hypothesis**: Integrate each smooth interval with a passive higher-order step and a certified local error bound.
+- **Benefit**: Work can follow physical events instead of a fixed eighth-frame spatial step.
+- **Benefit**: Smooth intervals can span more than one reference substep without removing nonlinear contact.
+- **Requirement**: The tracer certificate must bound every crossed piece and branch transition.
+- **Requirement**: The contact integrator must retain contact loss, recapture, and impulse timing.
+- **Requirement**: The electrical and mechanical ports must use the same interval-average work.
+- **Open problem**: Record reaction impulse changes the record motion that selects the traversed path.
+- **Risk**: Holding deck speed during pickup substeps can break same-sample reciprocity.
+- **Risk**: A branch event can occur between all selected quadrature points.
+- **Risk**: Coulomb friction can change mode without a smooth force root.
+- **Requirement**: Couple total stylus impulse into the deck solve without a delayed torque.
+- **Requirement**: Reject a step when the certified event capacity or error bound is exceeded.
+- **Disproof test**: Compare force, torque, mode, and band-limited voltage against the converged high-rate reference.
+
 ### Offline reduced-system reference
 
 - **Status**: Implemented as a test-only, allocation-free reference harness.
 - **Scope**: The harness uses the symmetric vertical reduction of the two-wall contact equations.
 - **Scope**: It does not include the complete coupled player, cartridge, or phono stage.
+- **Limit**: The scalar reduction requires both walls to remain loaded.
+- **Limit**: It is not exact with lateral and vertical cross-coupling.
 - **Fixture**: The artificial stress source contains multitone motion, an impulse, contact loss, and retracking.
 - **Sweep**: The run covers every signed integer rate from 1x through 20x.
 - **Sweep**: Each rate includes forward motion, reverse motion, and another forward motion.
@@ -1094,31 +1334,123 @@ They are not registered release error limits.
 
 ### Production trace-certificate boundary
 
-`trace_spherical_sampled` accepts an arbitrary value-and-slope closure.
-It does not expose piecewise-cubic coefficients or outward bounds.
+`trace_spherical_sampled` remains a general helper for direct sample closures.
+Production trace sources do not use that helper without admission.
 
 Uniform, blended, and multiresolution sources use different breakpoints.
-Current pages do not carry a global envelope certificate.
+The admission pass recomputes bounds for every current representation level.
 
-A production certificate needs these items:
+The production certificate contains these items:
 
 - A format version.
 - The complete asset, page, representation, and generation identity.
 - Each spatial level and 45/45 wall combination.
 - Each globally aligned source segment and its source-frame interval.
-- Outward displacement, first-derivative, and second-derivative bounds.
+- Recomputed displacement, derivative, curvature, join, slope, and work bounds.
 - The supported stylus-radius domain.
 - The maximum node count, height tolerance, and position tolerance.
 - A digest included in the page identity.
 - Base, pyramid, overlap, and page-seam validation.
 
-The renderer must reject a missing, stale, corrupt, or incompatible certificate.
+The renderer rejects a missing, stale, corrupt, or incompatible certificate.
 
-The renderer must reject a trace that exceeds the declared work limit.
-That failure must leave state and output unchanged.
+The renderer rejects a trace that exceeds the declared fixed caps.
+That failure leaves state and output unchanged.
 
-**Decision**: Keep `RP-023` open.
-Do not replace the production tracer until these prerequisites exist.
+Class B binds each runtime capacity to its exact canonical constant.
+Smaller self-consistent capacity claims reject before tracing.
+
+Incremental and full certification produce identical certificates and work totals.
+Tests cover unaligned interior pages and both record boundaries.
+
+Rejection-class certificates cannot enter the real-time `Ready` state.
+They reject before hashing, seam validation, or publication.
+
+Precomputed page levels receive bit-exact canonical-filter validation.
+The validation occurs before publication.
+
+The resident manifest binds the current page identities and certificate identities.
+It is not an authoritative full-record catalog.
+
+**Decision**: Close the current `RP-023` implementation task.
+Keep comparative validation and full-record source authentication open.
+
+### Strict-concavity coverage risk
+
+- **Date**: 2026-08-02.
+- **Status**: Resolved by two certified production classes.
+- **Fast-path theorem**: A wall-curvature upper bound below inverse tip radius proves one global envelope maximum.
+- **Limit**: This condition is sufficient, but it is not necessary.
+- **Example radius**: 0.060 meters.
+- **Example speed**: 33.333333333333336 revolutions per minute.
+- **Example frequency**: 8000 hertz.
+- **Example wall-velocity peak**: 0.05 meters per second.
+- **Example tip radius**: 0.000018 meters.
+- **Calculated tangential speed**: 0.20943951023931953 meters per second.
+- **Calculated displacement amplitude**: 0.000000994718394324346 meters.
+- **Calculated wall-curvature amplitude**: 57295.779513082336 per meter.
+- **Calculated inverse tip radius**: 55555.555555555555 per meter.
+- **Calculated curvature ratio**: 1.031324031235482.
+- **Effect**: The strict-concavity proof can fail for a nominal inner-groove signal.
+- **Critical limit**: Failure of this sufficient proof does not prove ambiguous contact.
+- **Requirement**: Keep strict concavity as one certified fast-path class.
+- **Result**: A fixed-cap piecewise path handles admitted non-concave envelopes.
+- **Requirement**: Measure certificate coverage on tones, representative cuts, radii, and spatial levels.
+- **Requirement**: Report admission rejection causes separately from height-order ambiguity.
+- **Possible error**: Catmull interpolation and spatial filtering can change the continuous curvature bound.
+- **Possible error**: Representative program material can use lower high-frequency wall velocity.
+- **Disproof test**: Show that all supported assets pass strict concavity with registered headroom.
+
+### Class-B contact-coordinate design
+
+- **Date**: 2026-08-02.
+- **Status**: Implemented with bounded interval isolation and height ordering.
+- **Confidence**: High for the tested numeric domain.
+- Let `x` be wall position, `g(x)` be wall displacement, and `p(x)` be `g'(x)`.
+- Let `R` be the spherical tracing radius.
+- Define the stylus-center coordinate as `C(x) = x - R p(x) / sqrt(1 + p(x)^2)`.
+- Define the stylus-center height as `H(x) = g(x) + R / sqrt(1 + p(x)^2)`.
+- A contact for center coordinate `x0` satisfies `C(x) = x0`.
+- Squaring gives `(x-x0)^2 + ((x-x0)^2-R^2) p(x)^2 = 0`.
+- The derivative `p(x)` is quadratic on one Catmull-Rom piece.
+- Therefore, the squared contact equation has degree six or less on one piece.
+- **Benefit**: This form does not evaluate the circle-slope singularity at horizontal offset `R`.
+- **Possible bound**: One cubic piece has no more than six roots of the squared equation.
+- **Required filter**: The signs of `x-x0` and `p(x)` must agree.
+- **Risk**: Squaring introduces roots that do not satisfy the original equation.
+- **Risk**: A multiple root can defeat a fixed-precision isolation test.
+- **Risk**: A floating-point polynomial does not supply an outward proof by itself.
+- **Requirement**: Certify every accepted root against the unsquared equation with outward intervals.
+- **Requirement**: Keep a fixed root and work capacity for every piece.
+- **Requirement**: Compare this method with the existing interval tracer on `PVC-001` and `PVC-004`.
+- **Height-order limit**: Two winning branches can exchange order as the stylus center moves.
+- **Effect**: An asset-wide unique-height guarantee can exclude a physically valid branch transition.
+- **Requirement**: Prove height order for the active trace, or return a certified multiple-contact set.
+- **Requirement**: Do not interpret numerical interval overlap as physical contact equality.
+- **Compliance link**: Retain near-height contenders for the measured wall-compliance model.
+- **Disproof test**: Find more than six valid contacts on one cubic piece.
+- **Disproof test**: Find an admitted trace where the fixed solver cannot certify all valid roots.
+
+### Strict-concavity coverage measurement
+
+- **Date**: 2026-08-02.
+- **Status**: The strict-concavity class does not cover the realistic benchmark assets.
+- **Rapid fixture class**: `FixedCapPiecewise`.
+- **Rapid fixture maximum signed wall curvature**: 270051.552 per meter.
+- **Rapid fixture maximum absolute wall slope**: 0.491673.
+- **Rapid fixture runtime support**: One wall trace examines at most 28 source-frame spline pieces.
+- **Rapid fixture aggregate certificate count**: 950 pieces across two walls and five representation levels.
+- **PVC-004 class**: `FixedCapPiecewise`.
+- **PVC-004 maximum signed wall curvature**: 236652.492 per meter.
+- **PVC-004 maximum absolute wall slope**: 0.440791.
+- **PVC-004 runtime support**: One wall trace examines at most 28 source-frame spline pieces.
+- **PVC-004 aggregate certificate count**: 40950 pieces across two walls and five representation levels.
+- **Edge result**: Neither fixture has a C1 record clamp.
+- **Passing controls**: Flat data, flat-clamped data, and a tapered 3-kilohertz inner-groove fixture pass class A.
+- **Conclusion**: Class A cannot serve as the only production trace class.
+- **Result**: The fixed-cap piecewise root and height-order path is active.
+- **Requirement**: Do not reject these assets only because class A does not apply.
+- **Requirement**: Keep `PVC-004` constructible and reject only its unresolved active height order.
 
 ## 2026-08-01: Three-Dimensional Contact Reduction
 
@@ -1323,8 +1655,8 @@ It is not a measured product calibration value.
 
 ### Fully implicit geometry boundary
 
-- **Finding**: The current spherical tracer does not provide a certified interval enclosure.
-- **Finding**: Its scan and golden-section refinement can change optimization branches.
+- **Former finding**: The previous spherical tracer did not provide a certified interval enclosure.
+- **Former finding**: Its scan and golden-section refinement could change optimization branches.
 - **Finding**: Spatial levels, page seams, and radial recapture add more branch boundaries.
 - **Effect**: A fixed number of black-box torque probes cannot certify a reaction root for arbitrary content.
 - **Requirement**: A fully implicit solver needs certified groove curvature and stylus-envelope bounds.
@@ -1333,7 +1665,7 @@ It is not a measured product calibration value.
 - **Requirement**: The solver must enumerate deck, radial, filter, pickup, and tangential active modes.
 - **Requirement**: Interval branch-and-bound must reject every torque interval that excludes zero residual.
 - **Requirement**: A deterministic continuation rule must resolve an exact multiple solution.
-- **Status**: Design recorded. The certified tracing boundary is not implemented.
+- **Status**: Trace certification is implemented. The fully implicit coupled solver remains open.
 
 ### Midpoint discrete replacement
 
@@ -1513,6 +1845,43 @@ It is not a measured product calibration value.
 - A reservation pointer is valid only until its synchronous commit or cancel.
 - Browser scheduling can still exhaust the resident safety horizon.
 - The worklet cannot build raw pyramids fast enough for sustained 20x travel.
+
+### Trace-admission ingress audit
+
+- **Date**: 2026-08-02.
+- **Status**: Byte, identity, and canonical-pyramid corrections are implemented.
+- **Confidence**: High for the identified byte and identity paths.
+- **Finding**: The public WASM facade used one staging buffer for all page slots.
+- **Finding**: Two slots could reserve that same pointer before either slot committed.
+- **Effect**: One ordinary ingestion sequence could overwrite another slot's staged bytes.
+- **Correction**: The facade now permits only one global staging reservation.
+- **Permanent test**: Two slots cannot hold the shared staging pointer at the same time.
+- **Correction**: Commit copies staged samples into private cache storage.
+- **Permanent test**: A stale view changes only staging after commit.
+- **Trust limit**: Shared-memory mutation during one synchronous commit remains a host-process trust boundary.
+
+- **Former finding**: Precomputed levels proved only their own bytes and numeric trace bounds.
+- **Former finding**: The cache did not compare those levels with canonical decimation from base data.
+- **Effect**: A self-consistent altered pyramid could change high-speed groove geometry.
+- **Rejected argument**: A recomputed page hash does not prove canonical filtering.
+- **Correction**: Compare every supplied level with the canonical bounded filter result.
+- **Correction**: Include that comparison in fixed work accounting.
+- **Permanent test**: Recompute the certificate and page hash after a level change.
+- **Result**: The page rejects as `NoncanonicalSpatialPyramid`.
+
+- **Finding**: A resident-page manifest is not an authoritative full-record catalog.
+- **Finding**: It binds only the pages that are resident at that time.
+- **Effect**: A self-consistent first page can claim an unverified full-source identity.
+- **Possible interpretation**: The page producer can be an explicitly trusted process.
+- **Requirement**: State that trust boundary until a durable catalog or Merkle root exists.
+- **Future correction**: Bind ordered page identities to one authoritative full-record root.
+- **Disproof test**: Substitute a self-consistent page while retaining the claimed source root.
+
+- **Former finding**: Direct `PhysicalGroovePage` deserialization accepted absent optional proof fields.
+- **Limit**: Validated cache insertion rejected the incomplete page before rendering.
+- **Conflict**: The direct wire envelope retained a removed legacy shape.
+- **Correction**: The pyramid and trace certificate are mandatory during deserialization.
+- **Permanent test**: Remove either field and require deserialization failure.
 - The current prefetch planner allocates and requires stopped rendering.
 - The replay snapshot methods allocate on the AudioWorklet thread.
 - The replay schema stores derived motion instead of raw pointer samples.
@@ -1521,10 +1890,11 @@ It is not a measured product calibration value.
 
 ### Current Rust workspace result
 
-- The canonical library passes 401 tests.
-- One manual replay benchmark remains ignored.
+- The canonical library passes 536 tests.
+- Five manual benchmarks and evidence reports remain ignored.
 - The native C boundary passes 15 tests.
 - The full Rust workspace has no failed test at this checkpoint.
+- The actual `wasm32-unknown-unknown` feature build passes.
 
 ## 2026-08-01: Scratch Technique Ownership and Prediction
 

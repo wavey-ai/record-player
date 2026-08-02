@@ -14,6 +14,7 @@ pub mod riaa;
 pub mod streaming_cutter;
 pub mod stylus;
 pub mod tonearm;
+pub mod trace_admission;
 
 #[cfg(test)]
 mod rapid_scratch_reference;
@@ -43,3 +44,11 @@ pub use stylus::{
     StylusTraceError, StylusTraceSample, MAX_SPHERICAL_TRACE_CONTACTS_PER_WALL,
 };
 pub use tonearm::*;
+pub use trace_admission::{
+    GrooveTraceAdmissionCertificate, GrooveTraceAdmissionClass, GrooveTraceAdmissionError,
+    GrooveTraceAdmissionPolicy, GrooveTraceEdgeCoverage, GrooveTraceRepresentationKind,
+    CERTIFIED_CONCAVE_TRACER_ALGORITHM_VERSION,
+    CERTIFIED_TRACE_MAXIMUM_ABSOLUTE_SOURCE_FRAME_ADVANCE,
+    CONTIGUOUS_TRACE_REPRESENTATION_FORMAT_VERSION, GROOVE_TRACE_ADMISSION_CERTIFICATE_VERSION,
+    PAGED_TRACE_REPRESENTATION_FORMAT_VERSION,
+};
