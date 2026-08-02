@@ -360,3 +360,27 @@ The current evidence proves selected mechanics, trace behavior, and performance 
 It does not prove end-to-end perceptual superiority against current hardware.
 
 Make an accuracy claim only after the performance, hardware, and listening gates pass.
+
+## Rapid-Reversal Discontinuity Finding
+
+The efficient renderer contained a material stop-boundary defect.
+
+Its movement gain changed from zero to approximately 91 percent at a rate magnitude of `0.006`.
+
+A constant-PCM reversal test measured a `0.45674372` full-scale sample step.
+
+This step was signal-independent and could create a broadband click.
+
+The production renderer now uses a smooth stop envelope through a rate magnitude of `0.10`.
+
+Default moving playback has unity gain above this envelope.
+
+The optional acoustic profile retains its speed-dependent gain above the envelope.
+
+The corrected test measured a `0.008471787` full-scale maximum step.
+
+This is a 53.9-fold reduction and an approximately 34.6-decibel reduction.
+
+This result is a direct perceptual stability improvement.
+
+Hardware measurements must identify any future speed-dependent level profile.

@@ -698,3 +698,47 @@ Do not claim the most accurate player recreation before comparative measurements
 - `src/physical/contact.rs`
 - `src/physical/cartridge.rs`
 - `src/physical/output.rs`
+
+## Production Renderer Update
+
+The product now uses `ScratchAcousticDsp` as its production renderer.
+
+The default configuration preserves decoded PCM during stable 1× playback.
+
+It disables unmeasured acoustic color, surface effects, tracing loss, and the acceleration limiter.
+
+The iOS and browser surfaces use these canonical Rust defaults.
+
+### Rapid-Reversal Click Correction
+
+An automated test uses constant PCM and a 1× to -1× reversal.
+
+Constant PCM isolates gain discontinuities from source waveform changes.
+
+The former stop deadzone caused a `0.45674372` full-scale sample step.
+
+The renderer muted at a rate magnitude of `0.006`.
+
+It restored approximately 91 percent gain immediately above that boundary.
+
+This discontinuity could produce a broadband click during each reversal.
+
+The renderer now uses a continuous stop envelope.
+
+The envelope reaches unity at a rate magnitude of `0.10`.
+
+The default path keeps unity gain above that rate.
+
+It does not apply the former unmeasured speed-gain curve.
+
+The corrected reversal produced a `0.008471787` full-scale maximum step.
+
+This result is 53.9 times smaller than the former result.
+
+The reduction is approximately 34.6 decibels.
+
+The permanent test requires a maximum step below `0.01` full scale.
+
+This correction changes production audio and can remove an audible reversal click.
+
+It does not prove complete agreement with reference hardware.

@@ -24,6 +24,7 @@ const MOTOR_BRAKE_SECONDS: f64 = 0.32;
 const GRIP_OWNERSHIP: f64 = 0.5;
 const STILL_SNAP_SECONDS: f64 = 0.03;
 const DEADZONE_RATE: f64 = 0.006;
+const STOP_GAIN_FULL_RATE: f64 = 0.10;
 const PLATTER_LOCK_CENTER_RATE: f64 = 1.0;
 const PLATTER_LOCK_WIDTH: f64 = 0.42;
 const PLATTER_LOCK_STRENGTH: f64 = 0.68;
@@ -1249,7 +1250,7 @@ impl ScratchAcousticDsp {
                 self.scratch_gate
                     .process(dt, self.hand_contact, hand_rate, effective_rate)
                     as f32;
-            let movement_gain = compute_movement_gain(abs_rate);
+            let movement_gain = compute_movement_gain(abs_rate, self.config.acoustic_enabled);
             let surface_noise = if self.config.surface_enabled {
                 self.next_noise()
             } else {
@@ -2382,9 +2383,10 @@ fn sign_nonzero(primary: f64, fallback: f64) -> f64 {
     }
 }
 
-fn compute_movement_gain(abs_rate: f64) -> f64 {
-    if abs_rate <= DEADZONE_RATE {
-        return 0.0;
+fn compute_movement_gain(abs_rate: f64, acoustic_enabled: bool) -> f64 {
+    let stop_gain = smoothstep_unit(abs_rate / STOP_GAIN_FULL_RATE);
+    if !acoustic_enabled {
+        return stop_gain;
     }
     let normalized = abs_rate.clamp(0.0, 10.0);
     let underspeed = 0.78 + 0.22 * normalized.max(DEADZONE_RATE).powf(0.1);
@@ -2394,7 +2396,7 @@ fn compute_movement_gain(abs_rate: f64) -> f64 {
     } else {
         overspeed
     };
-    acoustic.clamp(0.68, 1.08)
+    (acoustic * stop_gain).clamp(0.0, 1.08)
 }
 
 /// Approximate the finite acceleration a cartridge can trace. Curvature is the
@@ -2941,17 +2943,54 @@ mod tests {
     }
 
     #[test]
-    fn movement_gain_is_silent_in_deadzone() {
-        assert_eq!(compute_movement_gain(DEADZONE_RATE * 0.5), 0.0);
+    fn movement_gain_reaches_silence_continuously_at_rest() {
+        assert_eq!(compute_movement_gain(0.0, false), 0.0);
+        assert!(compute_movement_gain(DEADZONE_RATE * 0.5, false) > 0.0);
+        assert!(
+            compute_movement_gain(DEADZONE_RATE, false)
+                > compute_movement_gain(DEADZONE_RATE * 0.5, false)
+        );
+        assert_eq!(compute_movement_gain(STOP_GAIN_FULL_RATE, false), 1.0);
     }
 
     #[test]
     fn movement_gain_stays_bounded() {
         for rate in [0.01, 0.1, 1.0, 3.0, 10.0] {
-            let gain = compute_movement_gain(rate);
+            let gain = compute_movement_gain(rate, true);
             assert!((0.0..=1.08).contains(&gain));
         }
-        assert_eq!(compute_movement_gain(1.0), 1.0);
+        assert_eq!(compute_movement_gain(1.0, true), 1.0);
+    }
+
+    #[test]
+    fn default_moving_playback_has_no_unmeasured_speed_gain() {
+        for rate in [0.1, 0.5, 1.0, 2.0, 8.0] {
+            assert_eq!(compute_movement_gain(rate, false), 1.0);
+        }
+    }
+
+    #[test]
+    fn default_rapid_reversal_has_no_stop_deadzone_click() {
+        let mut dsp = scratch_signal_dsp(ScratchPreset::Baby, 1.0);
+        dsp.render(512, 1);
+        dsp.set_motion(dsp.position, -1.0, 0.0);
+
+        let mut prior = dsp.rendered_samples().last().copied().unwrap_or_default();
+        let mut maximum_step = 0.0_f32;
+        let mut crossed_zero = false;
+        for _ in 0..4_800 {
+            dsp.render(1, 1);
+            let sample = dsp.rendered_samples()[0];
+            maximum_step = maximum_step.max((sample - prior).abs());
+            prior = sample;
+            crossed_zero |= dsp.effective_rate() < 0.0;
+        }
+
+        assert!(crossed_zero, "the test motion did not reverse the record");
+        assert!(
+            maximum_step < 0.01,
+            "the stop deadzone produced a {maximum_step} full-scale sample step"
+        );
     }
 
     #[test]
