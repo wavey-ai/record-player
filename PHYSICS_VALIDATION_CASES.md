@@ -1793,6 +1793,64 @@ The accepted profile domain needs a P-matrix proof or an equivalent bounded proo
 - **Realtime limit**: Resident-page slope maxima do not bound an unpublished whole record.
 - **Requirement**: Add an authoritative whole-record domain or certify each publication transactionally.
 
+### Player-Owned Source Admission Boundary
+
+- **Observation date**: 2026-08-02.
+- **Status**: Read-only mutation-path audit complete. Integration remains open.
+- **Source owner**: `PhysicalRecordPlayer` privately owns every loaded `PhysicalGrooveSource`.
+- **Contiguous ownership**: A contiguous source uses an immutable `Arc<GrooveAsset>`.
+- **Paged ownership**: A paged source uses an immutable `Arc<PagedGrooveCache>`.
+- **Realtime ownership**: A realtime source uses one owned `Box<RealtimePagedGrooveCache>`.
+- **Load boundary**: `PhysicalRecordPlayer::load_source` is the central source-load gate.
+- **Paged boundary**: `replace_loaded_paged_cache_snapshot` is the immutable cache-replacement gate.
+- **Realtime identity changes**: Only publication and eviction change the published realtime source identity.
+- **Staging result**: Begin, ingest, reserve, commit, cancel, finish, advance, and discard do not change that identity.
+- **Manifest bound**: Publication and eviction scan at most 64 published slots.
+- **Manifest result**: Each scan updates the stored representation identity and maximum certified slope.
+- **Bypass one**: `PhysicalGrooveSource::as_realtime_paged_cache_mut` bypasses player proof ownership.
+- **Bypass two**: `PhysicalRecordPlayer::realtime_paged_cache_mut` bypasses player proof ownership.
+- **Bypass three**: `PhysicalHostRenderer::realtime_paged_cache_mut` bypasses player proof ownership.
+- **Required replacement**: Add a non-`DerefMut` `LoadedRealtimePagedGrooveSession`.
+- **Session rule**: The session can forward staging methods without exposing the mutable cache.
+- **Publication preflight**: Read the Ready page trace certificate before the cache changes.
+- **Slope preflight**: Reject a Ready page when its maximum slope exceeds the profile proof envelope.
+- **Failure rule**: Do not run a fallible admission check after publication changes the manifest.
+- **Publication commit**: Publish the page, end the cache borrow, then read the complete new source identity.
+- **Token commit**: Calculate and assign the fixed-size source-binding token before the method returns.
+- **Atomicity result**: The exclusive player borrow hides the cache-and-token transition from callers.
+- **Eviction commit**: Refresh the token after successful eviction.
+- **Eviction domain**: Eviction cannot increase the published maximum slope.
+- **Player representation**: Store source and token in one private `AdmittedPhysicalGrooveSource`.
+- **Profile representation**: Store one profile-wide fixed-contact proof separately in the player.
+- **Token binding**: Bind config identity, proof identity, algorithm versions, radius, slope, and source identity.
+- **Load transaction**: Build the prospective token before source installation changes player state.
+- **Replacement transaction**: Build the prospective token before `mem::replace` changes the paged cache.
+- **Block gate**: Compare live source identity, token identity, and proof identity before each render block.
+- **Sample gate**: Check traced radius and each returned slope against the proof envelope.
+- **Audio-thread rule**: Do not run interval proof work during render, publication, or eviction.
+- **Snapshot binding**: Store the profile proof identity and optional loaded admission identity.
+- **Player version**: Increase snapshot version 10 to 11 during integration.
+- **Renderer version**: Increase snapshot version 4 to 5 during integration.
+- **Comment defect**: The renderer snapshot comment does not match the current exact manifest identity check.
+- **WASM impact**: WASM uses the mutable renderer accessor for realtime page operations.
+- **WASM rule**: Keep JavaScript method names and route their work through the session.
+- **C impact**: The C facade currently loads contiguous sources only.
+- **C version rule**: Internal enforcement does not require a C ABI version change.
+- **Rust impact**: Removing the mutable accessors is an intentional Rust API compatibility break.
+- **Test requirement**: Verify identical proof identities for identical profiles.
+- **Test requirement**: Verify identity changes after one exact configuration-bit change.
+- **Test requirement**: Reject out-of-envelope loads and replacements without mutation.
+- **Test requirement**: Verify staging leaves source and admission identities unchanged.
+- **Test requirement**: Verify accepted publication changes both identities.
+- **Test requirement**: Keep a rejected page Ready and keep all published state unchanged.
+- **Test requirement**: Verify eviction refreshes the binding and failed eviction changes nothing.
+- **Test requirement**: Reject stale or forged snapshot proof identities transactionally.
+- **Test requirement**: Verify player publication and eviction allocate no memory.
+- **Existing test change**: Move invalid realtime slope rejection from render time to publication time.
+- **Claim limit**: This boundary only enforces the domain that the completed proof certifies.
+- **Multiple-contact limit**: Unqualified same-wall multiple contact remains outside this proof.
+- **Standalone limit**: Direct pickup APIs remain outside the player source gate.
+
 ### Verified Mobility Proof Plan
 
 - **Observation date**: 2026-08-02.
@@ -1809,8 +1867,20 @@ The accepted profile domain needs a P-matrix proof or an equivalent bounded proo
 - **Runtime result**: The affine path reuses its current-response matrix and avoids a second circuit solve.
 - **State test**: Five configurations keep exact damping bits across 257 advanced cartridge states each.
 - **Transform test**: Mechanical-coordinate damping matches the existing coil transform by exact bits.
-- **Base verification**: Replay the production pivot schedule with outward intervals.
-- **Pivot rule**: Each scaled pivot interval must exclude zero and pass the production tolerance.
+- **Base verification**: All 24 point KKT systems now have outward solve enclosures.
+- **Scale replay**: The verifier uses the production row and column scales.
+- **Pivot replay**: The verifier uses the deterministic production pivot schedule.
+- **Pivot gate**: The complete pivot interval must exclude zero and clear the production tolerance.
+- **Bit parity**: Each point replay matches production mobility by exact `f64` bits.
+- **Mobility enclosure**: Each outward interval contains the matching production coefficient.
+- **Residual enclosure**: Each original KKT residual interval contains zero.
+- **Seed pivot lower bound**: The smallest verified scaled pivot is `0.08165190678245332`.
+- **Seed robustness floor**: The current initial floor is `6.4e-9`.
+- **Seed mobility width**: The largest raw dynamic coefficient width is `2.664535259100376e-15`.
+- **Seed residual bound**: The largest raw residual absolute bound is `2.7222668563808843e-13`.
+- **Units warning**: These raw mobility and residual diagnostics contain mixed physical units.
+- **Exact oracle**: Independent dyadic rational solves check representative scaled systems.
+- **Current proof limit**: Radius, slope, `H`, `G`, and normal minors remain outside this checkpoint.
 - **Mobility definition**: Store response as velocity rows by equation columns.
 - **Equation order**: `[platter, record, tip-x, body-x, tip-z, body-z]`.
 - **Velocity order**: `[platter, record, tip-x, tip-z, body-x, body-z]`.

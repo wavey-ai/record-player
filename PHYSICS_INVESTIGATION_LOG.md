@@ -655,6 +655,21 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Requirement**: Reject an unproved operator before playback changes state.
 - **Proof decision**: Verify 24 point-valued base mobility systems before applying interval contact operators.
 - **Reason**: The mechanical left-hand sides do not depend on groove radius or wall slope.
+- **Base verification result**: All 24 mechanical KKT systems now have outward point-solve enclosures.
+- **Replay result**: The verifier uses the production row scales, column scales, and deterministic pivot schedule.
+- **Bit result**: Each reference replay matches every production dynamic mobility coefficient by exact bits.
+- **Enclosure result**: Each outward mobility interval contains its production coefficient.
+- **Pivot rule**: The complete pivot interval must exclude zero and clear the production tolerance.
+- **Residual rule**: Each verified full solution must contain zero in every original-equation residual.
+- **Diagnostic result**: The verifier reports pivot, solution-width, and residual-width margins.
+- **Seed pivot result**: The smallest verified scaled pivot lower bound is `0.08165190678245332`.
+- **Seed robustness result**: This lower bound is greater than the initial `6.4e-9` robustness floor.
+- **Seed width result**: The largest raw dynamic mobility interval width is `2.664535259100376e-15`.
+- **Seed residual result**: The largest raw residual absolute bound is `2.7222668563808843e-13`.
+- **Units limit**: Mobility coefficients and KKT rows use mixed physical units.
+- **Exact test**: A dyadic rational oracle checks representative scaled systems independently.
+- **Current limit**: This result encloses point KKT solves only.
+- **Current limit**: It does not yet enclose `H`, `G`, radius, slopes, or contact minors.
 - **Proof decision**: Apply stylus sticking with a verified nonsymmetric rank-one Schur update.
 - **Rejected design**: Do not interval-solve one parameterized 13-by-13 system for every domain box.
 - **Reason**: That design repeats work and introduces unnecessary interval dependency.
@@ -700,6 +715,28 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Current status**: Config identity tests pass. The identity does not gate playback yet.
 - **Source-domain risk**: Resident realtime pages do not prove a whole-record slope bound.
 - **Required response**: Reject those sources or publish source metadata and proof atomically.
+- **Ownership decision**: The player will own one profile-wide fixed-contact proof envelope.
+- **Thread decision**: Build the proof envelope before rendering starts.
+- **Source decision**: Bind each loaded source identity to the profile proof with a fixed-size token.
+- **State decision**: Store the source and its token in one private admitted-source value.
+- **Load rule**: Build the prospective token before `load_source` changes player state.
+- **Replacement rule**: Build the prospective token before an immutable page-cache replacement commits.
+- **Realtime bypass**: Three public mutable cache accessors can change source identity without updating proof state.
+- **Required correction**: Replace those accessors with a non-`DerefMut` player-owned realtime session.
+- **Staging result**: Realtime staging does not change the published source identity.
+- **Publication rule**: Check the Ready page certificate slope before `publish_page` changes the manifest.
+- **Manifest result**: Publication recomputes identity and maximum slope across at most 64 slots before return.
+- **Token rule**: Refresh the source-binding token after that bounded manifest update.
+- **Eviction rule**: Refresh the token after successful eviction. Eviction cannot enlarge the slope domain.
+- **Render rule**: Compare live source, token, and proof identities once before each render block.
+- **Sample rule**: Check traced radius and slopes against the certified envelope in each physics sample.
+- **Work rule**: Do not run interval subdivision, family enumeration, or proof hashing in the audio loop.
+- **Snapshot rule**: Bind the proof identity and loaded admission identity before snapshot restore changes state.
+- **Version requirement**: Increase player snapshot version 10 to 11 during integration.
+- **Version requirement**: Increase renderer snapshot version 4 to 5 during integration.
+- **WASM result**: The WASM facade currently uses the mutable renderer cache accessor.
+- **C result**: The C facade currently loads contiguous groove sources only.
+- **Proof limit**: This ownership design does not complete the fixed-mode interval proof.
 - **Theorem scope**: A P-matrix proves uniqueness only for one fixed linear complementarity problem.
 - **Hybrid limit**: It does not prove that two different discrete modes cannot both pass.
 - **Exact overlap**: At zero stylus friction, loaded positive sliding and separation can use the same system.

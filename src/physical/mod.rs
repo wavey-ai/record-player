@@ -1,6 +1,8 @@
 pub mod cartridge;
 pub mod contact;
 pub mod electromechanical;
+#[allow(dead_code)]
+pub(crate) mod fixed_mode_certificate;
 pub mod groove;
 pub mod output;
 pub mod paged_groove;
