@@ -5,8 +5,8 @@ use wasm_bindgen::prelude::*;
 
 use crate::{
     mechanics::{
-        DeckMechanicalControl, DeckMechanicalState, MotorMode, NormalizedDeckControl,
-        PhysicalDeckConfig,
+        DeckMechanicalControl, DeckMechanicalError, DeckMechanicalState, DeckMechanicalTelemetry,
+        MotorMode, NormalizedDeckControl, PhysicalDeckConfig,
     },
     mixer::{sharp_crossfader_gains, DEFAULT_SHARP_CROSSFADER_WIDTH},
     resampler::adaptive_sample,
@@ -47,6 +47,7 @@ const CONTACT_IMPULSE_DECAY: f64 = 0.985;
 const WINDOW_REQUEST_MARGIN_SECONDS: f64 = 0.75;
 const WINDOW_REQUEST_PROJECT_SECONDS: f64 = 0.18;
 const WINDOW_MISS_FADE_SECONDS: f64 = 0.006;
+const MOMENTARY_CROSSFADER_TRANSITION_SECONDS: f64 = 0.00045;
 const PROGRAMME_END_POSITION_EPSILON_FRAMES: f64 = 1.0e-7;
 const DEFAULT_REPLAY_NOISE_SEED: u32 = 0x9e37_79b9;
 
@@ -334,6 +335,33 @@ pub struct AcousticStatus {
     pub output_length: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum DeckRecoveryOperation {
+    RestReset = 1,
+    LockedPlaybackReset = 2,
+    MechanicalAdvance = 3,
+    ServoCaptureReset = 4,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DeckRecoveryDiagnostic {
+    pub count: u64,
+    pub operation: DeckRecoveryOperation,
+    pub error: DeckMechanicalError,
+    pub output_sample_rate: f64,
+    pub source_sample_rate: f64,
+    pub position: f64,
+    pub target_position: f64,
+    pub requested_hand_rate: f64,
+    pub motor_rate: f64,
+    pub grip: f64,
+    pub platter_rate_before: f64,
+    pub record_rate_before: f64,
+    pub platter_turns_before: f64,
+    pub record_turns_before: f64,
+}
+
 #[derive(Clone, Debug)]
 struct AcousticReplaySnapshot {
     restore_pending: bool,
@@ -370,6 +398,10 @@ struct AcousticReplaySnapshot {
     frames_since_window_request: usize,
     scratch_gate: ScratchGate,
     manual_fader_gain: f64,
+    momentary_crossfader_gain: f64,
+    momentary_crossfader_mix: f64,
+    momentary_crossfader_mix_target: f64,
+    audible_crossfader_gain: f64,
     output_gain_current: f64,
     output_gain_target: f64,
     output_gain_step: f64,
@@ -387,6 +419,7 @@ pub struct ScratchAcousticDsp {
     native_rpm: f64,
     deck_state: DeckMechanicalState,
     deck_recovery_count: u64,
+    last_deck_recovery: Option<DeckRecoveryDiagnostic>,
     channels: Arc<Vec<Vec<f32>>>,
     total_frames: usize,
     window_start: usize,
@@ -423,6 +456,10 @@ pub struct ScratchAcousticDsp {
     scratch_gate: ScratchGate,
     scratch_gate_trace: Vec<f32>,
     manual_fader_gain: f64,
+    momentary_crossfader_gain: f64,
+    momentary_crossfader_mix: f64,
+    momentary_crossfader_mix_target: f64,
+    audible_crossfader_gain: f64,
     output_gain_current: f64,
     output_gain_target: f64,
     output_gain_step: f64,
@@ -478,6 +515,7 @@ impl ScratchAcousticDsp {
             native_rpm,
             deck_state,
             deck_recovery_count: 0,
+            last_deck_recovery: None,
             channels: Arc::new(Vec::new()),
             total_frames: 0,
             window_start: 0,
@@ -514,6 +552,10 @@ impl ScratchAcousticDsp {
             scratch_gate: ScratchGate::default(),
             scratch_gate_trace: Vec::new(),
             manual_fader_gain: 1.0,
+            momentary_crossfader_gain: 1.0,
+            momentary_crossfader_mix: 0.0,
+            momentary_crossfader_mix_target: 0.0,
+            audible_crossfader_gain: 1.0,
             output_gain_current: 1.0,
             output_gain_target: 1.0,
             output_gain_step: 0.0,
@@ -698,6 +740,22 @@ impl ScratchAcousticDsp {
         self.manual_fader_gain
     }
 
+    /// Overrides the selected technique while the host control is active.
+    /// The release returns control to the technique through a de-click ramp.
+    #[wasm_bindgen(js_name = setMomentaryCrossfaderOverride)]
+    pub fn set_momentary_crossfader_override(&mut self, active: bool, open: bool) {
+        if active {
+            self.momentary_crossfader_gain = f64::from(open);
+        }
+        self.momentary_crossfader_mix_target = f64::from(active);
+    }
+
+    /// Reports the final audible fader gain after all technique and host input.
+    #[wasm_bindgen(getter, js_name = audibleCrossfaderGain)]
+    pub fn audible_crossfader_gain(&self) -> f64 {
+        self.audible_crossfader_gain
+    }
+
     /// Final post-mix gain used by the host for packet and mixer level. A
     /// linear ramp starts from the gain active at the next rendered frame.
     #[wasm_bindgen(js_name = setOutputGain)]
@@ -775,6 +833,10 @@ impl ScratchAcousticDsp {
             snapshot.frames_since_window_request = self.frames_since_window_request;
             snapshot.scratch_gate.clone_from(&self.scratch_gate);
             snapshot.manual_fader_gain = self.manual_fader_gain;
+            snapshot.momentary_crossfader_gain = self.momentary_crossfader_gain;
+            snapshot.momentary_crossfader_mix = self.momentary_crossfader_mix;
+            snapshot.momentary_crossfader_mix_target = self.momentary_crossfader_mix_target;
+            snapshot.audible_crossfader_gain = self.audible_crossfader_gain;
             snapshot.output_gain_current = self.output_gain_current;
             snapshot.output_gain_target = self.output_gain_target;
             snapshot.output_gain_step = self.output_gain_step;
@@ -821,6 +883,10 @@ impl ScratchAcousticDsp {
             frames_since_window_request: self.frames_since_window_request,
             scratch_gate: self.scratch_gate.clone(),
             manual_fader_gain: self.manual_fader_gain,
+            momentary_crossfader_gain: self.momentary_crossfader_gain,
+            momentary_crossfader_mix: self.momentary_crossfader_mix,
+            momentary_crossfader_mix_target: self.momentary_crossfader_mix_target,
+            audible_crossfader_gain: self.audible_crossfader_gain,
             output_gain_current: self.output_gain_current,
             output_gain_target: self.output_gain_target,
             output_gain_step: self.output_gain_step,
@@ -880,6 +946,10 @@ impl ScratchAcousticDsp {
         swap_replay_field!(frames_since_window_request);
         swap_replay_field!(scratch_gate);
         swap_replay_field!(manual_fader_gain);
+        swap_replay_field!(momentary_crossfader_gain);
+        swap_replay_field!(momentary_crossfader_mix);
+        swap_replay_field!(momentary_crossfader_mix_target);
+        swap_replay_field!(audible_crossfader_gain);
         swap_replay_field!(output_gain_current);
         swap_replay_field!(output_gain_target);
         swap_replay_field!(output_gain_step);
@@ -946,6 +1016,14 @@ impl ScratchAcousticDsp {
         self.requested_window_position = None;
         self.scratch_gate.reset_for_replay();
         self.scratch_gate_trace.clear();
+        self.momentary_crossfader_gain = 1.0;
+        self.momentary_crossfader_mix = 0.0;
+        self.momentary_crossfader_mix_target = 0.0;
+        self.audible_crossfader_gain = if self.scratch_gate.preset() == ScratchPreset::Baby {
+            self.manual_fader_gain
+        } else {
+            self.scratch_gate.gate()
+        };
         self.surface_bed = None;
         self.needle_thump = None;
         self.needle_burst = None;
@@ -1190,8 +1268,7 @@ impl ScratchAcousticDsp {
             };
             self.advance_scratch_gate_trace(frame_count, gate_contact, intent_rate, rendered_rate);
             self.mix_foley(frame_count, output_channel_count);
-            self.apply_scratch_gate_trace(frame_count, output_channel_count);
-            self.apply_manual_fader_gain();
+            self.apply_crossfader_trace(frame_count, output_channel_count);
             self.apply_output_gain(frame_count, output_channel_count);
             return u32::try_from(frame_count).unwrap_or(u32::MAX);
         }
@@ -1391,8 +1468,7 @@ impl ScratchAcousticDsp {
             }
         }
         self.mix_foley(rendered_frames, output_channel_count);
-        self.apply_scratch_gate_trace(rendered_frames, output_channel_count);
-        self.apply_manual_fader_gain();
+        self.apply_crossfader_trace(rendered_frames, output_channel_count);
         self.apply_output_gain(rendered_frames, output_channel_count);
         self.maybe_request_window(rendered_frames);
         u32::try_from(rendered_frames).unwrap_or(u32::MAX)
@@ -1428,8 +1504,7 @@ impl ScratchAcousticDsp {
         };
         self.advance_scratch_gate_trace(frame_count, gate_contact, intent_rate, rendered_rate);
         self.mix_foley(frame_count, output_channel_count);
-        self.apply_scratch_gate_trace(frame_count, output_channel_count);
-        self.apply_manual_fader_gain();
+        self.apply_crossfader_trace(frame_count, output_channel_count);
         self.apply_output_gain(frame_count, output_channel_count);
     }
 
@@ -1463,8 +1538,7 @@ impl ScratchAcousticDsp {
             self.scratch_gate_trace[frame] = self.scratch_gate.process(dt, false, 0.0, 0.0) as f32;
         }
         self.mix_foley(frame_count, output_channel_count);
-        self.apply_scratch_gate_trace(frame_count, output_channel_count);
-        self.apply_manual_fader_gain();
+        self.apply_crossfader_trace(frame_count, output_channel_count);
         self.apply_output_gain(frame_count, output_channel_count);
     }
 
@@ -1649,6 +1723,10 @@ impl ScratchAcousticDsp {
             return Err("stylus tracing limit must be between 0 and 1".to_owned());
         }
         Ok(Self::new_internal(output_sample_rate, config))
+    }
+
+    pub fn deck_recovery_diagnostic(&self) -> Option<DeckRecoveryDiagnostic> {
+        self.last_deck_recovery
     }
 
     /// Installs host-decoded surface PCM without routing native audio through
@@ -1997,27 +2075,30 @@ impl ScratchAcousticDsp {
         }
     }
 
-    fn apply_scratch_gate_trace(&mut self, frame_count: usize, output_channel_count: usize) {
+    fn apply_crossfader_trace(&mut self, frame_count: usize, output_channel_count: usize) {
+        let dt = 1.0 / self.output_sample_rate;
+        let alpha = if dt.is_finite() && dt > 0.0 {
+            1.0 - (-dt / MOMENTARY_CROSSFADER_TRANSITION_SECONDS).exp()
+        } else {
+            1.0
+        };
         for frame in 0..frame_count {
-            let gain = self.scratch_gate_trace[frame];
+            self.momentary_crossfader_mix = (self.momentary_crossfader_mix
+                + (self.momentary_crossfader_mix_target - self.momentary_crossfader_mix) * alpha)
+                .clamp(0.0, 1.0);
+            let technique_gain = if self.scratch_gate.preset() == ScratchPreset::Baby {
+                self.manual_fader_gain
+            } else {
+                f64::from(self.scratch_gate_trace[frame])
+            };
+            let gain = (technique_gain * (1.0 - self.momentary_crossfader_mix)
+                + self.momentary_crossfader_gain * self.momentary_crossfader_mix)
+                .clamp(0.0, 1.0);
+            self.scratch_gate_trace[frame] = gain as f32;
+            self.audible_crossfader_gain = gain;
             for channel_index in 0..output_channel_count {
-                self.output[frame * output_channel_count + channel_index] *= gain;
+                self.output[frame * output_channel_count + channel_index] *= gain as f32;
             }
-        }
-    }
-
-    /// The manual deck fader is authoritative only in the `baby` mode. Every
-    /// automatic technique owns the audible fader through its audio-rate gate.
-    fn apply_manual_fader_gain(&mut self) {
-        if self.scratch_gate.preset() != ScratchPreset::Baby {
-            return;
-        }
-        if self.manual_fader_gain == 1.0 {
-            return;
-        }
-        let gain = self.manual_fader_gain as f32;
-        for sample in &mut self.output {
-            *sample *= gain;
         }
     }
 
@@ -2092,13 +2173,15 @@ impl ScratchAcousticDsp {
                         } else {
                             self.surface_asset_sample(channel_index, bed.position, bed.looping)
                         };
-                        let bed = self.surface_bed.as_mut().unwrap();
-                        per_channel[channel_index] +=
-                            bed.filters[channel_index].process(raw) * envelope;
+                        if let Some(active_bed) = self.surface_bed.as_mut() {
+                            per_channel[channel_index] +=
+                                active_bed.filters[channel_index].process(raw) * envelope;
+                        }
                     }
-                    let bed = self.surface_bed.as_mut().unwrap();
-                    bed.position += asset_step;
-                    bed.elapsed_frames += 1.0;
+                    if let Some(active_bed) = self.surface_bed.as_mut() {
+                        active_bed.position += asset_step;
+                        active_bed.elapsed_frames += 1.0;
+                    }
                 }
             }
             if let Some(mut thump) = self.needle_thump.take() {
@@ -2121,13 +2204,15 @@ impl ScratchAcousticDsp {
                         } else {
                             self.surface_asset_sample(channel_index, burst.position, false)
                         };
-                        let burst = self.needle_burst.as_mut().unwrap();
-                        per_channel[channel_index] +=
-                            burst.filters[channel_index].process(raw) * envelope;
+                        if let Some(active_burst) = self.needle_burst.as_mut() {
+                            per_channel[channel_index] +=
+                                active_burst.filters[channel_index].process(raw) * envelope;
+                        }
                     }
-                    let burst = self.needle_burst.as_mut().unwrap();
-                    burst.position += asset_step;
-                    burst.elapsed_frames += 1.0;
+                    if let Some(active_burst) = self.needle_burst.as_mut() {
+                        active_burst.position += asset_step;
+                        active_burst.elapsed_frames += 1.0;
+                    }
                 }
             }
             for channel_index in 0..output_channel_count.min(2) {
@@ -2140,18 +2225,52 @@ impl ScratchAcousticDsp {
     }
 
     fn reset_deck_to_rest_at_current_turns(&mut self) {
+        let before = self.deck_state.telemetry();
         let turns = if self.platter_rotation_turns.is_finite() {
             self.platter_rotation_turns
         } else {
-            self.deck_recovery_count = self.deck_recovery_count.saturating_add(1);
+            self.record_deck_recovery(
+                DeckRecoveryOperation::RestReset,
+                DeckMechanicalError::InvalidControl {
+                    field: "platterRotationTurns",
+                },
+                before,
+                0.0,
+            );
             self.platter_rotation_turns = 0.0;
             0.0
         };
-        if self.deck_state.reset(0.0, 0.0, turns, turns).is_err() {
-            self.deck_recovery_count = self.deck_recovery_count.saturating_add(1);
+        if let Err(error) = self.deck_state.reset(0.0, 0.0, turns, turns) {
+            self.record_deck_recovery(DeckRecoveryOperation::RestReset, error, before, 0.0);
             self.platter_rotation_turns = 0.0;
             let _ = self.deck_state.reset(0.0, 0.0, 0.0, 0.0);
         }
+    }
+
+    fn record_deck_recovery(
+        &mut self,
+        operation: DeckRecoveryOperation,
+        error: DeckMechanicalError,
+        before: DeckMechanicalTelemetry,
+        requested_hand_rate: f64,
+    ) {
+        self.deck_recovery_count = self.deck_recovery_count.saturating_add(1);
+        self.last_deck_recovery = Some(DeckRecoveryDiagnostic {
+            count: self.deck_recovery_count,
+            operation,
+            error,
+            output_sample_rate: self.output_sample_rate,
+            source_sample_rate: self.source_sample_rate,
+            position: self.position,
+            target_position: self.target_position,
+            requested_hand_rate,
+            motor_rate: self.motor_rate,
+            grip: self.grip,
+            platter_rate_before: before.platter_rate,
+            record_rate_before: before.record_rate,
+            platter_turns_before: before.platter_angle_turns,
+            record_turns_before: before.record_angle_turns,
+        });
     }
 
     fn reset_position(&mut self, position: f64) {
@@ -2282,23 +2401,25 @@ impl ScratchAcousticDsp {
             && before.record_rate == self.motor_rate
         {
             let turn_step = self.motor_rate * self.native_rpm / (60.0 * self.output_sample_rate);
-            if self
-                .deck_state
-                .reset(
-                    self.motor_rate,
-                    self.motor_rate,
-                    before.platter_angle_turns + turn_step,
-                    before.record_angle_turns + turn_step,
-                )
-                .is_ok()
-            {
+            if let Err(error) = self.deck_state.reset(
+                self.motor_rate,
+                self.motor_rate,
+                before.platter_angle_turns + turn_step,
+                before.record_angle_turns + turn_step,
+            ) {
+                self.record_deck_recovery(
+                    DeckRecoveryOperation::LockedPlaybackReset,
+                    error,
+                    before,
+                    hand_rate,
+                );
+            } else {
                 self.rate_velocity = 0.0;
                 self.rate = self.motor_rate;
                 self.motor_delivered_rate = self.motor_rate;
                 self.platter_rotation_turns = before.record_angle_turns + turn_step;
                 return self.motor_rate;
             }
-            self.deck_recovery_count = self.deck_recovery_count.saturating_add(1);
         }
         let hand_target_angle_turns = if self.hand_contact && self.grip > 0.0 {
             let frames_per_turn =
@@ -2327,19 +2448,27 @@ impl ScratchAcousticDsp {
             stylus_torque_nm: 0.0,
         };
         let control = DeckMechanicalControl::from_normalized(self.deck_state.config(), normalized);
-        let Ok(mut telemetry) = self
+        let mut telemetry = match self
             .deck_state
             .advance(1.0 / self.output_sample_rate, control)
-        else {
-            // The mechanical step is transactional. Keep its last valid state
-            // for this sample, then retry the current control on the next one.
-            // A rejected step must not unwind through a real-time callback.
-            self.deck_recovery_count = self.deck_recovery_count.saturating_add(1);
-            self.rate_velocity = 0.0;
-            self.rate = before.record_rate;
-            self.motor_delivered_rate = before.platter_rate;
-            self.platter_rotation_turns = before.record_angle_turns;
-            return before.record_rate;
+        {
+            Ok(telemetry) => telemetry,
+            Err(error) => {
+                // The mechanical step is transactional. Keep its last valid state
+                // for this sample, then retry the current control on the next one.
+                // A rejected step must not unwind through a real-time callback.
+                self.record_deck_recovery(
+                    DeckRecoveryOperation::MechanicalAdvance,
+                    error,
+                    before,
+                    hand_rate,
+                );
+                self.rate_velocity = 0.0;
+                self.rate = before.record_rate;
+                self.motor_delivered_rate = before.platter_rate;
+                self.platter_rotation_turns = before.record_angle_turns;
+                return before.record_rate;
+            }
         };
         let servo_capture_error = 1.0e-5;
         if !self.hand_contact
@@ -2347,19 +2476,20 @@ impl ScratchAcousticDsp {
             && (telemetry.platter_rate - self.motor_rate).abs() < servo_capture_error
             && (telemetry.record_rate - self.motor_rate).abs() < servo_capture_error
         {
-            if self
-                .deck_state
-                .reset(
-                    self.motor_rate,
-                    self.motor_rate,
-                    telemetry.platter_angle_turns,
-                    telemetry.record_angle_turns,
-                )
-                .is_ok()
-            {
-                telemetry = self.deck_state.telemetry();
+            if let Err(error) = self.deck_state.reset(
+                self.motor_rate,
+                self.motor_rate,
+                telemetry.platter_angle_turns,
+                telemetry.record_angle_turns,
+            ) {
+                self.record_deck_recovery(
+                    DeckRecoveryOperation::ServoCaptureReset,
+                    error,
+                    telemetry,
+                    hand_rate,
+                );
             } else {
-                self.deck_recovery_count = self.deck_recovery_count.saturating_add(1);
+                telemetry = self.deck_state.telemetry();
             }
         }
         self.rate_velocity = (telemetry.record_rate - self.rate) * self.output_sample_rate;
@@ -2601,6 +2731,20 @@ mod tests {
         assert!((dsp.motor_delivered_rate - 0.42).abs() < 1.0e-12);
         assert!((dsp.platter_rotation_turns - 12.0).abs() < 1.0e-12);
         assert_eq!(dsp.deck_recovery_count(), 1);
+        let diagnostic = dsp
+            .deck_recovery_diagnostic()
+            .expect("a rejected step must retain its exact diagnostic");
+        assert_eq!(diagnostic.count, 1);
+        assert_eq!(
+            diagnostic.operation,
+            DeckRecoveryOperation::MechanicalAdvance
+        );
+        assert_eq!(diagnostic.error, DeckMechanicalError::InvalidDuration);
+        assert_eq!(diagnostic.requested_hand_rate, -1.0);
+        assert!((diagnostic.platter_rate_before - 0.42).abs() < 1.0e-12);
+        assert!((diagnostic.record_rate_before - 0.37).abs() < 1.0e-12);
+        assert_eq!(diagnostic.platter_turns_before, 12.0);
+        assert_eq!(diagnostic.record_turns_before, 12.0);
     }
 
     #[test]
@@ -3470,22 +3614,22 @@ mod tests {
     }
 
     #[test]
-    fn manual_fader_defaults_to_an_exact_post_gate_noop_and_validates_range() {
+    fn manual_fader_defaults_to_an_exact_noop_and_validates_range() {
         let mut dsp = simulation_dsp();
         assert_eq!(dsp.manual_fader_gain(), 1.0);
         dsp.output = vec![0.8, -0.4, 0.25, -1.0];
         let unchanged = dsp.output.clone();
-        dsp.apply_manual_fader_gain();
+        dsp.scratch_gate_trace = vec![1.0, 1.0];
+        dsp.apply_crossfader_trace(2, 2);
         assert_eq!(dsp.output, unchanged);
 
+        dsp.output.clone_from(&unchanged);
         dsp.scratch_gate_trace = vec![0.25, 0.5];
-        dsp.apply_scratch_gate_trace(2, 2);
         dsp.set_manual_fader_gain(0.4).unwrap();
-        dsp.apply_manual_fader_gain();
+        dsp.apply_crossfader_trace(2, 2);
         let mut expected = unchanged;
         for frame in 0..2 {
             for channel in 0..2 {
-                expected[frame * 2 + channel] *= dsp.scratch_gate_trace[frame];
                 expected[frame * 2 + channel] *= 0.4;
             }
         }
@@ -3517,18 +3661,46 @@ mod tests {
     fn automatic_preset_owns_the_real_fader_while_baby_uses_manual_control() {
         let mut baby = simulation_dsp();
         baby.output = vec![0.8, -0.4];
+        baby.scratch_gate_trace = vec![1.0];
         baby.set_manual_fader_gain(0.0).unwrap();
-        baby.apply_manual_fader_gain();
+        baby.apply_crossfader_trace(1, 2);
         assert_eq!(baby.output, vec![0.0, -0.0]);
 
         let mut automatic = simulation_dsp();
         automatic.set_scratch_preset("stab").unwrap();
         automatic.output = vec![0.8, -0.4];
         automatic.scratch_gate_trace = vec![0.25];
-        automatic.apply_scratch_gate_trace(1, 2);
         automatic.set_manual_fader_gain(0.0).unwrap();
-        automatic.apply_manual_fader_gain();
+        automatic.apply_crossfader_trace(1, 2);
         assert_eq!(automatic.output, vec![0.2, -0.1]);
+    }
+
+    #[test]
+    fn held_momentary_crossfader_overrides_every_selected_technique() {
+        let mut close = simulation_dsp();
+        close.set_scratch_preset("stab").unwrap();
+        close.set_momentary_crossfader_override(true, false);
+        close.output = vec![1.0; 2_048];
+        close.scratch_gate_trace = vec![1.0; 1_024];
+        close.apply_crossfader_trace(1_024, 2);
+        assert!(close.audible_crossfader_gain() < 1.0e-12);
+        assert!(close.output[2_046].abs() < 1.0e-12);
+
+        let mut open = simulation_dsp();
+        open.set_scratch_preset("crab").unwrap();
+        open.set_momentary_crossfader_override(true, true);
+        open.output = vec![1.0; 2_048];
+        open.scratch_gate_trace = vec![0.0; 1_024];
+        open.apply_crossfader_trace(1_024, 2);
+        assert!(1.0 - open.audible_crossfader_gain() < 1.0e-12);
+        assert!(1.0 - open.output[2_046] < 1.0e-12);
+
+        open.set_momentary_crossfader_override(false, false);
+        open.output.fill(1.0);
+        open.scratch_gate_trace.fill(0.0);
+        open.apply_crossfader_trace(1_024, 2);
+        assert!(open.audible_crossfader_gain() < 1.0e-12);
+        assert!(open.output[2_046].abs() < 1.0e-12);
     }
 
     #[test]

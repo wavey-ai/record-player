@@ -619,13 +619,13 @@ The existing predictor also remains stable during coalesced input and rapid reve
 - Drum differentiated stepwise host intent.
 - Therefore, event packetization could create a Drum attack.
 - Drum could open before the record completed its outgoing motion.
-- Click patterns could repeat after the predicted endpoint.
-- Therefore, one stroke could exceed the selected click count.
+- Click patterns stopped after the predicted endpoint.
+- Therefore, continued record motion could leave the crossfader in one state.
 
 ### Replacement Technique Fixture
 
 - **Fixture schema version**: 4.
-- **Algorithm version**: 9.
+- **Algorithm version**: 10.
 - **Gate snapshot version**: 4.
 - **Performance snapshot version**: 4.
 - **Sample rate**: 48,000 hertz.
@@ -724,7 +724,7 @@ The maximum-rate fixture also covers plus and minus 20 record rate.
 - `flare_is_one_sided_while_orbit_repeats_the_notch_on_return`
 - `crab_is_a_clustered_finger_burst_not_a_transform_duty_variant`
 - `transform_has_a_closed_baseline_with_brief_uniform_taps`
-- `click_count_does_not_repeat_after_predicted_stroke_endpoint`
+- `click_driven_techniques_repeat_for_continuous_record_motion`
 - `first_stroke_seed_has_zero_confidence_until_one_stroke_is_observed`
 - `reversal_learns_only_the_completed_direction_span`
 - `asymmetric_direction_spans_clock_clicks_independently`

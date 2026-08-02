@@ -20,7 +20,8 @@ pub mod timed_control;
 mod view;
 
 pub use acoustic::{
-    AcousticConfig, AcousticStatus, CalibrationAnchor, ScratchAcousticDsp, StylusCalibration,
+    AcousticConfig, AcousticStatus, CalibrationAnchor, DeckRecoveryDiagnostic,
+    DeckRecoveryOperation, ScratchAcousticDsp, StylusCalibration,
 };
 pub use command::*;
 pub use engine::*;

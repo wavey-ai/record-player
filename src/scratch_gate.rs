@@ -6,7 +6,7 @@ use thiserror::Error;
 
 pub const MIN_SCRATCH_CLICKS: u8 = 1;
 pub const MAX_SCRATCH_CLICKS: u8 = 8;
-pub const SCRATCH_GATE_ALGORITHM_VERSION: u32 = 9;
+pub const SCRATCH_GATE_ALGORITHM_VERSION: u32 = 10;
 pub const SCRATCH_GATE_SNAPSHOT_VERSION: u32 = 4;
 pub const SCRATCH_PERFORMANCE_SNAPSHOT_VERSION: u32 = 4;
 pub const MAXIMUM_SCRATCH_RECORD_RATE: f64 = 20.0;
@@ -609,6 +609,10 @@ impl ScratchGate {
         (self.stroke_travel / self.learned_span().max(MIN_LEARNED_SPAN)).clamp(0.0, 1.0)
     }
 
+    fn repeating_phrase_progress(&self) -> f64 {
+        (self.stroke_travel / self.learned_span().max(MIN_LEARNED_SPAN)).rem_euclid(1.0)
+    }
+
     /// Returns the estimate for the active direction.
     ///
     /// Before motion starts, this method returns the forward seed.
@@ -998,11 +1002,7 @@ impl ScratchGate {
             self.phase = progress;
             return;
         }
-        if progress >= 1.0 {
-            self.phase = 1.0;
-            return;
-        }
-        self.phase = (progress * f64::from(self.clicks)).rem_euclid(1.0);
+        self.phase = (self.repeating_phrase_progress() * f64::from(self.clicks)).rem_euclid(1.0);
     }
 
     fn update_drum(
@@ -1107,9 +1107,9 @@ impl ScratchGate {
                     f64::from(distance_from_midpoint(self.phase) >= FLARE_NOTCH_HALF_WIDTH)
                 }
             }
-            ScratchPreset::Crab => {
-                f64::from(self.moving && crab_pulse_is_open(self.stroke_progress(), self.clicks))
-            }
+            ScratchPreset::Crab => f64::from(
+                self.moving && crab_pulse_is_open(self.repeating_phrase_progress(), self.clicks),
+            ),
             ScratchPreset::Orbit => {
                 if !self.moving {
                     1.0
@@ -1590,7 +1590,7 @@ mod tests {
         assert_eq!(fixtures["clickEndpoint"]["renderedPredictedSpans"], 3.0);
         assert_eq!(
             fixtures["clickEndpoint"]["expectedRunCountRule"],
-            "selected click count"
+            "selected click count per rendered phrase"
         );
         assert_eq!(fixtures["drumPacketization"]["frameCount"], 8_000);
         assert_eq!(
@@ -2161,7 +2161,7 @@ mod tests {
     }
 
     #[test]
-    fn click_count_does_not_repeat_after_predicted_stroke_endpoint() {
+    fn click_driven_techniques_repeat_for_continuous_record_motion() {
         for clicks in [1, 4, 8] {
             for (preset, counted_target) in [
                 (ScratchPreset::Transform, 1.0),
@@ -2176,8 +2176,8 @@ mod tests {
                 gate.moving = true;
                 let mut previous = gate.compute_target(1.0, 1.0);
                 let mut runs = usize::from(previous == counted_target);
-                let frames = (gate.learned_span() * 3.0 * SAMPLE_RATE).ceil() as usize;
-                for _ in 0..frames {
+                let frames = (gate.learned_span() * 3.0 * SAMPLE_RATE).floor() as usize;
+                for _ in 0..frames.saturating_sub(1) {
                     gate.process(1.0 / SAMPLE_RATE, true, 1.0, 1.0);
                     let current = gate.target();
                     if current == counted_target && previous != counted_target {
@@ -2185,7 +2185,7 @@ mod tests {
                     }
                     previous = current;
                 }
-                assert_eq!(runs, usize::from(clicks), "{preset:?} at {clicks}");
+                assert_eq!(runs, usize::from(clicks) * 3, "{preset:?} at {clicks}");
                 assert_eq!(gate.stroke_progress(), 1.0);
             }
         }

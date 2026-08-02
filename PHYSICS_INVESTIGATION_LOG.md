@@ -86,6 +86,36 @@ Use this ledger to track requirements across the chronological findings.
   **Status**: Implemented as an optional estimated profile. Hardware calibration remains open.
 - **RP-045 — Callback panic containment**: Do not unwind after a dynamic mechanical rejection. Preserve the last valid sample state.
   **Status**: Implemented in `ScratchAcousticDsp`. Native verification remains open.
+- **RP-046 — Continuous technique clicks**: Repeat the selected click density while record motion continues beyond one predicted phrase.
+  **Status**: Implemented in gate algorithm version 10. iOS control feedback remains open.
+- **RP-047 — Momentary fader authority**: A held host fader control overrides each manual or automatic technique.
+  **Status**: Implemented in `ScratchAcousticDsp`. Native and iOS integration remain open.
+
+## 2026-08-02: Momentary Crossfader Authority
+
+### Claim: A selected technique always owns the audible fader
+
+- **Status**: Rejected.
+- **Confidence**: High.
+- **Requirement**: A held XFADER control overrides the selected technique.
+- **Requirement**: The host can select push-to-open or push-to-close behavior.
+- **Requirement**: Releasing the control returns authority to the selected technique.
+- **Requirement**: The displayed state shows the final audible gain.
+- **Implementation**: Rust blends into and out of the override over `0.45` milliseconds.
+- **Reason**: The transition prevents a discontinuity at the override boundary.
+- **Limit**: Listening tests must confirm that this transition does not soften intended fast cuts.
+
+## 2026-08-02: Continuous Technique Cutoff
+
+### Claim: Click count is a lifetime maximum for one continuous stroke
+
+- **Status**: Rejected.
+- **Confidence**: High.
+- **Evidence**: The product test found that Crab and Transform stopped changing after one predicted phrase.
+- **Former requirement**: One stroke could not exceed the selected click count.
+- **Correction**: Apply the selected click count to each rolling motion phrase.
+- **Correction**: Continue the phrase while same-direction record motion continues.
+- **Limit**: Phrase length still uses learned record travel. Hardware timing calibration remains open.
 
 ## 2026-08-02: TestFlight Audio Callback Crash
 
@@ -2337,8 +2367,9 @@ It is not a measured product calibration value.
 - **Effect**: Event packetization could create attacks.
 - **Effect**: A trigger could open while the record still moved in the outgoing direction.
 - **Requirement**: Drum attacks must follow confirmed same-sample physical motion.
-- **Click limit**: Previous patterns could repeat after the predicted endpoint.
-- **Requirement**: One stroke must not produce more than the selected click count.
+- **Former requirement**: One stroke could not produce more than the selected click count.
+- **Observed defect**: Crab and Transform could stay closed after one predicted phrase.
+- **Correction**: Repeat the selected click density while same-direction motion continues.
 - **Technique source**: <https://lcme.uwl.ac.uk/media/tmpfvcmu/ttm-guide-may-2021.pdf>
 - **Technique source**: <https://www.speech.kth.se/~hansen/files/thesis/Hansen02_JNMR.pdf>
 

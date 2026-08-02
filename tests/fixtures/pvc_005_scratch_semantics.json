@@ -2,7 +2,7 @@
   "schemaVersion": 4,
   "caseId": "PVC-005",
   "sampleRateHz": 48000.0,
-  "algorithmVersion": 9,
+  "algorithmVersion": 10,
   "snapshotVersions": {
     "gate": 4,
     "performance": 4
@@ -150,7 +150,7 @@
     "clickEndpoint": {
       "clickCounts": [1, 4, 8],
       "renderedPredictedSpans": 3.0,
-      "expectedRunCountRule": "selected click count"
+      "expectedRunCountRule": "selected click count per rendered phrase"
     },
     "drumPacketization": {
       "frameCount": 8000,

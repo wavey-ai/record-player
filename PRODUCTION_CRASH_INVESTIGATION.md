@@ -32,11 +32,15 @@ The register state contains the normal 128-frame callback size. The report does 
 
 The report does not contain the first Rust panic message. It does not identify the first failed invariant.
 
-### Working hypothesis
+### Investigated hypothesis
 
 The production deck path contained `expect` calls for dynamic mechanical operations. A rejected operation could panic inside the audio callback.
 
-This hypothesis has medium confidence. The stack confirms a Rust callback panic, but it does not identify the first panic site.
+The correction removes these dynamic panic sites. It also retains an exact typed diagnostic after each rejected operation.
+
+A test starts normal playback at 2,000 record turns. It advances 48,000 samples without a rejected operation.
+
+This result lowers confidence that long playback alone caused a deck rejection. The crash report still does not identify the first panic site.
 
 ### Required correction
 
@@ -47,6 +51,10 @@ The renderer must retry the current control on the next sample. It must count ea
 Tests must force a rejected step. Tests must confirm finite and continuous fallback motion without a panic.
 
 Tests must start from a large valid turn count. This condition represents long program playback without a long test file.
+
+The native boundary must catch any Rust panic before it crosses the C interface. It must retain the first panic message and source location.
+
+The application must report that diagnostic from a non-audio thread. It must then stop with the diagnostic in the next crash report.
 
 ### Remaining checks
 
