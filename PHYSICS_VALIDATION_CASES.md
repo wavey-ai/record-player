@@ -576,10 +576,10 @@ The existing predictor also remains stable during coalesced input and rapid reve
 
 ### Replacement Technique Fixture
 
-- **Fixture schema version**: 3.
-- **Algorithm version**: 8.
-- **Gate snapshot version**: 3.
-- **Performance snapshot version**: 3.
+- **Fixture schema version**: 4.
+- **Algorithm version**: 9.
+- **Gate snapshot version**: 4.
+- **Performance snapshot version**: 4.
 - **Sample rate**: 48,000 hertz.
 - **Supported record-rate range**: -20 through 20.
 - **Supported click count**: 1 through 8.
@@ -610,6 +610,8 @@ They are provisional calibration values, not measured physical facts.
 - The first completed stroke has a span of 0.123 source seconds.
 - The model uses that span immediately.
 - Confidence becomes 0.25 after that observation.
+- The opposite direction keeps its seed span and zero confidence.
+- Forward and reverse observations update independent estimates.
 - Confidence becomes 1.0 after four observations.
 - The permitted learned span is 0.04 through 0.8 source seconds.
 
@@ -676,6 +678,8 @@ The maximum-rate fixture also covers plus and minus 20 record rate.
 - `transform_has_a_closed_baseline_with_brief_uniform_taps`
 - `click_count_does_not_repeat_after_predicted_stroke_endpoint`
 - `first_stroke_seed_has_zero_confidence_until_one_stroke_is_observed`
+- `reversal_learns_only_the_completed_direction_span`
+- `asymmetric_direction_spans_clock_clicks_independently`
 - `drum_is_invariant_to_intent_event_packetization_for_same_physical_trajectory`
 - `drum_reversal_does_not_spend_its_hit_on_outgoing_motion`
 - `baby_uses_manual_gain_and_automatic_presets_own_the_output`
@@ -695,9 +699,9 @@ The maximum-rate fixture also covers plus and minus 20 record rate.
 
 ### Result and Claim Limit
 
-The focused `scratch_gate` suite passes 59 tests.
+The focused `scratch_gate` suite passes 60 tests.
 
-The wider scratch-filtered suite passes 88 tests.
+The wider scratch-filtered suite passes 89 tests.
 
 Two offline evidence reports remain ignored in the wider suite.
 
@@ -765,8 +769,8 @@ cargo test --lib scratch_gate::tests --no-fail-fast -- --test-threads=1
 ### Artifact
 
 - `tests/fixtures/pvc_005_scratch_semantics.json`
-- SHA-256: `250c225b549441185a42a42019ac5bf6966324aacd546df4ca1763987c8a88c2`
-- `src/scratch_gate.rs` SHA-256: `ba2962e418f117393b6cdd0c785015e0a9a97aad24524e0e6d309214fba74929`
+- SHA-256: `081760f9d4ff294be88c51950abeb53ffe0bae0111de90450784a7aab676771c`
+- `src/scratch_gate.rs` SHA-256: `70e768b0f1bf06ea8ff0a67305127920b5c6afafa4205d376b821a3462db735b`
 
 ## PVC-002: Finalized-Page Publication Exceeds the Fixed Cache
 

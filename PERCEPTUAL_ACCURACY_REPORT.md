@@ -264,6 +264,21 @@ The exact `20x` path now accepts floating-point drift of at most `1e-12` and cla
 
 The technique fractions and crossfader envelope remain unmeasured.
 
+### Direction-Specific Scratch Learning
+
+- **Output-changing**: Yes for asymmetric forward and reverse strokes.
+- **Default active**: Yes for automatic presets.
+- **Expected relevance**: High for repeated scratch timing.
+- **Listening evidence**: None.
+
+Forward and reverse strokes now keep independent span estimates.
+
+A short push no longer compresses the fader pattern for a longer pull.
+
+Each direction also keeps an independent observation count and confidence value.
+
+The first unseen stroke in either direction still uses a provisional seed.
+
 ### Deterministic Branch Continuation
 
 - **Output-changing**: Normally no when the same branch wins.
@@ -480,7 +495,7 @@ The next pass must prioritize measured output changes.
 1. Extend the reference through the coupled deck, pickup, cartridge, phono stage, and host output.
 2. Add bounded, event-aware swept contact for high signed travel.
 3. Compare force, torque, contact, and voltage against converged microsteps.
-4. Add direction-specific span prediction with error-aware confidence.
+4. Make span confidence decrease when observed stroke lengths are inconsistent.
 5. Add tangential reversal state and identified sloped sticking.
 6. Render matched stop, `+20x`, `-20x`, and reversal audio fixtures.
 7. Run controlled, level-matched listening tests.

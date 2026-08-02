@@ -1,11 +1,11 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "caseId": "PVC-005",
   "sampleRateHz": 48000.0,
-  "algorithmVersion": 8,
+  "algorithmVersion": 9,
   "snapshotVersions": {
-    "gate": 3,
-    "performance": 3
+    "gate": 4,
+    "performance": 4
   },
   "limits": {
     "minimumClicks": 1,
@@ -141,7 +141,10 @@
     "firstStrokePrediction": {
       "initialConfidence": 0.0,
       "firstObservedSpanSourceSeconds": 0.123,
+      "firstObservedDirection": "forward",
       "confidenceAfterFirstObservation": 0.25,
+      "oppositeDirectionConfidenceAfterFirstObservation": 0.0,
+      "directionSpecificLearning": true,
       "fullConfidenceObservationCount": 4
     },
     "clickEndpoint": {

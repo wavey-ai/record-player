@@ -6,9 +6,9 @@ use thiserror::Error;
 
 pub const MIN_SCRATCH_CLICKS: u8 = 1;
 pub const MAX_SCRATCH_CLICKS: u8 = 8;
-pub const SCRATCH_GATE_ALGORITHM_VERSION: u32 = 8;
-pub const SCRATCH_GATE_SNAPSHOT_VERSION: u32 = 3;
-pub const SCRATCH_PERFORMANCE_SNAPSHOT_VERSION: u32 = 3;
+pub const SCRATCH_GATE_ALGORITHM_VERSION: u32 = 9;
+pub const SCRATCH_GATE_SNAPSHOT_VERSION: u32 = 4;
+pub const SCRATCH_PERFORMANCE_SNAPSHOT_VERSION: u32 = 4;
 pub const MAXIMUM_SCRATCH_RECORD_RATE: f64 = 20.0;
 const MAXIMUM_SCRATCH_RECORD_RATE_ROUNDOFF: f64 = 1.0e-12;
 const MAXIMUM_FRAME_DELTA_SECONDS: f64 = 1.0 / 8_000.0;
@@ -235,8 +235,10 @@ pub struct ScratchGate {
     pending_stroke_travel: f64,
     rest_seconds: f64,
     stroke_travel: f64,
-    learned_span: f64,
-    span_observations: u32,
+    forward_learned_span: f64,
+    reverse_learned_span: f64,
+    forward_span_observations: u32,
+    reverse_span_observations: u32,
     phase: f64,
     gate: f64,
     target: f64,
@@ -521,8 +523,10 @@ impl ScratchGate {
             pending_stroke_travel: 0.0,
             rest_seconds: 0.0,
             stroke_travel: 0.0,
-            learned_span: preset.initial_stroke_span(),
-            span_observations: 0,
+            forward_learned_span: preset.initial_stroke_span(),
+            reverse_learned_span: preset.initial_stroke_span(),
+            forward_span_observations: 0,
+            reverse_span_observations: 0,
             phase: 0.0,
             gate: 1.0,
             target: 1.0,
@@ -543,8 +547,10 @@ impl ScratchGate {
 
     pub fn set_preset(&mut self, preset: ScratchPreset) {
         if preset != self.preset {
-            self.learned_span = preset.initial_stroke_span();
-            self.span_observations = 0;
+            self.forward_learned_span = preset.initial_stroke_span();
+            self.reverse_learned_span = preset.initial_stroke_span();
+            self.forward_span_observations = 0;
+            self.reverse_span_observations = 0;
         }
         self.preset = preset;
         self.clicks = preset.default_clicks();
@@ -600,19 +606,43 @@ impl ScratchGate {
     }
 
     pub fn stroke_progress(&self) -> f64 {
-        (self.stroke_travel / self.learned_span.max(MIN_LEARNED_SPAN)).clamp(0.0, 1.0)
+        (self.stroke_travel / self.learned_span().max(MIN_LEARNED_SPAN)).clamp(0.0, 1.0)
     }
 
+    /// Returns the estimate for the active direction.
+    ///
+    /// Before motion starts, this method returns the forward seed.
     pub fn learned_span(&self) -> f64 {
-        self.learned_span
+        self.learned_span_for_direction(self.direction)
     }
 
-    /// Returns zero before the first complete stroke and one after four strokes.
+    /// Returns one direction's learned source-travel span.
+    pub fn learned_span_for_direction(&self, direction: i8) -> f64 {
+        if direction < 0 {
+            self.reverse_learned_span
+        } else {
+            self.forward_learned_span
+        }
+    }
+
+    /// Returns confidence for the active direction.
+    ///
+    /// Before motion starts, this method returns forward confidence.
     pub fn span_prediction_confidence(&self) -> f64 {
-        f64::from(
-            self.span_observations
-                .min(OBSERVATIONS_FOR_FULL_SPAN_CONFIDENCE),
-        ) / f64::from(OBSERVATIONS_FOR_FULL_SPAN_CONFIDENCE)
+        self.span_prediction_confidence_for_direction(self.direction)
+    }
+
+    /// Returns zero before the first direction-specific observation.
+    ///
+    /// Confidence reaches one after four observations in that direction.
+    pub fn span_prediction_confidence_for_direction(&self, direction: i8) -> f64 {
+        let observations = if direction < 0 {
+            self.reverse_span_observations
+        } else {
+            self.forward_span_observations
+        };
+        f64::from(observations.min(OBSERVATIONS_FOR_FULL_SPAN_CONFIDENCE))
+            / f64::from(OBSERVATIONS_FOR_FULL_SPAN_CONFIDENCE)
     }
 
     pub fn snapshot(&self) -> ScratchGateSnapshot {
@@ -689,6 +719,7 @@ impl ScratchGate {
             self.reset_phrase();
         }
 
+        let completed_stroke_direction = self.direction;
         let (event, confirmed_travel) = self.update_motion(
             dt,
             intent_rate,
@@ -696,7 +727,7 @@ impl ScratchGate {
             rendered_source_travel_seconds,
         );
         if event == MotionEvent::Reversal {
-            self.learn_completed_stroke();
+            self.learn_completed_stroke(completed_stroke_direction);
             self.stroke_travel = confirmed_travel;
             self.phase = 0.0;
         } else if matches!(event, MotionEvent::Onset | MotionEvent::Resume) {
@@ -793,10 +824,13 @@ impl ScratchGate {
                 return invalid_snapshot(field);
             }
         }
-        if !self.learned_span.is_finite()
-            || !(MIN_LEARNED_SPAN..=MAX_LEARNED_SPAN).contains(&self.learned_span)
-        {
-            return invalid_snapshot("learnedSpan");
+        for (field, value) in [
+            ("forwardLearnedSpan", self.forward_learned_span),
+            ("reverseLearnedSpan", self.reverse_learned_span),
+        ] {
+            if !value.is_finite() || !(MIN_LEARNED_SPAN..=MAX_LEARNED_SPAN).contains(&value) {
+                return invalid_snapshot(field);
+            }
         }
         for (field, value) in [
             ("phase", self.phase),
@@ -935,18 +969,27 @@ impl ScratchGate {
         self.pending_stroke_travel = 0.0;
     }
 
-    fn learn_completed_stroke(&mut self) {
-        if self.stroke_travel <= 0.0 {
+    fn learn_completed_stroke(&mut self, completed_direction: i8) {
+        if self.stroke_travel <= 0.0 || ![-1, 1].contains(&completed_direction) {
             return;
         }
         let observed = self.stroke_travel.clamp(MIN_LEARNED_SPAN, MAX_LEARNED_SPAN);
-        let observed_weight = SPAN_OBSERVATION_WEIGHTS[self
-            .span_observations
-            .min(SPAN_OBSERVATION_WEIGHTS.len() as u32 - 1)
-            as usize];
-        self.learned_span = lerp(self.learned_span, observed, observed_weight)
+        let (learned_span, observations) = if completed_direction < 0 {
+            (
+                &mut self.reverse_learned_span,
+                &mut self.reverse_span_observations,
+            )
+        } else {
+            (
+                &mut self.forward_learned_span,
+                &mut self.forward_span_observations,
+            )
+        };
+        let observed_weight = SPAN_OBSERVATION_WEIGHTS
+            [(*observations).min(SPAN_OBSERVATION_WEIGHTS.len() as u32 - 1) as usize];
+        *learned_span = lerp(*learned_span, observed, observed_weight)
             .clamp(MIN_LEARNED_SPAN, MAX_LEARNED_SPAN);
-        self.span_observations = self.span_observations.saturating_add(1);
+        *observations = observations.saturating_add(1);
     }
 
     fn update_phase(&mut self) {
@@ -1003,7 +1046,7 @@ impl ScratchGate {
             self.drum_elapsed += dt;
             self.drum_travel += rendered_stroke_travel;
             if self.drum_elapsed >= DRUM_MAX_OPEN_SECONDS
-                || self.drum_travel >= self.learned_span * DRUM_OPEN_SPAN_FRACTION
+                || self.drum_travel >= self.learned_span() * DRUM_OPEN_SPAN_FRACTION
             {
                 self.drum_open = false;
             }
@@ -1351,7 +1394,7 @@ mod tests {
             "../tests/fixtures/pvc_005_scratch_semantics.json"
         ))
         .unwrap();
-        assert_eq!(fixture["schemaVersion"], 3);
+        assert_eq!(fixture["schemaVersion"], 4);
         assert_eq!(fixture["caseId"], "PVC-005");
         assert_eq!(fixture["sampleRateHz"], SAMPLE_RATE);
         assert_eq!(fixture["algorithmVersion"], SCRATCH_GATE_ALGORITHM_VERSION);
@@ -1523,6 +1566,18 @@ mod tests {
         assert_eq!(
             fixtures["firstStrokePrediction"]["confidenceAfterFirstObservation"],
             0.25
+        );
+        assert_eq!(
+            fixtures["firstStrokePrediction"]["firstObservedDirection"],
+            "forward"
+        );
+        assert_eq!(
+            fixtures["firstStrokePrediction"]["oppositeDirectionConfidenceAfterFirstObservation"],
+            0.0
+        );
+        assert_eq!(
+            fixtures["firstStrokePrediction"]["directionSpecificLearning"],
+            true
         );
         assert_eq!(
             fixtures["firstStrokePrediction"]["fullConfidenceObservationCount"],
@@ -1943,8 +1998,9 @@ mod tests {
         run(&mut gate, 0.030, true, 1.0, 1.0);
         run(&mut gate, 0.0061, true, -8.0, -8.0);
         assert_eq!(gate.direction(), -1);
-        assert!(gate.stroke_progress() > 0.25);
-        assert!(gate.phase() > 0.5);
+        assert!(gate.stroke_travel > 0.048);
+        assert!(gate.stroke_progress() > 0.20);
+        assert!(gate.phase() > 0.40);
     }
 
     #[test]
@@ -2025,16 +2081,20 @@ mod tests {
     }
 
     #[test]
-    fn reversal_resets_phase_and_adapts_stroke_span() {
+    fn reversal_learns_only_the_completed_direction_span() {
         let mut gate = ScratchGate::new(ScratchPreset::Transform);
         settle_direction(&mut gate, 1.0);
         run(&mut gate, 0.30, true, 1.0, 1.0);
-        let initial_span = gate.learned_span();
+        let initial_forward_span = gate.learned_span_for_direction(1);
+        let initial_reverse_span = gate.learned_span_for_direction(-1);
         run(&mut gate, 0.0061, true, -1.0, -1.0);
         assert_eq!(gate.direction(), -1);
         assert!(gate.phase() > 0.02 && gate.phase() < 0.06);
-        assert!(gate.learned_span() > initial_span);
-        assert_eq!(gate.span_prediction_confidence(), 0.25);
+        assert!(gate.learned_span_for_direction(1) > initial_forward_span);
+        assert_eq!(gate.learned_span_for_direction(-1), initial_reverse_span);
+        assert_eq!(gate.span_prediction_confidence_for_direction(1), 0.25);
+        assert_eq!(gate.span_prediction_confidence_for_direction(-1), 0.0);
+        assert_eq!(gate.span_prediction_confidence(), 0.0);
     }
 
     #[test]
@@ -2141,16 +2201,44 @@ mod tests {
         );
 
         gate.stroke_travel = 0.123;
-        gate.learn_completed_stroke();
+        gate.learn_completed_stroke(1);
         assert_eq!(gate.learned_span(), 0.123);
         assert_eq!(gate.span_prediction_confidence(), 0.25);
+        assert_eq!(
+            gate.learned_span_for_direction(-1),
+            ScratchPreset::Orbit.initial_stroke_span()
+        );
+        assert_eq!(gate.span_prediction_confidence_for_direction(-1), 0.0);
 
         for observed in [0.124, 0.122, 0.123] {
             gate.stroke_travel = observed;
-            gate.learn_completed_stroke();
+            gate.learn_completed_stroke(1);
         }
         assert_eq!(gate.span_prediction_confidence(), 1.0);
         assert!((gate.learned_span() - 0.123).abs() < 0.001);
+    }
+
+    #[test]
+    fn asymmetric_direction_spans_clock_clicks_independently() {
+        let mut gate = ScratchGate::new(ScratchPreset::Transform);
+        gate.set_clicks(2);
+        gate.stroke_travel = 0.08;
+        gate.learn_completed_stroke(1);
+        gate.stroke_travel = 0.32;
+        gate.learn_completed_stroke(-1);
+
+        gate.contact_active = true;
+        gate.moving = true;
+        gate.stroke_travel = 0.02;
+        gate.direction = 1;
+        gate.update_phase();
+        assert!((gate.stroke_progress() - 0.25).abs() < 1.0e-12);
+        assert_eq!(gate.compute_target(1.0, 1.0), 0.0);
+
+        gate.direction = -1;
+        gate.update_phase();
+        assert!((gate.stroke_progress() - 0.0625).abs() < 1.0e-12);
+        assert_eq!(gate.compute_target(-1.0, -1.0), 1.0);
     }
 
     #[test]

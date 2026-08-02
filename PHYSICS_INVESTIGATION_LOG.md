@@ -67,7 +67,7 @@ Use this ledger to track requirements across the chronological findings.
 - **RP-031 — Three-dimensional contact reduction**: State when independent 45/45 wall envelopes are exact. Add longitudinal and rotational dynamics when profiles require them. **Status**: Reduced rigid-sphere geometry verified; finite-patch and extra dynamics remain open.
 - **RP-032 — Host voltage calibration**: Keep phono output in volts inside physics. Convert volts through an explicit host full-scale boundary. **Status**: Boundary implemented in Rust, C, WASM, and native Swift. Product calibration evidence remains open.
 - **RP-033 — Same-wall multiple contact**: Detect separated possible global positions. Do not treat interval overlap as equality. **Status**: Contact sets propagate through production paths. Unqualified sets reject safely. Certified equality and measured compliance remain open.
-- **RP-034 — Canonical scratch techniques**: Keep the catalog, prediction, and automatic crossfader policy in Rust. Use exact same-sample physical travel. **Status**: Rust, physical-player, C ABI, and native Swift paths are implemented. Calibration and browser integration remain open.
+- **RP-034 — Canonical scratch techniques**: Keep the catalog, prediction, and automatic crossfader policy in Rust. Use exact same-sample physical travel. **Status**: Rust uses direction-specific stroke learning. Native integration passes. Calibration and browser integration remain open.
 - **RP-035 — Non-smooth contact**: Reject unresolved normal cones until the contact solve represents their complete force set. **Status**: In progress.
 - **RP-036 — Surface friction geometry**: Resolve friction in the complete local surface basis. Couple all components in the same contact solve. **Status**: Sliding coupling and bounded zero-speed regularization are implemented. Identified sloped sticking and measurements remain open.
 - **RP-037 — Trace asset admission**: Bind fixed trace work, representation bytes, page identity, geometry, and actual wall-slope bounds. **Status**: Implemented. An authoritative full-record catalog remains open.
@@ -2301,6 +2301,8 @@ It is not a measured product calibration value.
 ### Prediction limits
 
 - **Finding**: The first stroke used an unverified seed span.
+- **Former finding**: One learned span controlled both forward and reverse strokes.
+- **Effect**: An asymmetric gesture moved reverse fader landmarks toward the forward stroke length.
 - **Physical limit**: Software cannot infer an unseen endpoint without a trained or supplied motion model.
 - **Requirement**: Report prediction confidence.
 - **Requirement**: Mark first-stroke endpoint prediction as unverified.
@@ -2332,6 +2334,7 @@ It is not a measured product calibration value.
 - The helper processes same-sample intent, rendered rate, and exact signed source travel.
 - The helper reports endpoint prediction confidence.
 - The helper uses the first completed stroke immediately.
+- The helper learns forward and reverse spans independently.
 - Invalid input and invalid snapshots leave state unchanged.
 - Snapshot replay produces exact output structures.
 - The render path makes no allocator call.
@@ -2344,7 +2347,8 @@ It is not a measured product calibration value.
 - The C ABI exposes controls and scratch telemetry.
 - Native Swift uses the C ABI and contains no technique equation.
 - A native test proves that Rust manual gain changes rendered audio.
-- The focused `scratch_gate` suite passes 59 tests.
+- The focused `scratch_gate` suite passes 60 tests.
+- The wider scratch-filtered suite passes 89 tests with two offline reports ignored.
 - A physical-player test covers Stab and Chirp phono output at `1x`, `8x`, and `20x`.
 
 ### Maximum-Rate Confirmation Counterexample
@@ -2379,7 +2383,8 @@ It is not a measured product calibration value.
 - **Flare limit**: The current preset notches only the forward stroke.
 - **Crab limit**: The current preset implements one closed-baseline variant.
 - **Drum limit**: The current preset uses acceleration. It does not use a cue-position motion plan.
-- **Prediction limit**: One span estimate serves both stroke directions.
+- **Completed correction**: Forward and reverse strokes use independent span estimates and observation counts.
+- **Audible result**: Asymmetric strokes keep direction-specific click and notch landmarks.
 - **Confidence limit**: Four observations produce full confidence without a variance test.
 - **Envelope limit**: The crossfader time constants have no hardware measurement.
 - **Completed requirement**: Do not commit a new stroke before the physical direction crossing.
