@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use super::groove::GrooveContentHasher;
 use super::{
     output::PHYSICAL_OUTPUT_INPUT_RATE_HZ, GeneratorCoefficientSource, GrooveLayout,
     MovingMagnetCartridgeConfig, PhonoStageConfig, RadialTrackingConfig, RecordCutConfig,
@@ -20,6 +21,10 @@ pub const MAXIMUM_PHYSICAL_RENDER_FRAMES: usize = 16_384;
 
 /// The largest accepted preallocated control timeline.
 pub const MAXIMUM_PHYSICAL_CONTROL_TIMELINE_CAPACITY: usize = 16_384;
+
+const PHYSICAL_PLAYBACK_CONFIG_IDENTITY_VERSION: u32 = 1;
+const PHYSICAL_PLAYBACK_CONFIG_IDENTITY_DOMAIN: &[u8] =
+    b"record-player:physical-playback-config-identity\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -193,6 +198,24 @@ pub struct PhysicalSolverConfig {
     pub control_timeline_capacity: usize,
 }
 
+/// Identifies one exact, validated physical playback configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PhysicalPlaybackConfigIdentity {
+    identity_version: u32,
+    sha256: [u8; 32],
+}
+
+impl PhysicalPlaybackConfigIdentity {
+    pub(crate) const fn identity_version(self) -> u32 {
+        self.identity_version
+    }
+
+    pub(crate) const fn sha256(self) -> [u8; 32] {
+        self.sha256
+    }
+}
+
 impl PhysicalSolverConfig {
     pub fn validate(self) -> Result<Self, PhysicalProfileError> {
         if self.internal_sample_rate_hz != f64::from(PHYSICAL_OUTPUT_INPUT_RATE_HZ) {
@@ -259,6 +282,12 @@ impl PhysicalPlaybackConfig {
             self.record_cut.cutter_bandwidth_hz,
         )?;
         Ok(self)
+    }
+
+    pub(crate) fn identity(self) -> Result<PhysicalPlaybackConfigIdentity, PhysicalProfileError> {
+        let config = self.validate()?;
+        let manifest = build_parameter_manifest(config)?;
+        calculate_playback_config_identity(&manifest)
     }
 }
 
@@ -644,6 +673,57 @@ fn build_parameter_manifest(
             })
         })
         .collect()
+}
+
+fn calculate_playback_config_identity(
+    manifest: &[ParameterManifestEntry],
+) -> Result<PhysicalPlaybackConfigIdentity, PhysicalProfileError> {
+    if manifest.len() != PARAMETER_SCHEMA.len() {
+        return Err(PhysicalProfileError::ConfigurationManifestMismatch);
+    }
+
+    let mut hasher = GrooveContentHasher::new(PHYSICAL_PLAYBACK_CONFIG_IDENTITY_DOMAIN);
+    hasher.u32(PHYSICAL_PLAYBACK_CONFIG_IDENTITY_VERSION);
+    hasher.u64(manifest.len() as u64);
+    for (schema, entry) in PARAMETER_SCHEMA.iter().zip(manifest) {
+        if entry.parameter != schema.path || parameter_value_kind(&entry.value) != schema.value_kind
+        {
+            return Err(PhysicalProfileError::ConfigurationManifestMismatch);
+        }
+        hash_length_prefixed_bytes(&mut hasher, schema.path.as_bytes());
+        match &entry.value {
+            ParameterValue::Float(value) => {
+                hasher.u8(1);
+                hasher.u64(value.to_bits());
+            }
+            ParameterValue::Unsigned(value) => {
+                hasher.u8(2);
+                hasher.u64(*value);
+            }
+            ParameterValue::Enum(value) => {
+                hasher.u8(3);
+                hash_length_prefixed_bytes(&mut hasher, value.as_bytes());
+            }
+        }
+    }
+
+    Ok(PhysicalPlaybackConfigIdentity {
+        identity_version: PHYSICAL_PLAYBACK_CONFIG_IDENTITY_VERSION,
+        sha256: hasher.finish_sha256(),
+    })
+}
+
+fn parameter_value_kind(value: &ParameterValue) -> ParameterValueKind {
+    match value {
+        ParameterValue::Float(_) => ParameterValueKind::Float,
+        ParameterValue::Unsigned(_) => ParameterValueKind::Unsigned,
+        ParameterValue::Enum(_) => ParameterValueKind::Enum,
+    }
+}
+
+fn hash_length_prefixed_bytes(hasher: &mut GrooveContentHasher, value: &[u8]) {
+    hasher.u64(value.len() as u64);
+    hasher.bytes(value);
 }
 
 fn collect_scalar_leaves(
@@ -1332,6 +1412,100 @@ mod tests {
         assert!(profile.validate().is_ok());
         assert_eq!(profile.status, CalibrationStatus::Seed);
         assert!(!profile.permits_calibrated_claim());
+    }
+
+    #[test]
+    fn playback_config_identity_is_deterministic_and_serializable() {
+        let config = PhysicalProfile::sl_1200mk7_concorde_mkii_scratch_seed().config;
+        let first = config.identity().unwrap();
+        let second = config.identity().unwrap();
+        assert_eq!(first, second);
+        assert_eq!(
+            first.identity_version(),
+            PHYSICAL_PLAYBACK_CONFIG_IDENTITY_VERSION
+        );
+
+        let serialized = serde_json::to_string(&first).unwrap();
+        let restored: PhysicalPlaybackConfigIdentity = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(restored, first);
+        assert_eq!(restored.sha256(), first.sha256());
+    }
+
+    #[test]
+    fn playback_config_identity_detects_one_valid_float_bit_change() {
+        let config = PhysicalProfile::sl_1200mk7_concorde_mkii_scratch_seed().config;
+        let mut changed = config;
+        changed.phono.gain_db = f64::from_bits(changed.phono.gain_db.to_bits() ^ 1);
+        assert!(changed.validate().is_ok());
+        assert_ne!(config.identity().unwrap(), changed.identity().unwrap());
+    }
+
+    #[test]
+    fn playback_config_identity_binds_every_manifest_leaf() {
+        let config = PhysicalProfile::sl_1200mk7_concorde_mkii_scratch_seed().config;
+        let manifest = build_parameter_manifest(config).unwrap();
+        let expected = config.identity().unwrap();
+        assert_eq!(
+            calculate_playback_config_identity(&manifest).unwrap(),
+            expected
+        );
+
+        for index in 0..manifest.len() {
+            let mut changed = manifest.clone();
+            match &mut changed[index].value {
+                ParameterValue::Float(value) => *value = f64::from_bits(value.to_bits() ^ 1),
+                ParameterValue::Unsigned(value) => *value ^= 1,
+                ParameterValue::Enum(value) => {
+                    let mut bytes = value.as_bytes().to_vec();
+                    bytes[0] ^= 1;
+                    *value = String::from_utf8(bytes).unwrap();
+                }
+            }
+            assert_ne!(
+                calculate_playback_config_identity(&changed).unwrap(),
+                expected,
+                "{}",
+                manifest[index].parameter
+            );
+        }
+    }
+
+    #[test]
+    fn playback_config_identity_rejects_manifest_tag_changes() {
+        let config = PhysicalProfile::sl_1200mk7_concorde_mkii_scratch_seed().config;
+        let manifest = build_parameter_manifest(config).unwrap();
+
+        let mut wrong_field = manifest.clone();
+        wrong_field[0].parameter.push_str("Changed");
+        assert!(matches!(
+            calculate_playback_config_identity(&wrong_field),
+            Err(PhysicalProfileError::ConfigurationManifestMismatch)
+        ));
+
+        let mut wrong_type = manifest;
+        wrong_type[0].value = ParameterValue::Unsigned(0);
+        assert!(matches!(
+            calculate_playback_config_identity(&wrong_type),
+            Err(PhysicalProfileError::ConfigurationManifestMismatch)
+        ));
+    }
+
+    #[test]
+    fn invalid_playback_configs_cannot_create_identities() {
+        let config = PhysicalProfile::sl_1200mk7_concorde_mkii_scratch_seed().config;
+
+        let mut invalid_solver = config;
+        invalid_solver.solver.maximum_render_frames = 0;
+        assert!(invalid_solver.identity().is_err());
+
+        let mut invalid_phono = config;
+        invalid_phono.phono.gain_db = f64::NAN;
+        assert!(invalid_phono.identity().is_err());
+
+        let mut inconsistent_rate = config;
+        inconsistent_rate.deck.integration_hz =
+            f64::from_bits(inconsistent_rate.deck.integration_hz.to_bits() ^ 1);
+        assert!(inconsistent_rate.identity().is_err());
     }
 
     #[test]

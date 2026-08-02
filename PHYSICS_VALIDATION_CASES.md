@@ -34,7 +34,7 @@ Each case must contain these items:
 | `PVC-004` | `RP-009`, `RP-013`, `RP-023`, `RP-033` | One wall has two separated near-equal envelope maxima | Confirmed; tracer rejects unresolved height order |
 | `PVC-005` | `RP-003`, `RP-005`, `RP-034` | Named scratch presets do not match their intended technique topology | Replacement topology passes; human timing calibration remains open |
 | `PVC-006` | `RP-008`, `RP-020`, `RP-024` | Passive cartridge magnetic-loss invariants | Implemented and green; cartridge measurement remains open |
-| `PVC-007` | `RP-008`, `RP-013`, `RP-026`, `RP-033`, `RP-035`, `RP-036`, `RP-038` | Passive groove compliance, coupled patches, and vector friction | Certified coordinates pass; continuous state, sloped sticking, compliance, and measurements remain open |
+| `PVC-007` | `RP-008`, `RP-013`, `RP-026`, `RP-033`, `RP-035`, `RP-036`, `RP-038`, `RP-039` | Passive groove compliance, coupled patches, and vector friction | Certified coordinates pass; continuous state, sloped sticking, compliance, and measurements remain open |
 
 ## PVC-001: Spherical Envelope Global-Maximum Failure
 
@@ -1784,6 +1784,52 @@ The accepted profile domain needs a P-matrix proof or an equivalent bounded proo
 - **Thread rule**: Run interval subdivision and family enumeration outside the audio thread.
 - **Realtime limit**: Resident-page slope maxima do not bound an unpublished whole record.
 - **Requirement**: Add an authoritative whole-record domain or certify each publication transactionally.
+
+### Verified Mobility Proof Plan
+
+- **Observation date**: 2026-08-02.
+- **Status**: Reviewed design. Production admission does not use it yet.
+- **Base systems**: Build one exact KKT system for each of 24 mechanical mobility classes.
+- **Base verification**: Replay the production pivot schedule with outward intervals.
+- **Pivot rule**: Each scaled pivot interval must exclude zero and pass the production tolerance.
+- **Mobility definition**: Store response as velocity rows by equation columns.
+- **Equation order**: `[platter, record, tip-x, body-x, tip-z, body-z]`.
+- **Velocity order**: `[platter, record, tip-x, tip-z, body-x, body-z]`.
+- **Permutation test**: Use six distinct values to detect exchanged coordinates.
+- **Contact evaluation**: Evaluate the shared `H` and `G` algebra over radius and slope boxes.
+- **Sticking update**: Use the production tangential force column and equality row.
+- **Sticking proof**: Require the nonsymmetric Schur denominator interval to exclude zero.
+- **Catalog**: Generate 288 contacting labels from production mode mappings.
+- **Solve-only addition**: Prove 24 lowered and 24 cue-supported systems.
+- **Initial record count**: Prove 336 records before safe equivalence aggregation.
+- **Groove proof**: Require positive lower bounds for both diagonals and the determinant.
+- **Land proof**: Require a positive lower bound for its scalar response.
+- **Subdivision**: Split the largest normalized radius or slope width when a result is inconclusive.
+- **Work cap**: Fail closed when the fixed box or depth limit is exhausted.
+- **Arithmetic**: Expand round-to-nearest results with adjacent finite `f64` values.
+- **Concurrency rule**: Do not change the process rounding mode.
+- **Exact oracle**: Decode finite `f64` values into exact dyadic rationals in tests.
+- **Square-root oracle**: Verify each returned bound by exact rational squaring.
+- **Conditioning gate**: Require dimensionless solve margins above `6.4e-9` initially.
+- **Failure classes**: Distinguish bad minors, singular mobility, singular Schur updates, weak margins, and exhausted work.
+- **Scope**: The result proves fixed-mode normal-contact uniqueness only.
+- **Exclusion**: It does not prove unique selection across overlapping hybrid modes.
+
+### Playback Configuration Identity Checkpoint
+
+- **Status**: Implemented as a non-gating building block.
+- **Identity version**: `1`.
+- **Leaf count**: The identity binds all 84 validated playback manifest leaves.
+- **Field encoding**: Each leaf includes its stable path and explicit value-type tag.
+- **Float encoding**: Each floating-point value contributes its exact `f64` bits.
+- **Text encoding**: Each enum value uses a length-delimited byte string.
+- **Hash protocol**: The protocol uses a versioned, domain-separated SHA-256 hash.
+- **Rejected protocol**: The implementation does not hash JSON text.
+- **Validation rule**: An invalid playback configuration cannot create an identity.
+- **Permanent test**: Every manifest leaf changes the identity after one controlled value change.
+- **Permanent test**: Field or value-type tag changes cause a manifest mismatch.
+- **Permanent test**: Serialization and restoration preserve the complete identity.
+- **Current limit**: The player does not bind this identity to a contact certificate yet.
 
 This result concerns the reduced rigid sliding model.
 

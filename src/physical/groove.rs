@@ -1621,7 +1621,11 @@ impl GrooveContentHasher {
     }
 
     pub(crate) fn finish(self) -> GrooveContentIdentity {
-        GrooveContentIdentity::from_sha256(self.0.finalize())
+        GrooveContentIdentity::from_sha256(self.finish_sha256())
+    }
+
+    pub(crate) fn finish_sha256(self) -> [u8; 32] {
+        self.0.finalize()
     }
 
     pub(crate) fn is_valid(&self) -> bool {

@@ -72,6 +72,7 @@ Use this ledger to track requirements across the chronological findings.
 - **RP-036 — Surface friction geometry**: Resolve friction in the complete local surface basis. Couple all components in the same contact solve. **Status**: Sliding surface and skating-port coupling are implemented. Sloped sticking, coupled uniqueness proof, and measurements remain open.
 - **RP-037 — Trace asset admission**: Bind fixed trace work, representation bytes, page identity, geometry, and actual wall-slope bounds. **Status**: Implemented. An authoritative full-record catalog remains open.
 - **RP-038 — Tangential contact memory**: Add identified along-groove pickup motion and local tangential material state. Preserve that state through reversals. **Status**: Certified coordinate plumbing is implemented. Continuous state mapping and sloped sticking remain open.
+- **RP-039 — Fixed-mode admission**: Certify each fixed normal-contact operator over its complete profile and source domain. **Status**: Config identity is implemented. Mobility and interval proofs remain open.
 
 ## 2026-08-01: Repository and History Investigation
 
@@ -639,6 +640,32 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Implementation requirement**: Generate the versioned family catalog from production logic.
 - **Requirement**: Certify every permitted contact family for each profile and source.
 - **Requirement**: Reject an unproved operator before playback changes state.
+- **Proof decision**: Verify 24 point-valued base mobility systems before applying interval contact operators.
+- **Reason**: The mechanical left-hand sides do not depend on groove radius or wall slope.
+- **Proof decision**: Apply stylus sticking with a verified nonsymmetric rank-one Schur update.
+- **Rejected design**: Do not interval-solve one parameterized 13-by-13 system for every domain box.
+- **Reason**: That design repeats work and introduces unnecessary interval dependency.
+- **Coordinate rule**: Store mobility with typed velocity rows and equation columns.
+- **Equation order**: Use platter, record, tip-x, body-x, tip-z, and body-z.
+- **Velocity order**: Use platter, record, tip-x, tip-z, body-x, and body-z.
+- **Permanent requirement**: A six-value sentinel must detect any coordinate permutation.
+- **Cartridge rule**: Extract state-independent reciprocal damping from the state-dependent cartridge bias.
+- **Geometry rule**: Calculate the skating factor with algebraic operations and square root.
+- **Reason**: Portable directed rounding is not available for the current trigonometric functions.
+- **Proof catalog**: Add 48 solve-only systems to the 288 contacting labels.
+- **Proof total**: The initial catalog therefore contains 336 records before safe equivalence aggregation.
+- **Interval method**: Use outward arithmetic and adaptive radius-and-slope subdivision.
+- **Work rule**: Reject the profile when the fixed depth or box limit cannot resolve a proof.
+- **Oracle rule**: Use exact dyadic rational arithmetic in tests for interval operations and representative solves.
+- **Physical gate**: Require strict positive diagonal and determinant lower bounds.
+- **Numerical gate**: Also require scale-aware conditioning margins for the production floating-point solver.
+- **Initial robustness floor**: Use `6.4e-9`, derived from 64 times the current backward-error limit.
+- **Config checkpoint**: The versioned config identity binds all 84 validated manifest leaves.
+- **Config encoding**: It hashes stable paths, explicit value tags, exact float bits, and length-delimited values.
+- **Rejected encoding**: Do not hash serialized JSON text.
+- **Current status**: Config identity tests pass. The identity does not gate playback yet.
+- **Source-domain risk**: Resident realtime pages do not prove a whole-record slope bound.
+- **Required response**: Reject those sources or publish source metadata and proof atomically.
 - **Theorem scope**: A P-matrix proves uniqueness only for one fixed linear complementarity problem.
 - **Hybrid limit**: It does not prove that two different discrete modes cannot both pass.
 - **Exact overlap**: At zero stylus friction, loaded positive sliding and separation can use the same system.
