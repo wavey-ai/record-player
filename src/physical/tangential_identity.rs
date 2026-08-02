@@ -362,7 +362,7 @@ mod tests {
             CertifiedContactPositionInterval::from_closed_relative_bounds(0, 9.1, 9.2).unwrap();
         let encoded = serde_json::to_string(&live).unwrap();
         let decoded: CertifiedContactPositionInterval = serde_json::from_str(&encoded).unwrap();
-        assert_ne!(decoded, live);
+        assert_eq!(decoded, live);
         assert_eq!(decoded.source_frame_origin(), live.source_frame_origin());
         assert_eq!(
             decoded.lower_relative_source_frame(),

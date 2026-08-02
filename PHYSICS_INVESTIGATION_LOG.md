@@ -611,7 +611,7 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Limit**: This scalar condition is not a coupled Painlevé well-posedness proof.
 - **Reason**: The coupled response also depends on arm geometry, mass, damping, deck inertia, and both contacts.
 - **Requirement**: Prove the active Delassus matrix is a P-matrix over the admitted profile domain.
-- **Audit result**: The current admitted domain contains a negative one-contact principal minor.
+- **Provisional calculation**: The current admitted domain contains a negative one-contact principal minor.
 - **Witness**: Use record inertia `1e-7 kg m^2` and stylus moving mass `0.01 kg`.
 - **Witness**: Use friction `0.25`, wall slope `-0.125`, and radius `0.14605 m`.
 - **Witness**: Use the default tonearm and a small valid positive generator coefficient.
@@ -619,11 +619,11 @@ This checkpoint records implemented behavior. It does not record a calibrated ac
 - **Scalar result**: The current test accepts `mu * abs(p) = 0.03125`.
 - **Calculated result**: The deck contribution is `-0.007866686227009534`.
 - **Calculated result**: The pickup contribution is `0.000536859604648429`.
-- **Calculated result**: The one-wall minor is `-0.007329826622361105`.
+- **Provisional result**: The one-wall minor is `-0.007329826622361105`.
 - **Consequence**: The current scalar condition does not prove existence or uniqueness.
 - **Requirement**: Certify every profile and source against all 48 sliding Delassus families.
 - **Requirement**: Reject an unproved operator before playback changes state.
-- **Possible error**: This witness does not yet have a permanent production-builder parity test.
+- **Verification gap**: This witness does not yet have a permanent production-builder parity test.
 - **Disproof test**: Rebuild the witness through the canonical production matrix builder.
 - **Finding**: The general trace slope cap is `16`.
 - **Finding**: The default groove friction coefficient is `0.25`.

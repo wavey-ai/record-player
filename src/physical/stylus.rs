@@ -168,7 +168,7 @@ pub struct StylusTraceContact {
 ///
 /// Add each relative bound to `source_frame_origin` conceptually. Do not convert the
 /// origin to `f64`. The relative bounds can be negative at a record or page edge.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CertifiedContactPositionInterval {
     source_frame_origin: u64,
@@ -176,6 +176,15 @@ pub struct CertifiedContactPositionInterval {
     upper_relative_source_frame: f64,
     #[serde(skip)]
     tracer_produced: bool,
+}
+
+impl PartialEq for CertifiedContactPositionInterval {
+    fn eq(&self, other: &Self) -> bool {
+        // The live seal is authorization state. It is not serialized value state.
+        self.source_frame_origin == other.source_frame_origin
+            && self.lower_relative_source_frame == other.lower_relative_source_frame
+            && self.upper_relative_source_frame == other.upper_relative_source_frame
+    }
 }
 
 impl CertifiedContactPositionInterval {

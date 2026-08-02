@@ -1673,10 +1673,10 @@ The response also depends on skating geometry, masses, damping, deck inertia, an
 
 The accepted profile domain needs a P-matrix proof or an equivalent bounded proof.
 
-### Coupled Uniqueness Counterexample
+### Provisional Coupled Uniqueness Counterexample
 
 - **Observation date**: 2026-08-02.
-- **Status**: The current scalar friction gate does not prove the admitted operator.
+- **Status**: A provisional calculation indicates that the scalar gate admits a negative minor.
 - **Timestep**: Use `1 / 192000` seconds.
 - **Record inertia**: Use `1e-7` kilogram square meters.
 - **Stylus moving mass**: Use `0.01` kilograms.
@@ -1694,8 +1694,8 @@ The accepted profile domain needs a P-matrix proof or an equivalent bounded proo
 - **Deck contribution**: The value is `-0.007866686227009534`.
 - **Pickup contribution**: The value is `0.000536859604648429`.
 - **One-wall minor**: `W_00` is `-0.007329826622361105`.
-- **Conclusion**: The one-contact Delassus operator is not positive for this admitted witness.
-- **Physical effect**: A one-dimensional complementarity problem can have two solutions or no solution.
+- **Provisional conclusion**: The one-contact Delassus operator is not positive for this witness.
+- **Possible physical effect**: A one-dimensional complementarity problem can have two solutions or no solution.
 - **Mode count**: The current midpoint solver has 24 mobility classes and 48 signed sliding families.
 - **Required proof**: Prove both diagonal minors and the determinant for every family.
 - **Required domain**: Bind radius, both slopes, pitch, tonearm geometry, damping, profile, source, and generation.

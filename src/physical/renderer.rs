@@ -850,7 +850,7 @@ mod tests {
 
         let json = serde_json::to_string(&snapshot).unwrap();
         let decoded: PhysicalHostRendererSnapshot = serde_json::from_str(&json).unwrap();
-        assert_ne!(decoded, snapshot);
+        assert_eq!(decoded, snapshot);
         assert_eq!(serde_json::to_string(&decoded).unwrap(), json);
         restored.restore(&decoded).unwrap();
         let decoded_actual = render_blocks(&mut restored, &[29, 701, 3]);

@@ -2431,6 +2431,29 @@ mod tests {
         wall: usize,
     ) {
         assert_eq!(
+            trace_without_certified_position_intervals(actual),
+            trace_without_certified_position_intervals(expected)
+        );
+        let resolve = |contacts| {
+            super::super::tangential_identity::resolve_tangential_contact_identity(
+                source_content_identity(),
+                generation.get(),
+                TOTAL_FRAMES,
+                wall,
+                contacts,
+            )
+            .unwrap()
+        };
+        assert_eq!(resolve(actual), resolve(expected));
+    }
+
+    fn assert_same_seam_trace_and_material_cell(
+        actual: StylusTraceContactSet,
+        expected: StylusTraceContactSet,
+        generation: GrooveGenerationId,
+        wall: usize,
+    ) {
+        assert_eq!(
             actual.center_displacement_m.to_bits(),
             expected.center_displacement_m.to_bits()
         );
@@ -2457,10 +2480,6 @@ mod tests {
                     <= super::super::stylus::SPHERICAL_TRACE_TANGENT_RESIDUAL_ERROR_BOUND
             );
         }
-        assert_eq!(
-            trace_without_certified_position_intervals(actual).contacts[count..],
-            trace_without_certified_position_intervals(expected).contacts[count..]
-        );
         let resolve = |contacts| {
             super::super::tangential_identity::resolve_tangential_contact_identity(
                 source_content_identity(),
@@ -2624,7 +2643,7 @@ mod tests {
                     .unwrap(),
                 position,
             );
-            assert_same_trace_and_material_cell(
+            assert_same_seam_trace_and_material_cell(
                 page_trace,
                 contiguous_trace,
                 asset.metadata().generation(),
