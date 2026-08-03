@@ -50,6 +50,8 @@ const WINDOW_MISS_FADE_SECONDS: f64 = 0.006;
 const MOMENTARY_CROSSFADER_TRANSITION_SECONDS: f64 = 0.00045;
 const PROGRAMME_END_POSITION_EPSILON_FRAMES: f64 = 1.0e-7;
 const DEFAULT_REPLAY_NOISE_SEED: u32 = 0x9e37_79b9;
+const LOOSE_SLIPMAT_COUPLING_SCALE: f64 = 0.65;
+const TIGHT_SLIPMAT_COUPLING_SCALE: f64 = 2.0;
 
 // Needle-surface bed and needle-drop foley (original: player.js 3915–4249).
 const LEAD_IN_STATIC_GAIN: f64 = 0.048;
@@ -744,8 +746,14 @@ impl ScratchAcousticDsp {
     /// The release returns control to the technique through a de-click ramp.
     #[wasm_bindgen(js_name = setMomentaryCrossfaderOverride)]
     pub fn set_momentary_crossfader_override(&mut self, active: bool, open: bool) {
-        if active {
-            self.momentary_crossfader_gain = f64::from(open);
+        self.set_crossfader_touch_override(active, f64::from(open));
+    }
+
+    /// Gives a touched host fader temporary control of the audible gate.
+    /// Releasing the fader returns control to the selected scratch technique.
+    pub fn set_crossfader_touch_override(&mut self, active: bool, gain: f64) {
+        if active && gain.is_finite() {
+            self.momentary_crossfader_gain = gain.clamp(0.0, 1.0);
         }
         self.momentary_crossfader_mix_target = f64::from(active);
     }
@@ -1154,6 +1162,35 @@ impl ScratchAcousticDsp {
             )
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
         self.native_rpm = native_rpm;
+        Ok(())
+    }
+
+    /// Sets the slipmat coupling from loose at zero to tight at one.
+    #[wasm_bindgen(js_name = setSlipmatResponse)]
+    pub fn set_slipmat_response(&mut self, response: f64) -> Result<(), JsValue> {
+        if !valid_unit_interval(response) {
+            return Err(JsValue::from_str("slipmatResponse must be between 0 and 1"));
+        }
+        let telemetry = self.deck_state.telemetry();
+        let reference = production_deck_config(self.output_sample_rate, self.native_rpm);
+        let scale = LOOSE_SLIPMAT_COUPLING_SCALE
+            + response * (TIGHT_SLIPMAT_COUPLING_SCALE - LOOSE_SLIPMAT_COUPLING_SCALE);
+        let mut deck_config = self.deck_state.config();
+        deck_config.slipmat_static_torque_nm = reference.slipmat_static_torque_nm * scale;
+        deck_config.slipmat_kinetic_torque_nm = reference.slipmat_kinetic_torque_nm * scale;
+        deck_config.slipmat_viscous_torque_nm_per_rad_s =
+            reference.slipmat_viscous_torque_nm_per_rad_s * scale;
+        self.deck_state
+            .reconfigure(deck_config)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        self.deck_state
+            .reset(
+                telemetry.platter_rate,
+                telemetry.record_rate,
+                telemetry.platter_angle_turns,
+                telemetry.record_angle_turns,
+            )
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
         Ok(())
     }
 
@@ -3124,6 +3161,32 @@ mod tests {
                 "directional mechanics differed: reverse {reverse_value}, forward {forward_value}",
             );
         }
+    }
+
+    #[test]
+    fn tighter_slipmat_response_catches_the_powered_platter_sooner() {
+        fn rate_after_release(response: f64) -> f64 {
+            let mut dsp = simulation_dsp();
+            dsp.set_effects(false, false);
+            dsp.set_slipmat_response(response).unwrap();
+            dsp.start();
+            dsp.set_position(2_400_000.0, 0.0);
+            dsp.set_transport(false, 1.0, 0.0, 0.0);
+            dsp.render(48_000, 1);
+            dsp.set_transport(true, 1.0, -1.0, 1.0);
+            dsp.set_motion(dsp.position - 9_600.0, -1.0, 0.0);
+            dsp.render(9_600, 1);
+            dsp.set_transport(false, 1.0, 0.0, 0.0);
+            dsp.render(2_400, 1);
+            dsp.last_effective_rate
+        }
+
+        let loose = rate_after_release(0.0);
+        let tight = rate_after_release(1.0);
+        assert!(
+            tight > loose + 0.20,
+            "tight response {tight} did not clear loose response {loose}",
+        );
     }
 
     #[test]
