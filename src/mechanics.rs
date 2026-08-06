@@ -21,6 +21,9 @@ const STATIONARY_PRESS_FORCE_N: f64 = 15.0;
 /// Hand speed (in units of nominal rate) at which the planted-press
 /// force boost has fully faded back to the square law.
 const STATIONARY_PRESS_FADE_RATE: f64 = 0.25;
+/// Fraction of the hand's angular speed available as extra position
+/// catch-up authority beyond the configured floor.
+const HAND_CATCHUP_RATE_SHARE: f64 = 0.25;
 pub const MAXIMUM_HAND_CONTACT_RADIUS_M: f64 = 0.20;
 pub const MAXIMUM_STYLUS_TORQUE_NM: f64 = 1.0;
 const MAXIMUM_DECK_SNAPSHOT_RATE: f64 = 40.0;
@@ -1374,10 +1377,14 @@ fn effective_hand_velocity(
     record_angle_rad: f64,
 ) -> f64 {
     let position_correction = control.hand_target_angle_rad.map_or(0.0, |target| {
-        ((target - record_angle_rad) / config.hand_position_stabilization_seconds).clamp(
-            -config.hand_max_position_correction_rad_s,
-            config.hand_max_position_correction_rad_s,
-        )
+        // A fast-moving hand can also correct fast: catch-up authority grows
+        // with stroke speed so tracking error from a hard stroke does not
+        // linger for seconds under the fixed low cap.
+        let correction_limit = config.hand_max_position_correction_rad_s.max(
+            HAND_CATCHUP_RATE_SHARE * control.hand_target_angular_velocity_rad_s.abs(),
+        );
+        ((target - record_angle_rad) / config.hand_position_stabilization_seconds)
+            .clamp(-correction_limit, correction_limit)
     });
     let maximum_velocity = MAXIMUM_DECK_RATE * config.nominal_angular_velocity_rad_s();
     (control.hand_target_angular_velocity_rad_s + position_correction)

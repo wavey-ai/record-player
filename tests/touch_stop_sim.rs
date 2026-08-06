@@ -141,3 +141,32 @@ fn mechanics_only_touch_stop() {
     }
     println!("did not stop within 250ms");
 }
+
+#[test]
+fn scratching_into_the_start_edge_fades_instead_of_holding_a_frozen_sample() {
+    let sr = 48_000.0;
+    let mut dsp = ScratchAcousticDsp::new_native(sr, AcousticConfig::default()).unwrap();
+    let source = vec![0.25_f32; 48_000 * 4];
+    dsp.replace_window_native(&[source.as_slice()], sr, None)
+        .unwrap();
+    dsp.set_effects(false, false);
+    dsp.start();
+    dsp.set_position(2_400.0, 0.0);
+    // Drag hard backwards into the start of the record and keep pushing.
+    dsp.set_transport(true, 0.0, -2.0, 1.0);
+    dsp.set_motion(0.0, -2.0, 0.0);
+    for _ in 0..40 {
+        dsp.render(240, 1);
+        dsp.set_motion(0.0, -2.0, 0.0);
+    }
+    assert!(dsp.position() < 4.0, "position {} did not pin", dsp.position());
+    dsp.render(480, 1);
+    let held = dsp
+        .rendered_samples()
+        .iter()
+        .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+    assert!(
+        held < 0.02,
+        "a pinned edge still held a {held} full-scale sample"
+    );
+}

@@ -21,6 +21,13 @@ const MOTION_HOLD_SECONDS: f64 = 0.05;
 const MOTION_HOLD_RELEASE_SECONDS: f64 = 0.06;
 const GRIP_ATTACK_SECONDS: f64 = 0.012;
 const GRIP_RELEASE_SECONDS: f64 = 0.045;
+/// Below this residual force a released hand counts as fully separated.
+const GRIP_CONTACT_EPSILON: f64 = 0.02;
+/// A lifting finger's normal force collapses over this span.
+const HAND_RELEASE_SECONDS: f64 = 0.008;
+/// The stylus fades over this span approaching a pinned record edge so a
+/// clamped scratch cannot hold a full-level frozen sample.
+const EDGE_FADE_SECONDS: f64 = 0.01;
 const GRIP_OWNERSHIP: f64 = 0.5;
 const DEADZONE_RATE: f64 = 0.006;
 const STOP_GAIN_FULL_RATE: f64 = 0.10;
@@ -385,6 +392,7 @@ struct AcousticReplaySnapshot {
     hand_contact: bool,
     grip: f64,
     grip_target: f64,
+    release_grip: f64,
     motor_rate: f64,
     motor_delivered_rate: f64,
     unpowered_throw_rate: f64,
@@ -441,6 +449,7 @@ pub struct ScratchAcousticDsp {
     hand_contact: bool,
     grip: f64,
     grip_target: f64,
+    release_grip: f64,
     motor_rate: f64,
     motor_delivered_rate: f64,
     unpowered_throw_rate: f64,
@@ -537,6 +546,7 @@ impl ScratchAcousticDsp {
             hand_contact: false,
             grip: 0.0,
             grip_target: 0.0,
+            release_grip: 0.0,
             motor_rate: 0.0,
             motor_delivered_rate: 0.0,
             unpowered_throw_rate: 0.0,
@@ -666,6 +676,7 @@ impl ScratchAcousticDsp {
     pub fn start(&mut self) {
         self.active = true;
         self.grip = 0.0;
+        self.release_grip = 0.0;
         self.grip_target = 1.0;
         self.motor_delivered_rate = 0.0;
         self.hand_contact = true;
@@ -876,6 +887,7 @@ impl ScratchAcousticDsp {
             hand_contact: self.hand_contact,
             grip: self.grip,
             grip_target: self.grip_target,
+            release_grip: self.release_grip,
             motor_rate: self.motor_rate,
             motor_delivered_rate: self.motor_delivered_rate,
             unpowered_throw_rate: self.unpowered_throw_rate,
@@ -938,6 +950,7 @@ impl ScratchAcousticDsp {
         swap_replay_field!(needle_lifted);
         swap_replay_field!(hand_contact);
         swap_replay_field!(grip);
+        swap_replay_field!(release_grip);
         swap_replay_field!(grip_target);
         swap_replay_field!(motor_rate);
         swap_replay_field!(motor_delivered_rate);
@@ -1000,6 +1013,7 @@ impl ScratchAcousticDsp {
         self.high_frequency_acceleration_limiter.reset();
         self.hand_contact = false;
         self.grip = 0.0;
+        self.release_grip = 0.0;
         self.grip_target = 0.0;
         self.motor_rate = 0.0;
         self.motor_delivered_rate = 0.0;
@@ -1222,6 +1236,13 @@ impl ScratchAcousticDsp {
         grip: f64,
     ) {
         let released_hand = self.hand_contact && !hand_contact;
+        if released_hand {
+            // A lifting finger's normal force collapses over a few
+            // milliseconds rather than in a single sample.
+            self.release_grip = self.grip;
+        } else if hand_contact {
+            self.release_grip = 0.0;
+        }
         let motor_rate =
             finite_or_zero(motor_rate).clamp(-self.config.max_rate, self.config.max_rate);
         if released_hand && motor_rate.abs() < DEADZONE_RATE {
@@ -1401,6 +1422,27 @@ impl ScratchAcousticDsp {
             } else {
                 0.0
             };
+            // A stylus pinned against a clamped record edge reads nothing:
+            // fade the programme out approaching the pin instead of holding
+            // a full-level frozen sample there.
+            let edge_fade_frames = (self.source_sample_rate * EDGE_FADE_SECONDS).max(1.0);
+            let programme_end = self.total_frames.max(self.window_end).saturating_sub(2) as f64;
+            let start_distance = self.position.max(0.0);
+            let end_distance = (programme_end - self.position).max(0.0);
+            // Only the edge being pushed into fades; playing away from an
+            // edge stays bit-exact.
+            let pinned_distance = if effective_rate < 0.0 {
+                start_distance
+            } else if effective_rate > 0.0 {
+                end_distance
+            } else {
+                start_distance.min(end_distance)
+            };
+            let edge_gain = if self.surface_bed.is_some() {
+                1.0
+            } else {
+                smoothstep_unit(pinned_distance / edge_fade_frames)
+            };
             let source_direction = sign_nonzero(effective_rate, held_target_rate);
             let drag_alpha = if self.config.acoustic_enabled {
                 self.drag_lowpass_alpha(abs_rate)
@@ -1465,6 +1507,7 @@ impl ScratchAcousticDsp {
                 self.output[output_index] = ((programme[channel_index]
                     + source_textures[channel_index])
                     * self.window_programme_gain
+                    * edge_gain
                     + contact_texture
                     + dust_fleck
                     + impulse_noise)
@@ -2458,6 +2501,16 @@ impl ScratchAcousticDsp {
                 return self.motor_rate;
             }
         }
+        // A lifted finger eases off over a short force collapse instead of
+        // dropping its normal force in a single sample. The position servo
+        // ends at release; only the fading friction remains.
+        if !self.hand_contact && self.release_grip > 0.0 {
+            self.release_grip *= (-(1.0 / self.output_sample_rate) / HAND_RELEASE_SECONDS).exp();
+            if self.release_grip <= GRIP_CONTACT_EPSILON {
+                self.release_grip = 0.0;
+            }
+        }
+        let hand_engaged = self.hand_contact || self.release_grip > 0.0;
         let hand_target_angle_turns = if self.hand_contact && self.grip > 0.0 {
             let frames_per_turn =
                 self.source_sample_rate * 60.0 / self.native_rpm.max(f64::EPSILON);
@@ -2470,7 +2523,7 @@ impl ScratchAcousticDsp {
         };
         let motor_mode = if self.motor_rate.abs() >= DEADZONE_RATE {
             MotorMode::Servo
-        } else if self.hand_contact || self.unpowered_throw_rate.abs() >= DEADZONE_RATE {
+        } else if hand_engaged || self.unpowered_throw_rate.abs() >= DEADZONE_RATE {
             MotorMode::Off
         } else {
             MotorMode::Brake
@@ -2478,10 +2531,14 @@ impl ScratchAcousticDsp {
         let normalized = NormalizedDeckControl {
             motor_mode,
             motor_rate: self.motor_rate,
-            hand_contact: self.hand_contact,
+            hand_contact: hand_engaged,
             hand_target_angle_turns,
             hand_rate,
-            grip: self.grip,
+            grip: if self.hand_contact {
+                self.grip
+            } else {
+                self.release_grip
+            },
             stylus_torque_nm: 0.0,
         };
         let control = DeckMechanicalControl::from_normalized(self.deck_state.config(), normalized);
