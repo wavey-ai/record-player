@@ -1201,6 +1201,32 @@ impl ScratchAcousticDsp {
         Ok(())
     }
 
+    /// Scales the platter bearing's friction: frictionless at zero, the
+    /// stock deck at one, heavier beyond.
+    ///
+    /// This is the only brake on a platter thrown by hand with the motor
+    /// off, so it is the knob that decides how long a free spin coasts —
+    /// from forever at zero to a fast die-off at the top of the range.
+    #[wasm_bindgen(js_name = setBearingFriction)]
+    pub fn set_bearing_friction(&mut self, scale: f64) -> Result<(), JsValue> {
+        if !scale.is_finite() || scale < 0.0 {
+            return Err(JsValue::from_str("bearingFriction must be zero or more"));
+        }
+        let scale = scale.min(16.0);
+        let reference = production_deck_config(self.output_sample_rate, self.native_rpm);
+        let mut deck_config = self.deck_state.config();
+        deck_config.bearing_static_torque_nm = reference.bearing_static_torque_nm * scale;
+        deck_config.bearing_kinetic_torque_nm = reference.bearing_kinetic_torque_nm * scale;
+        deck_config.bearing_viscous_torque_nm_per_rad_s =
+            reference.bearing_viscous_torque_nm_per_rad_s * scale;
+        // Reconfigure only, as the slipmat setter does: a reset would zero
+        // the motor integrator and contact modes mid-flight.
+        self.deck_state
+            .reconfigure(deck_config)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        Ok(())
+    }
+
     #[wasm_bindgen(getter, js_name = nativeRpm)]
     pub fn native_rpm(&self) -> f64 {
         self.native_rpm
