@@ -15,6 +15,12 @@ const MAX_EXPLICIT_STEP_RATIO: f64 = 0.5;
 /// They are engineering limits, not measured hardware properties.
 pub const MAXIMUM_DECK_RATE: f64 = 20.0;
 pub const MAXIMUM_HAND_NORMAL_FORCE_N: f64 = 100.0;
+/// Extra normal force from a planted full-grip press, on top of the
+/// square-law fingertip force.
+const STATIONARY_PRESS_FORCE_N: f64 = 15.0;
+/// Hand speed (in units of nominal rate) at which the planted-press
+/// force boost has fully faded back to the square law.
+const STATIONARY_PRESS_FADE_RATE: f64 = 0.25;
 pub const MAXIMUM_HAND_CONTACT_RADIUS_M: f64 = 0.20;
 pub const MAXIMUM_STYLUS_TORQUE_NM: f64 = 1.0;
 const MAXIMUM_DECK_SNAPSHOT_RATE: f64 = 40.0;
@@ -273,7 +279,17 @@ impl DeckMechanicalControl {
                 * nominal,
             // Touch pressure has little useful resolution near zero.
             // The square law preserves light slip and firm record ownership.
-            hand_normal_force_n: normalized_grip * normalized_grip * 5.0,
+            // A planted press adds the steep top term: a full-grip hand that
+            // is not moving clamps the record so a touch-stop reads as
+            // immediate. The boost fades out with hand speed, leaving active
+            // scratching under the original square law.
+            hand_normal_force_n: {
+                let stationary = (1.0
+                    - finite_or_zero(input.hand_rate).abs() / STATIONARY_PRESS_FADE_RATE)
+                    .clamp(0.0, 1.0);
+                normalized_grip * normalized_grip * 5.0
+                    + normalized_grip.powi(8) * STATIONARY_PRESS_FORCE_N * stationary
+            },
             hand_contact_radius_m: 0.12,
             stylus_torque_nm: finite_or_zero(input.stylus_torque_nm)
                 .clamp(-MAXIMUM_STYLUS_TORQUE_NM, MAXIMUM_STYLUS_TORQUE_NM),

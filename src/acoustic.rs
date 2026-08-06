@@ -1330,6 +1330,13 @@ impl ScratchAcousticDsp {
         for frame in 0..frame_count {
             self.frames_since_motion = self.frames_since_motion.saturating_add(1);
             self.grip += (self.grip_target - self.grip) * grip_alpha;
+            // A still hand cannot reclaim angle that slipped underneath it.
+            // Once motion input stops, the anchor follows the record instead
+            // of winching it back to the original grab frame.
+            if self.hand_contact && self.frames_since_motion > hold_frames {
+                self.target_position +=
+                    (self.position - self.target_position) / (hold_release_frames * 0.25);
+            }
             let hand_rate = if self.frames_since_motion > hold_frames {
                 self.target_rate
                     * (-((self.frames_since_motion - hold_frames) as f64) / hold_release_frames)
