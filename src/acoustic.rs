@@ -453,6 +453,9 @@ pub struct ScratchAcousticDsp {
     motor_rate: f64,
     motor_delivered_rate: f64,
     unpowered_throw_rate: f64,
+    /// Motor-off thrust while coasting, in e-folds of rate per second.
+    /// Zero is a bearing and nothing else.
+    free_spin_drive_per_second: f64,
     ended: bool,
     contact_impulse: f64,
     last_effective_rate: f64,
@@ -550,6 +553,7 @@ impl ScratchAcousticDsp {
             motor_rate: 0.0,
             motor_delivered_rate: 0.0,
             unpowered_throw_rate: 0.0,
+            free_spin_drive_per_second: 0.0,
             ended: false,
             contact_impulse: 0.0,
             last_effective_rate: 0.0,
@@ -1224,6 +1228,19 @@ impl ScratchAcousticDsp {
         self.deck_state
             .reconfigure(deck_config)
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        Ok(())
+    }
+
+    /// Sets the motor-off thrust: e-folds of rate per second while the
+    /// platter coasts. Zero is a plain bearing; 0.02 is a solar sail's
+    /// patience; anything near two doubles the spin faster than a hand
+    /// could. Clamped there because beyond it the platter is a turbine.
+    #[wasm_bindgen(js_name = setFreeSpinDrive)]
+    pub fn set_free_spin_drive(&mut self, per_second: f64) -> Result<(), JsValue> {
+        if !per_second.is_finite() || per_second < 0.0 {
+            return Err(JsValue::from_str("freeSpinDrive must be zero or more"));
+        }
+        self.free_spin_drive_per_second = per_second.min(2.0);
         Ok(())
     }
 
@@ -2547,7 +2564,23 @@ impl ScratchAcousticDsp {
         } else {
             None
         };
+        // A drive only acts on a free coast: hand off, motor off, platter
+        // still turning. It multiplies the throw rate by e^(drive·dt) and
+        // lets the motor servo chase the growing target, so the bearing's
+        // friction still pushes back through the same mechanics.
+        let coasting_drive = self.free_spin_drive_per_second > 0.0
+            && !hand_engaged
+            && self.motor_rate.abs() < DEADZONE_RATE
+            && self.unpowered_throw_rate.abs() >= DEADZONE_RATE;
+        if coasting_drive {
+            let growth =
+                (self.free_spin_drive_per_second / self.output_sample_rate).exp();
+            self.unpowered_throw_rate = (self.unpowered_throw_rate * growth)
+                .clamp(-self.config.max_rate, self.config.max_rate);
+        }
         let motor_mode = if self.motor_rate.abs() >= DEADZONE_RATE {
+            MotorMode::Servo
+        } else if coasting_drive {
             MotorMode::Servo
         } else if hand_engaged || self.unpowered_throw_rate.abs() >= DEADZONE_RATE {
             MotorMode::Off
@@ -2556,7 +2589,11 @@ impl ScratchAcousticDsp {
         };
         let normalized = NormalizedDeckControl {
             motor_mode,
-            motor_rate: self.motor_rate,
+            motor_rate: if coasting_drive {
+                self.unpowered_throw_rate
+            } else {
+                self.motor_rate
+            },
             hand_contact: hand_engaged,
             hand_target_angle_turns,
             hand_rate,
