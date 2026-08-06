@@ -1171,7 +1171,6 @@ impl ScratchAcousticDsp {
         if !valid_unit_interval(response) {
             return Err(JsValue::from_str("slipmatResponse must be between 0 and 1"));
         }
-        let telemetry = self.deck_state.telemetry();
         let reference = production_deck_config(self.output_sample_rate, self.native_rpm);
         let scale = LOOSE_SLIPMAT_COUPLING_SCALE
             + response * (TIGHT_SLIPMAT_COUPLING_SCALE - LOOSE_SLIPMAT_COUPLING_SCALE);
@@ -1180,16 +1179,10 @@ impl ScratchAcousticDsp {
         deck_config.slipmat_kinetic_torque_nm = reference.slipmat_kinetic_torque_nm * scale;
         deck_config.slipmat_viscous_torque_nm_per_rad_s =
             reference.slipmat_viscous_torque_nm_per_rad_s * scale;
+        // Reconfigure only: a reset here would zero the motor integrator and
+        // contact modes on every slider tick, wobbling live playback.
         self.deck_state
             .reconfigure(deck_config)
-            .map_err(|error| JsValue::from_str(&error.to_string()))?;
-        self.deck_state
-            .reset(
-                telemetry.platter_rate,
-                telemetry.record_rate,
-                telemetry.platter_angle_turns,
-                telemetry.record_angle_turns,
-            )
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
         Ok(())
     }

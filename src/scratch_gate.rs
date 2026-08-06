@@ -1314,6 +1314,8 @@ mod tests {
     ) -> usize {
         let mut gate = ScratchGate::new(preset);
         gate.set_clicks(clicks);
+        // Count exactly one learned stroke span. The phrase repeats once
+        // travel passes the span, so frames beyond it start a fresh run.
         let frames = (preset.initial_stroke_span() / MAXIMUM_SCRATCH_RECORD_RATE * SAMPLE_RATE)
             .ceil() as usize
             + 1;
@@ -1326,6 +1328,9 @@ mod tests {
                 MAXIMUM_SCRATCH_RECORD_RATE,
                 MAXIMUM_SCRATCH_RECORD_RATE,
             );
+            if gate.stroke_progress() >= 1.0 {
+                break;
+            }
             let target = gate.target();
             if target == counted_target && previous != Some(counted_target) {
                 runs += 1;
