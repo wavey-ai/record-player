@@ -19,7 +19,10 @@ const MAX_FINAL_OUTPUT_GAIN_RAMP_MS: f64 = 60_000.0;
 const POSITION_CATCHUP_SECONDS: f64 = 0.28;
 const MOTION_HOLD_SECONDS: f64 = 0.05;
 const MOTION_HOLD_RELEASE_SECONDS: f64 = 0.06;
-const GRIP_ATTACK_SECONDS: f64 = 0.012;
+// A landing finger develops its force in single-digit milliseconds; a
+// 12 ms attack was the floor under every live catch, gating the hand's
+// weight no matter how hard it pressed.
+const GRIP_ATTACK_SECONDS: f64 = 0.004;
 const GRIP_RELEASE_SECONDS: f64 = 0.045;
 /// Below this residual force a released hand counts as fully separated.
 const GRIP_CONTACT_EPSILON: f64 = 0.02;
@@ -2897,7 +2900,6 @@ impl ScratchAcousticDsp {
             self.release_grip *= (-(1.0 / self.output_sample_rate) / HAND_RELEASE_SECONDS).exp();
             if self.release_grip <= GRIP_CONTACT_EPSILON {
                 self.release_grip = 0.0;
-        self.movement_gain_state = f64::NAN;
             }
         }
         let hand_engaged = self.hand_contact || self.release_grip > 0.0;
@@ -3892,14 +3894,14 @@ mod tests {
             dsp.last_effective_rate
         }
 
-        // A single fingertip (0.45) bears ~4 N and takes the record over
-        // in tens of milliseconds; a full-grip hand bears 20 N and has
-        // already reversed it inside the same window.
+        // A single fingertip (0.45) bears ~4 N and is still mid-takeover
+        // at the window's edge; a full-grip hand bears 40 N and has long
+        // since reversed the record and matched the stroke.
         let partial = rate_after_grab(0.45);
         let full = rate_after_grab(1.0);
-        assert!(partial > -0.05, "partial pressure reached {partial}");
-        assert!(full < -0.4, "full pressure reached {full}");
-        assert!(partial - full > 0.4);
+        assert!(partial > -0.55, "partial pressure reached {partial}");
+        assert!(full < -0.75, "full pressure reached {full}");
+        assert!(partial - full > 0.3);
     }
 
     #[test]

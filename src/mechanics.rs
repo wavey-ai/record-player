@@ -15,11 +15,14 @@ const MAX_EXPLICIT_STEP_RATIO: f64 = 0.5;
 /// They are engineering limits, not measured hardware properties.
 pub const MAXIMUM_DECK_RATE: f64 = 20.0;
 pub const MAXIMUM_HAND_NORMAL_FORCE_N: f64 = 100.0;
-/// A moving full-grip hand's normal force. A scratching hand bears down
-/// through the felt — measured presses run 15–30 N — and anything much
-/// lighter loses a live grab to the motor: at 5 N a full-grip catch of a
-/// playing record took ~67 ms to reverse, a perceptible dead gap.
-const MOVING_GRIP_FORCE_N: f64 = 20.0;
+/// The moving hand's normal force splits into a fingertip square law that
+/// keeps light pressure slipping, and a cube term that brings the palm's
+/// weight in toward full grip. At full grip the hand bears 40 N — a firm
+/// palm planted on the record — so a live catch of a playing record
+/// reverses inside a hand's-breadth of samples instead of a perceptible
+/// dead gap; at 5 N flat it took ~67 ms.
+const FINGERTIP_GRIP_FORCE_N: f64 = 5.0;
+const PALM_GRIP_FORCE_N: f64 = 35.0;
 /// Extra normal force from a planted full-grip press, on top of the
 /// square-law fingertip force.
 const STATIONARY_PRESS_FORCE_N: f64 = 15.0;
@@ -295,7 +298,8 @@ impl DeckMechanicalControl {
                 let stationary = (1.0
                     - finite_or_zero(input.hand_rate).abs() / STATIONARY_PRESS_FADE_RATE)
                     .clamp(0.0, 1.0);
-                normalized_grip * normalized_grip * MOVING_GRIP_FORCE_N
+                normalized_grip * normalized_grip * FINGERTIP_GRIP_FORCE_N
+                    + normalized_grip.powi(3) * PALM_GRIP_FORCE_N
                     + normalized_grip.powi(8) * STATIONARY_PRESS_FORCE_N * stationary
             },
             hand_contact_radius_m: 0.12,
