@@ -28,6 +28,10 @@ const HAND_RELEASE_SECONDS: f64 = 0.008;
 /// The stylus fades over this span approaching a pinned record edge so a
 /// clamped scratch cannot hold a full-level frozen sample.
 const EDGE_FADE_SECONDS: f64 = 0.01;
+/// The stop gain follows the rate through this smoothing so a hard catch
+/// cannot step the output in one sample. Well under the mechanical
+/// reversal time, so it adds no feelable latency.
+const MOVEMENT_GAIN_SECONDS: f64 = 0.003;
 const GRIP_OWNERSHIP: f64 = 0.5;
 const DEADZONE_RATE: f64 = 0.006;
 const STOP_GAIN_FULL_RATE: f64 = 0.10;
@@ -393,6 +397,7 @@ struct AcousticReplaySnapshot {
     grip: f64,
     grip_target: f64,
     release_grip: f64,
+    movement_gain_state: f64,
     motor_rate: f64,
     motor_delivered_rate: f64,
     unpowered_throw_rate: f64,
@@ -450,6 +455,7 @@ pub struct ScratchAcousticDsp {
     grip: f64,
     grip_target: f64,
     release_grip: f64,
+    movement_gain_state: f64,
     motor_rate: f64,
     motor_delivered_rate: f64,
     unpowered_throw_rate: f64,
@@ -580,6 +586,7 @@ impl ScratchAcousticDsp {
             grip: 0.0,
             grip_target: 0.0,
             release_grip: 0.0,
+            movement_gain_state: f64::NAN,
             motor_rate: 0.0,
             motor_delivered_rate: 0.0,
             unpowered_throw_rate: 0.0,
@@ -731,6 +738,7 @@ impl ScratchAcousticDsp {
         self.active = true;
         self.grip = 0.0;
         self.release_grip = 0.0;
+        self.movement_gain_state = f64::NAN;
         self.grip_target = 1.0;
         self.motor_delivered_rate = 0.0;
         self.hand_contact = true;
@@ -942,6 +950,7 @@ impl ScratchAcousticDsp {
             grip: self.grip,
             grip_target: self.grip_target,
             release_grip: self.release_grip,
+            movement_gain_state: self.movement_gain_state,
             motor_rate: self.motor_rate,
             motor_delivered_rate: self.motor_delivered_rate,
             unpowered_throw_rate: self.unpowered_throw_rate,
@@ -1005,6 +1014,7 @@ impl ScratchAcousticDsp {
         swap_replay_field!(hand_contact);
         swap_replay_field!(grip);
         swap_replay_field!(release_grip);
+        swap_replay_field!(movement_gain_state);
         swap_replay_field!(grip_target);
         swap_replay_field!(motor_rate);
         swap_replay_field!(motor_delivered_rate);
@@ -1068,6 +1078,7 @@ impl ScratchAcousticDsp {
         self.hand_contact = false;
         self.grip = 0.0;
         self.release_grip = 0.0;
+        self.movement_gain_state = f64::NAN;
         self.grip_target = 0.0;
         self.motor_rate = 0.0;
         self.motor_delivered_rate = 0.0;
@@ -1456,6 +1467,7 @@ impl ScratchAcousticDsp {
             self.release_grip = self.grip;
         } else if hand_contact {
             self.release_grip = 0.0;
+        self.movement_gain_state = f64::NAN;
         }
         let motor_rate =
             finite_or_zero(motor_rate).clamp(-self.config.max_rate, self.config.max_rate);
@@ -1658,7 +1670,24 @@ impl ScratchAcousticDsp {
                 self.scratch_gate
                     .process(dt, self.hand_contact, hand_rate, effective_rate)
                     as f32;
-            let movement_gain = compute_movement_gain(abs_rate, self.config.acoustic_enabled);
+            let movement_gain_target =
+                compute_movement_gain(abs_rate, self.config.acoustic_enabled);
+            if self.movement_gain_state.is_nan() {
+                // First render after a start or reset: the deck is already
+                // wherever it is, so the gain begins there — a deck seeded
+                // at speed renders bit-exact from its first frame.
+                self.movement_gain_state = movement_gain_target;
+            } else {
+                let movement_gain_alpha =
+                    1.0 - (-1.0 / (self.output_sample_rate * MOVEMENT_GAIN_SECONDS)).exp();
+                self.movement_gain_state +=
+                    (movement_gain_target - self.movement_gain_state) * movement_gain_alpha;
+                // Converged is equal: steady playback must stay bit-exact.
+                if (self.movement_gain_state - movement_gain_target).abs() < 1.0e-4 {
+                    self.movement_gain_state = movement_gain_target;
+                }
+            }
+            let movement_gain = self.movement_gain_state;
             let surface_noise = if self.config.surface_enabled {
                 self.next_noise()
             } else {
@@ -2868,6 +2897,7 @@ impl ScratchAcousticDsp {
             self.release_grip *= (-(1.0 / self.output_sample_rate) / HAND_RELEASE_SECONDS).exp();
             if self.release_grip <= GRIP_CONTACT_EPSILON {
                 self.release_grip = 0.0;
+        self.movement_gain_state = f64::NAN;
             }
         }
         let hand_engaged = self.hand_contact || self.release_grip > 0.0;
@@ -3862,11 +3892,14 @@ mod tests {
             dsp.last_effective_rate
         }
 
+        // A single fingertip (0.45) bears ~4 N and takes the record over
+        // in tens of milliseconds; a full-grip hand bears 20 N and has
+        // already reversed it inside the same window.
         let partial = rate_after_grab(0.45);
         let full = rate_after_grab(1.0);
-        assert!(partial > 0.75, "partial pressure reached {partial}");
-        assert!(full < 0.35, "full pressure reached {full}");
-        assert!(partial - full > 0.5);
+        assert!(partial > -0.05, "partial pressure reached {partial}");
+        assert!(full < -0.4, "full pressure reached {full}");
+        assert!(partial - full > 0.4);
     }
 
     #[test]
