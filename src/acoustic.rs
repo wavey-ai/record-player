@@ -456,6 +456,36 @@ pub struct ScratchAcousticDsp {
     /// Motor-off thrust while coasting, in e-folds of rate per second.
     /// Zero is a bearing and nothing else.
     free_spin_drive_per_second: f64,
+    /// How far the spindle hole is punched off centre, in millimetres. The
+    /// groove the stylus reads oscillates once per revolution, and the
+    /// warble deepens toward the label as the groove radius shrinks —
+    /// exactly as a mis-punched pressing behaves.
+    eccentricity_mm: f64,
+    /// Vertical warp height in millimetres: a once-per-revolution dip in
+    /// level as the stylus rides over the high spot.
+    warp_mm: f64,
+    /// A second stylus this many degrees behind the first. Zero is off.
+    /// Its delay is angle, not time, so it tightens with pitch and chases a
+    /// scratch correctly.
+    stylus_tap_degrees: f64,
+    stylus_tap_level: f64,
+    tap_lowpass_state: [f64; 2],
+    /// Sectors per revolution the angle gate cuts. Zero is off.
+    angle_gate_sectors: u32,
+    angle_gate_depth: f64,
+    angle_gate_gain: f64,
+    /// A locked groove's first frame, or negative for none: playback wraps
+    /// each revolution inside [start, start + frames-per-turn) until the
+    /// host seeks out or clears it.
+    locked_groove_start: f64,
+    /// Wear accumulation-and-audibility scale. Zero is a mint pressing.
+    groove_wear_rate: f64,
+    /// Position-indexed wear, one bucket per WEAR_BUCKET_FRAMES of source.
+    /// The record remembers where the stylus has been.
+    groove_wear: Vec<f32>,
+    /// Perturbs the surface-noise hashes so each pressing crackles like its
+    /// own copy. Zero is the classic pattern.
+    pressing_seed: u32,
     ended: bool,
     contact_impulse: f64,
     last_effective_rate: f64,
@@ -554,6 +584,18 @@ impl ScratchAcousticDsp {
             motor_delivered_rate: 0.0,
             unpowered_throw_rate: 0.0,
             free_spin_drive_per_second: 0.0,
+            eccentricity_mm: 0.0,
+            warp_mm: 0.0,
+            stylus_tap_degrees: 0.0,
+            stylus_tap_level: 0.0,
+            tap_lowpass_state: [0.0; 2],
+            angle_gate_sectors: 0,
+            angle_gate_depth: 0.0,
+            angle_gate_gain: 1.0,
+            locked_groove_start: -1.0,
+            groove_wear_rate: 0.0,
+            groove_wear: Vec::new(),
+            pressing_seed: 0,
             ended: false,
             contact_impulse: 0.0,
             last_effective_rate: 0.0,
@@ -647,6 +689,14 @@ impl ScratchAcousticDsp {
         }
 
         self.source_sample_rate = source_sample_rate;
+        // A new source is a new record: the ring and the wear stay only if
+        // the host restores them for this pressing.
+        self.locked_groove_start = -1.0;
+        self.groove_wear = if self.groove_wear_rate > 0.0 {
+            vec![0.0; (total_frames as usize) / WEAR_BUCKET_FRAMES + 1]
+        } else {
+            Vec::new()
+        };
         self.window_start = window_start as usize;
         self.window_end = self.window_start.saturating_add(length);
         self.total_frames = (total_frames as usize).max(self.window_end);
@@ -1244,6 +1294,127 @@ impl ScratchAcousticDsp {
         Ok(())
     }
 
+    /// Press defects: the spindle hole's eccentricity and the disc's warp,
+    /// both in millimetres, both once-per-revolution and angle-indexed.
+    #[wasm_bindgen(js_name = setPressDefects)]
+    pub fn set_press_defects(
+        &mut self,
+        eccentricity_mm: f64,
+        warp_mm: f64,
+    ) -> Result<(), JsValue> {
+        if !eccentricity_mm.is_finite() || eccentricity_mm < 0.0 {
+            return Err(JsValue::from_str("eccentricity must be zero or more"));
+        }
+        if !warp_mm.is_finite() || warp_mm < 0.0 {
+            return Err(JsValue::from_str("warp must be zero or more"));
+        }
+        self.eccentricity_mm = eccentricity_mm.min(3.0);
+        self.warp_mm = warp_mm.min(4.0);
+        Ok(())
+    }
+
+    /// A second stylus riding the same groove `degrees` behind the first,
+    /// mixed at `level`. Zero level lifts it off.
+    #[wasm_bindgen(js_name = setStylusTap)]
+    pub fn set_stylus_tap(
+        &mut self,
+        degrees: f64,
+        level: f64,
+    ) -> Result<(), JsValue> {
+        if !degrees.is_finite() || !(0.0..=359.0).contains(&degrees) {
+            return Err(JsValue::from_str("tap degrees must be 0..=359"));
+        }
+        if !level.is_finite() || !(0.0..=1.0).contains(&level) {
+            return Err(JsValue::from_str("tap level must be 0..=1"));
+        }
+        self.stylus_tap_degrees = degrees;
+        self.stylus_tap_level = level;
+        Ok(())
+    }
+
+    /// The angle gate: `sectors` openings per revolution, cut to `depth`.
+    /// Zero sectors is off. Geometry, not tempo-sync: it stays locked under
+    /// scratching and free-spin decay because it is read off the platter.
+    #[wasm_bindgen(js_name = setAngleGate)]
+    pub fn set_angle_gate(
+        &mut self,
+        sectors: u32,
+        depth: f64,
+    ) -> Result<(), JsValue> {
+        if sectors > 32 {
+            return Err(JsValue::from_str("gate sectors must be 0..=32"));
+        }
+        if !depth.is_finite() || !(0.0..=1.0).contains(&depth) {
+            return Err(JsValue::from_str("gate depth must be 0..=1"));
+        }
+        self.angle_gate_sectors = sectors;
+        self.angle_gate_depth = depth;
+        Ok(())
+    }
+
+    /// Drops the needle into a locked groove starting at `start_frame`:
+    /// playback wraps every revolution inside that ring until the host
+    /// seeks out or passes a negative frame to clear it.
+    #[wasm_bindgen(js_name = setLockedGroove)]
+    pub fn set_locked_groove(&mut self, start_frame: f64) -> Result<(), JsValue> {
+        if start_frame.is_nan() {
+            return Err(JsValue::from_str("locked groove start must be a number"));
+        }
+        self.locked_groove_start = if start_frame < 0.0 {
+            -1.0
+        } else {
+            start_frame
+        };
+        Ok(())
+    }
+
+    /// Groove wear: every pass of the stylus wears where it passed, adding
+    /// crackle and dulling the highs in the bars that have been played
+    /// most. `rate` scales both how fast wear accrues and how loudly it
+    /// reads; zero is a mint pressing. At one, a region is fully worn after
+    /// roughly fifty passes.
+    #[wasm_bindgen(js_name = setGrooveWear)]
+    pub fn set_groove_wear(&mut self, rate: f64) -> Result<(), JsValue> {
+        if !rate.is_finite() || rate < 0.0 {
+            return Err(JsValue::from_str("wear rate must be zero or more"));
+        }
+        self.groove_wear_rate = rate.min(8.0);
+        if self.groove_wear_rate > 0.0 && self.groove_wear.is_empty() && self.total_frames > 0 {
+            self.groove_wear =
+                vec![0.0; self.total_frames / WEAR_BUCKET_FRAMES + 1];
+        }
+        Ok(())
+    }
+
+    /// The wear map, for persistence: a record's biography rides with it.
+    pub fn groove_wear_map(&self) -> Vec<f32> {
+        self.groove_wear.clone()
+    }
+
+    /// Restores a persisted wear map. Length is reconciled to the loaded
+    /// source; a map from another pressing simply wears the wrong places,
+    /// which is the caller's mistake to avoid via the record hash.
+    pub fn restore_groove_wear_map(&mut self, map: &[f32]) {
+        let len = if self.total_frames > 0 {
+            self.total_frames / WEAR_BUCKET_FRAMES + 1
+        } else {
+            map.len()
+        };
+        let mut restored = vec![0.0_f32; len];
+        for (slot, value) in restored.iter_mut().zip(map.iter()) {
+            *slot = value.clamp(0.0, 1.0);
+        }
+        self.groove_wear = restored;
+    }
+
+    /// Seeds this pressing's surface character. Two pressings of the same
+    /// track crackle like two copies, not two files; zero keeps the classic
+    /// pattern.
+    #[wasm_bindgen(js_name = setPressingSeed)]
+    pub fn set_pressing_seed(&mut self, seed: u32) {
+        self.pressing_seed = seed;
+    }
+
     #[wasm_bindgen(getter, js_name = nativeRpm)]
     pub fn native_rpm(&self) -> f64 {
         self.native_rpm
@@ -1417,6 +1588,72 @@ impl ScratchAcousticDsp {
             } else {
                 corrected_rate
             };
+            // An off-centre hole swings the groove radius the stylus reads
+            // once per revolution: pitch deviation is eccentricity over
+            // groove radius, so the warble deepens toward the label. Angle-
+            // indexed, not clocked — scrub the platter and the warble
+            // scrubs with it; a decaying free spin slows its own wobble.
+            let effective_rate = if self.eccentricity_mm > 0.0 {
+                let walked = if self.total_frames > 0 {
+                    (self.position / self.total_frames as f64).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let groove_radius_mm = SINGLE_OUTER_GROOVE_MM
+                    + (SINGLE_INNER_GROOVE_MM - SINGLE_OUTER_GROOVE_MM) * walked;
+                let deviation = self.eccentricity_mm / groove_radius_mm;
+                effective_rate
+                    * (1.0
+                        + deviation
+                            * (self.platter_rotation_turns
+                                * std::f64::consts::TAU)
+                                .sin())
+            } else {
+                effective_rate
+            };
+            // Warp lifts the stylus over the high spot once per revolution;
+            // the gate cuts sectors out of the same rotation. Both read the
+            // record's angle, and both are smoothed a little so an edge is
+            // a chop, not a click.
+            let warp_gain = if self.warp_mm > 0.0 {
+                let lift = ((self.platter_rotation_turns * std::f64::consts::TAU).sin()
+                    * 0.5
+                    + 0.5)
+                    .powi(3);
+                1.0 - (self.warp_mm * 0.18).min(0.8) * lift
+            } else {
+                1.0
+            };
+            let gate_target = if self.angle_gate_sectors > 0 {
+                let sector_phase = (self.platter_rotation_turns
+                    * f64::from(self.angle_gate_sectors))
+                .rem_euclid(1.0);
+                if sector_phase < 0.5 {
+                    1.0
+                } else {
+                    1.0 - self.angle_gate_depth
+                }
+            } else {
+                1.0
+            };
+            let gate_alpha =
+                1.0 - (-1.0 / (self.output_sample_rate * 0.0015)).exp();
+            self.angle_gate_gain += (gate_target - self.angle_gate_gain) * gate_alpha;
+            // Wear: the stylus takes a little from wherever it passes, and
+            // reads back what every earlier pass has taken.
+            let worn = if self.groove_wear_rate > 0.0 && !self.groove_wear.is_empty() {
+                let bucket = ((self.position.max(0.0) as usize)
+                    / WEAR_BUCKET_FRAMES)
+                    .min(self.groove_wear.len() - 1);
+                if !self.needle_lifted && abs_rate > DEADZONE_RATE {
+                    let accumulated = f64::from(self.groove_wear[bucket])
+                        + abs_rate * dt * self.groove_wear_rate;
+                    self.groove_wear[bucket] = accumulated.min(1.0) as f32;
+                }
+                f64::from(self.groove_wear[bucket]) * self.groove_wear_rate.min(1.0)
+            } else {
+                0.0
+            };
             self.scratch_gate_trace[frame] =
                 self.scratch_gate
                     .process(dt, self.hand_contact, hand_rate, effective_rate)
@@ -1520,7 +1757,9 @@ impl ScratchAcousticDsp {
                             curvature,
                             abs_rate,
                             self.config.stylus_tracing_limit,
-                        );
+                        )
+                        // A worn groove reads dull before it reads noisy.
+                            * (1.0 - 0.45 * worn);
                         let filtered = drag_state + (sampled - drag_state) * tracing_alpha;
                         self.drag_lowpass_state[channel_index] = filtered;
                         let music = filtered * movement_gain * OUTPUT_GAIN;
@@ -1530,6 +1769,40 @@ impl ScratchAcousticDsp {
                             * source_texture_gain;
                         (music, texture)
                     }
+                };
+                // The second stylus reads the same spiral a fixed angle
+                // behind: delay measured in degrees, so it tightens with
+                // pitch and chases a scratch. A touch duller than the first
+                // stylus, as a trailing needle is.
+                let music = if self.stylus_tap_level > 0.0
+                    && movement_gain > 0.0
+                    && !self.needle_lifted
+                {
+                    let frames_per_turn = self.source_sample_rate * 60.0
+                        / self.native_rpm.max(1.0);
+                    let tap_position = self.position
+                        - self.stylus_tap_degrees / 360.0 * frames_per_turn;
+                    let tap = if tap_position >= 0.0 {
+                        self.sample_channel(
+                            source_index,
+                            tap_position,
+                            effective_rate * rate_scale,
+                        )
+                        .map(|(sample, _, _)| sample)
+                        .unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
+                    let state = self.tap_lowpass_state[channel_index];
+                    let dulled = state + (tap - state) * 0.35;
+                    self.tap_lowpass_state[channel_index] = dulled;
+                    music
+                        + dulled
+                            * self.stylus_tap_level
+                            * movement_gain
+                            * OUTPUT_GAIN
+                } else {
+                    music
                 };
                 programme[channel_index] = music;
                 source_textures[channel_index] = source_texture;
@@ -1547,17 +1820,50 @@ impl ScratchAcousticDsp {
                     self.output[output_index] = 0.0;
                     continue;
                 }
+                // Wear's crackle rides outside the gate — the groove's
+                // damage keeps hissing while the gate chops the music,
+                // which is what a gated worn record does.
+                let wear_crackle = if worn > 0.0 && self.config.surface_enabled {
+                    self.next_noise()
+                        * worn
+                        * 0.012
+                        * (abs_rate / 1.4).clamp(0.1, 1.0)
+                } else {
+                    0.0
+                };
                 self.output[output_index] = ((programme[channel_index]
                     + source_textures[channel_index])
                     * self.window_programme_gain
                     * edge_gain
+                    * warp_gain
+                    * self.angle_gate_gain
                     + contact_texture
                     + dust_fleck
-                    + impulse_noise)
+                    + impulse_noise
+                    + wear_crackle)
                     .clamp(-1.0, 1.0) as f32;
             }
 
+            let position_before_advance = self.position;
             self.position = self.clamp_source_position(self.position + effective_rate * rate_scale);
+            // A locked groove wraps its own revolution. Only a stylus that
+            // was inside the ring wraps — a seek out of it escapes, which
+            // is the nudge.
+            if self.locked_groove_start >= 0.0 {
+                let frames_per_turn =
+                    self.source_sample_rate * 60.0 / self.native_rpm.max(1.0);
+                let start = self.locked_groove_start;
+                let end = start + frames_per_turn;
+                let was_inside = position_before_advance >= start
+                    && position_before_advance < end;
+                if was_inside {
+                    if self.position >= end {
+                        self.position -= frames_per_turn;
+                    } else if self.position < start {
+                        self.position += frames_per_turn;
+                    }
+                }
+            }
             if self.grip < GRIP_OWNERSHIP {
                 self.target_position = self.position;
                 let physical_surface_region_active = self.surface_bed.is_some();
@@ -2464,8 +2770,12 @@ impl ScratchAcousticDsp {
             return 0.0;
         }
         let speed_weight = (abs_rate / 2.4).clamp(0.14, 1.0);
-        let groove_grain = self.position_noise(position, 3.7, 0x0051_f15e);
-        let groove_bed = self.position_noise(position, 37.0, 0x002d_4a11);
+        // The pressing seed folds into every position hash, so each copy
+        // carries its own crackle — always the same crackle for that copy.
+        let groove_grain =
+            self.position_noise(position, 3.7, 0x0051_f15e ^ self.pressing_seed as i32);
+        let groove_bed =
+            self.position_noise(position, 37.0, 0x002d_4a11 ^ self.pressing_seed as i32);
         (groove_grain * 0.72 + groove_bed * 0.22) * speed_weight
     }
 
@@ -2475,11 +2785,15 @@ impl ScratchAcousticDsp {
         }
         let cell_frames = (self.source_sample_rate * 0.12).round().max(1.0);
         let cell = (position.max(0.0) / cell_frames).floor() as i64;
-        let chance = (Self::hash_noise(cell, 0x006d_2b79) + 1.0) * 0.5;
+        let chance =
+            (Self::hash_noise(cell, 0x006d_2b79 ^ self.pressing_seed as i32) + 1.0) * 0.5;
         if chance < 0.996 {
             return 0.0;
         }
-        let center = (cell as f64 + 0.5 + Self::hash_noise(cell, 0x004f_1bbc) * 0.28) * cell_frames;
+        let center = (cell as f64
+            + 0.5
+            + Self::hash_noise(cell, 0x004f_1bbc ^ self.pressing_seed as i32) * 0.28)
+            * cell_frames;
         let width = cell_frames * 0.028;
         let distance = (position - center).abs() / width.max(1.0);
         if distance >= 1.0 {
@@ -2487,7 +2801,10 @@ impl ScratchAcousticDsp {
         }
         let envelope = (1.0 - distance).powi(2);
         let speed_weight = (abs_rate / 1.4).clamp(0.12, 1.0);
-        Self::hash_noise(cell, 0x0073_c4d9) * envelope * speed_weight * DUST_FLECK_GAIN
+        Self::hash_noise(cell, 0x0073_c4d9 ^ self.pressing_seed as i32)
+            * envelope
+            * speed_weight
+            * DUST_FLECK_GAIN
     }
 
     fn sample_channel(
@@ -2748,6 +3065,16 @@ fn finite_or_zero(value: f64) -> f64 {
     }
 }
 
+/// The 7-inch single's groove band, outer to inner, in millimetres. The
+/// off-centre warble is eccentricity over groove radius, so it deepens as
+/// the stylus walks in — the number a mis-punched 45 actually produces.
+const SINGLE_OUTER_GROOVE_MM: f64 = 84.0;
+const SINGLE_INNER_GROOVE_MM: f64 = 54.0;
+
+/// Source frames per wear bucket. At 48k this is about 21 ms of groove —
+/// fine enough that a scratched bar wears where the scratching happened.
+pub const WEAR_BUCKET_FRAMES: usize = 1024;
+
 fn production_deck_config(output_sample_rate: f64, native_rpm: f64) -> PhysicalDeckConfig {
     let mut config = PhysicalDeckConfig::high_torque_dj_seed();
     config.nominal_rpm = native_rpm.clamp(16.0, 90.0);
@@ -2870,6 +3197,196 @@ mod tests {
         dsp.window_end = 4_800_000;
         dsp.total_frames = 4_800_000;
         dsp
+    }
+
+    /// Runs the motor up to speed so the effect tests measure a settled
+    /// platter, not the spin-up.
+    fn settle_motor(dsp: &mut ScratchAcousticDsp) {
+        dsp.start();
+        dsp.set_transport(false, 1.0, 0.0, 0.0);
+        for _ in 0..375 {
+            dsp.render(128, 1); // one second
+        }
+    }
+
+    #[test]
+    fn off_centre_hole_swings_the_rate_once_per_revolution() {
+        let mut dsp = simulation_dsp();
+        dsp.set_native_rpm(90.0).unwrap();
+        dsp.set_press_defects(1.5, 0.0).unwrap();
+        settle_motor(&mut dsp);
+
+        // One revolution at 90 rpm and 48k is 32,000 source frames. Walk it
+        // frame by frame and watch the instantaneous advance breathe.
+        let mut minimum = f64::INFINITY;
+        let mut maximum = f64::NEG_INFINITY;
+        let mut total = 0.0;
+        let frames = 32_000;
+        for _ in 0..frames {
+            let before = dsp.position;
+            dsp.render(1, 1);
+            let advance = dsp.position - before;
+            minimum = minimum.min(advance);
+            maximum = maximum.max(advance);
+            total += advance;
+        }
+        // Eccentricity 1.5 mm over the 84→54 mm groove band is a ±1.8%-ish
+        // warble at the outer edge; the mean over a whole turn cancels.
+        assert!(maximum - minimum > 0.02, "spread {}", maximum - minimum);
+        let mean = total / frames as f64;
+        assert!((mean - 1.0).abs() < 0.01, "mean advance {mean}");
+    }
+
+    #[test]
+    fn angle_gate_cuts_its_sectors_out_of_the_turn() {
+        let mut dsp = simulation_dsp();
+        dsp.set_native_rpm(90.0).unwrap();
+        dsp.set_angle_gate(4, 1.0).unwrap();
+        // A steady tone so the gate has something to chop.
+        let tone: Vec<f32> = (0..4_800_000)
+            .map(|i| ((i as f64 * 0.05).sin() * 0.5) as f32)
+            .collect();
+        dsp.channels = Arc::new(vec![tone]);
+        settle_motor(&mut dsp);
+
+        // Walk to a sector boundary first — the spin-up leaves the platter
+        // at an arbitrary angle — then split one revolution into its eight
+        // half-sectors. The mean level must alternate around the turn.
+        for _ in 0..40_000 {
+            let phase = (dsp.platter_rotation_turns * 4.0).rem_euclid(1.0);
+            if phase < 0.005 {
+                break;
+            }
+            dsp.render(1, 1);
+        }
+        let mut spans = Vec::new();
+        for _ in 0..8 {
+            let mut energy = 0.0_f64;
+            for _ in 0..4_000 {
+                dsp.render(1, 1);
+                energy += f64::from(dsp.rendered_samples()[0]).abs();
+            }
+            spans.push(energy / 4_000.0);
+        }
+        let even: Vec<f64> = spans.iter().copied().step_by(2).collect();
+        let odd: Vec<f64> = spans.iter().copied().skip(1).step_by(2).collect();
+        let floor = |values: &[f64]| values.iter().cloned().fold(f64::INFINITY, f64::min);
+        let ceiling = |values: &[f64]| values.iter().cloned().fold(0.0, f64::max);
+        // One parity is the open sectors, the other the cut — which is
+        // which depends only on where the boundary walk landed.
+        let alternates = floor(&even) > ceiling(&odd) * 3.0
+            || floor(&odd) > ceiling(&even) * 3.0;
+        assert!(alternates, "spans did not alternate: {spans:?}");
+    }
+
+    #[test]
+    fn locked_groove_holds_until_cleared() {
+        let mut dsp = simulation_dsp();
+        dsp.set_native_rpm(90.0).unwrap();
+        settle_motor(&mut dsp);
+        let frames_per_turn = 32_000.0;
+        let start = dsp.position;
+        dsp.set_locked_groove(start).unwrap();
+
+        // Three revolutions of rendering never leave the ring.
+        for _ in 0..750 {
+            dsp.render(128, 1);
+        }
+        assert!(
+            dsp.position >= start && dsp.position < start + frames_per_turn,
+            "escaped to {} from a ring at {start}",
+            dsp.position,
+        );
+
+        // Clearing it is the nudge: the very next revolution walks out.
+        dsp.set_locked_groove(-1.0).unwrap();
+        for _ in 0..300 {
+            dsp.render(128, 1);
+        }
+        assert!(
+            dsp.position >= start + frames_per_turn,
+            "still inside at {}",
+            dsp.position,
+        );
+    }
+
+    #[test]
+    fn second_stylus_echoes_at_its_angle() {
+        let mut dsp = simulation_dsp();
+        dsp.set_native_rpm(90.0).unwrap();
+        // 90 degrees behind is a quarter turn: 8,000 source frames.
+        dsp.set_stylus_tap(90.0, 0.9).unwrap();
+        let mut source = vec![0.0_f32; 4_800_000];
+        for value in source.iter_mut().skip(200_000).take(64) {
+            *value = 0.9;
+        }
+        dsp.channels = Arc::new(vec![source]);
+        settle_motor(&mut dsp);
+        // Drop the needle just short of the impulse so the render reaches
+        // both the strike and its echo a quarter turn later.
+        dsp.set_position(190_000.0, 0.0);
+
+        let start = dsp.position;
+        let mut peaks: Vec<(usize, f64)> = Vec::new();
+        for frame in 0..40_000_usize {
+            dsp.render(1, 1);
+            let level = f64::from(dsp.rendered_samples()[0]).abs();
+            if level > 0.02 {
+                peaks.push((frame, level));
+            }
+        }
+        assert!(!peaks.is_empty(), "the impulse never played");
+        let first = peaks.first().unwrap().0;
+        let expected_gap = 8_000.0;
+        let echo = peaks
+            .iter()
+            .find(|(frame, _)| (*frame as f64 - first as f64) > expected_gap * 0.5)
+            .map(|(frame, _)| *frame as f64 - first as f64);
+        let gap = echo.expect("no echo followed the stylus");
+        assert!(
+            (gap - expected_gap).abs() < 400.0,
+            "echo landed {gap} frames behind, wanted ~{expected_gap} (start {start})",
+        );
+    }
+
+    #[test]
+    fn wear_accrues_where_the_stylus_passes_and_survives_restore() {
+        let mut dsp = simulation_dsp();
+        dsp.set_native_rpm(90.0).unwrap();
+        dsp.set_groove_wear(4.0).unwrap();
+        settle_motor(&mut dsp);
+
+        let bucket = (dsp.position as usize) / WEAR_BUCKET_FRAMES;
+        for _ in 0..75 {
+            dsp.render(128, 1); // a quarter second onward from here
+        }
+        let walked_end = (dsp.position as usize) / WEAR_BUCKET_FRAMES;
+        let worn: f32 = dsp.groove_wear[bucket..=walked_end]
+            .iter()
+            .copied()
+            .fold(0.0, f32::max);
+        assert!(worn > 0.0, "the pass left no wear");
+        let far = dsp.groove_wear[walked_end + 500];
+        assert_eq!(far, 0.0, "unplayed groove wore anyway");
+
+        // The biography survives a save and restore.
+        let map = dsp.groove_wear_map();
+        let mut fresh = simulation_dsp();
+        fresh.set_groove_wear(4.0).unwrap();
+        fresh.restore_groove_wear_map(&map);
+        assert_eq!(fresh.groove_wear[bucket], dsp.groove_wear[bucket]);
+    }
+
+    #[test]
+    fn pressing_seed_gives_each_copy_its_own_crackle() {
+        let mut dsp = simulation_dsp();
+        let a = dsp.compute_position_surface_noise(96_000.0, 1.0);
+        dsp.set_pressing_seed(0x5eed_1234);
+        let b = dsp.compute_position_surface_noise(96_000.0, 1.0);
+        dsp.set_pressing_seed(0x5eed_1234);
+        let c = dsp.compute_position_surface_noise(96_000.0, 1.0);
+        assert_ne!(a, b, "the seed changed nothing");
+        assert_eq!(b, c, "the same copy must always crackle the same");
     }
 
     #[test]
