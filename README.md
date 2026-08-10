@@ -1,91 +1,127 @@
 # record-player
 
-This repository owns the canonical YL.VIN record-player engine.
+`record-player` is the shared Rust engine behind YL.VIN playback, deck motion,
+scratching, timed controls, and record-surface effects.
 
-Do not copy the engine into an application repository. Rust, Swift, and browser clients must use this crate revision.
+Applications should consume a pinned revision of this repository. Do not copy
+its DSP, mechanics, preset behavior, or gesture policy into an application.
 
-## Physical model
+## What ships today
 
-The canonical player uses one coupled signal path:
+The active YL.VIN programme renderer is `ScratchAcousticDsp`. It accepts bounded
+PCM windows and produces host-rate audio while owning:
 
-1. Cut source PCM into a spatial 45/45 groove.
-2. Trace each groove wall with finite stylus geometry.
-3. Solve stylus, suspension, tonearm, and wall contact.
-4. Generate moving-magnet cartridge voltage.
-5. Solve the cartridge coil and electrical load.
-6. Apply playback RIAA equalization and the phono stage.
-7. Convert the 192 kHz physical output to the host rate.
-8. Return groove reaction torque to the record mechanics.
+- platter, record, motor, bearing, slipmat, and hand-contact motion;
+- playback, braking, free spin, pitch, seek, needle lift, and run-out behavior;
+- Baby, Stab, Chirp, Transform, Flare, Crab, Orbit, and Drum scratch presets;
+- click timing, scratch-gate state, crossfader automation, and deterministic replay;
+- locked grooves, groove wear, pressing defects, stylus effects, and surface foley;
+- bounded window requests, output metering, and real-time recovery diagnostics.
 
-A picture record can store encoded programme bytes in its visible spiral.
+`PlayerEngine` separately owns serializable deck state, events, host commands,
+and view state. `ScratchGestureMapper` converts timestamped pointer input into
+sample-timed mechanical controls. Hosts remain responsible for decoding source
+formats, supplying PCM, scheduling audio callbacks, and drawing their UI.
 
-The engine does not treat those pixels as physical wall displacement.
+The current consumers are:
 
-The host must recover the bytes and decode PCM before it creates the virtual 45/45 groove.
+- `vin.yl.native`, which pins this repository and exposes the active engine to
+  the Apple app through its native bridge;
+- `vin.yl.player`, which builds the WASM engine for its browser host and
+  AudioWorklet;
+- `vin.yl.web`, which consumes the shared native/browser runtime for MUSIC.
 
-The deck model contains separate platter and record bodies. It also contains motor, bearing, slipmat, and hand-contact states.
+## Does it still use 45/45 grooves?
 
-Control events use absolute 192 kHz sample times. The bounded control mailbox does not use locks.
+Not for the active programme-audio path.
 
-Render calls use preallocated buffers. A failed render restores all state and does not change caller output.
+The `physical` module still implements a spatial stereo 45/45 groove model. It
+includes streaming groove cutting, paged groove storage, stylus and wall
+contact, tonearm mechanics, moving-magnet cartridge behavior, RIAA playback,
+host-rate conversion, and reaction torque.
 
-## Scratch techniques
+That path remains available through `PhysicalHostRenderer`, the WASM physical
+APIs, and `record-player-capi`. It is useful for reference work, validation, and
+continued integration. The browser prepares its physical groove cache, but its
+programme output still comes from `ScratchAcousticDsp`. The shipping iOS player
+also uses `ScratchAcousticDsp` through `vin.yl.native`.
 
-Rust owns the eight scratch presets, their click settings, motion state, prediction state, and automatic crossfader policy.
+Bitneedle picture-record pixels never represent physical groove walls. A host
+recovers and decodes the embedded programme first. A virtual 45/45 cut is only
+needed when deliberately using the physical renderer.
 
-The presets are Baby, Stab, Chirp, Transform, Flare, Crab, Orbit, and Drum.
+Do not describe 45/45 tracing as the default playback path until a consumer
+selects it for programme output and it passes the real-time and listening gates
+recorded in
+[`RENDERER_ARCHITECTURE_DECISION_LOG.md`](./RENDERER_ARCHITECTURE_DECISION_LOG.md).
 
-The performance helper uses same-sample intent, rendered rate, and exact signed record-angle travel.
+## Public surfaces
 
-It reports prediction confidence because an unseen first-stroke endpoint is not knowable.
+The workspace contains two crates:
 
-Current technique timings are provisional calibration values.
+- `record-player`: the Rust library and optional WASM exports;
+- `record-player-capi`: ABI version 5 for the physical renderer and scratch
+  gesture mapper.
 
-They require measured user motion and crossfader traces before a human-performance accuracy claim.
+Important Rust entry points include:
 
-Consumer integration will start with iOS after the remaining physical-engine blockers close. Browser integration follows iOS verification.
+- `ScratchAcousticDsp` for current programme rendering;
+- `PlayerEngine` for host-facing state and command transitions;
+- `ScratchGestureMapper` for timestamped pointer-to-control mapping;
+- `PhysicalHostRenderer` and `StreamingGrooveCutter` for the 45/45 path.
 
-## Accuracy status
+The C ABI is declared in [`include/record_player.h`](./include/record_player.h).
+The WASM-specific physical API is documented in [`WASM_API.md`](./WASM_API.md).
 
-The built-in SL-1200MK7 and Concorde MKII Scratch profile is a seed profile.
+## Real-time contract
 
-Published values, calculated values, and estimates identify each parameter source. Estimates do not authorize a calibrated accuracy claim.
+The audio path uses bounded, preallocated storage. Timed controls use absolute
+frames and a bounded single-producer, single-consumer mailbox. A failed physical
+render restores engine state and leaves caller output unchanged.
 
-A calibrated profile must register numeric limits for every calibration test. Each measured uncertainty interval must stay inside those limits.
+Hosts must not perform source decoding, whole-record allocation, network work,
+or UI work inside an audio callback. They must provide their own output scale;
+the physical boundary reports unclipped voltage peaks and clipping counts.
 
-Read [PHYSICS_INVESTIGATION_LOG.md](./PHYSICS_INVESTIGATION_LOG.md) for evidence, uncertainty, rejected ideas, and required measurements.
+## Build and test
 
-Read [PHYSICS_VALIDATION_CASES.md](./PHYSICS_VALIDATION_CASES.md) for exact counterexamples, reference methods, artifacts, and reproduction commands.
-
-Read [PERCEPTUAL_ACCURACY_REPORT.md](./PERCEPTUAL_ACCURACY_REPORT.md) for confirmed sound changes, missing evidence, and the focused audible-work plan.
-
-Read [STREAMING_GROOVE_CUTTER.md](./STREAMING_GROOVE_CUTTER.md) for bounded groove cutting and page contracts.
-
-## Crates
-
-- `record-player` contains all physical equations and real-time Rust state.
-- `record-player-capi` provides the native C and Swift boundary.
-
-The C ABI does not define physics constants or gesture policy.
-
-Each host renderer must supply the phono volts that map to digital full scale.
-
-The boundary reports unclipped voltage peaks and clipping counts.
-
-## Test the engine
-
-Run this command:
+Run the complete Rust workspace:
 
 ```sh
 cargo test --workspace
 ```
 
-Run the native ABI check with this command:
+Check the native ABI and header:
 
 ```sh
 scripts/check-record-player-capi.sh
 ```
 
-Unit tests verify deterministic state, contact constraints, snapshots, rapid controls, paging, resampling, and ABI behavior.
+Build the WASM package:
 
-Unit tests do not replace hardware calibration, output-device stress tests, or independent comparative measurements.
+```sh
+wasm-pack build --target web --release --features wasm
+```
+
+The consumer repositories pin exact commits. After changing a public surface,
+update the relevant consumer pin and rebuild its generated native or WASM
+artifact. Do not publish from an uncommitted engine worktree.
+
+## Evidence and design records
+
+- [`RENDERER_ARCHITECTURE_DECISION_LOG.md`](./RENDERER_ARCHITECTURE_DECISION_LOG.md)
+  explains why the active renderer does not currently perform a virtual 45/45
+  cut for transparent playback.
+- [`STREAMING_GROOVE_CUTTER.md`](./STREAMING_GROOVE_CUTTER.md) defines the
+  bounded physical-groove page protocol.
+- [`PHYSICS_VALIDATION_CASES.md`](./PHYSICS_VALIDATION_CASES.md) records physical
+  counterexamples and reproduction methods.
+- [`PHYSICS_INVESTIGATION_LOG.md`](./PHYSICS_INVESTIGATION_LOG.md) tracks model
+  evidence, uncertainty, and rejected assumptions.
+- [`PERCEPTUAL_ACCURACY_REPORT.md`](./PERCEPTUAL_ACCURACY_REPORT.md) separates
+  confirmed audible behavior from work that still needs listening evidence.
+
+The physical SL-1200MK7 and Concorde MKII Scratch profile is a seed profile, not
+a calibrated accuracy claim. Unit tests establish deterministic software
+behavior; they do not replace hardware measurements or independent listening
+tests.

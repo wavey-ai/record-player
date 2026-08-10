@@ -1368,7 +1368,8 @@ impl ScratchAcousticDsp {
 
     /// Drops the needle into a locked groove starting at `start_frame`:
     /// playback wraps every revolution inside that ring until the host
-    /// seeks out or passes a negative frame to clear it.
+    /// passes a negative frame to clear it. Seeks and hand motion are phase
+    /// changes inside the ring; they cannot escape it.
     #[wasm_bindgen(js_name = setLockedGroove)]
     pub fn set_locked_groove(&mut self, start_frame: f64) -> Result<(), JsValue> {
         if start_frame.is_nan() {
@@ -1379,6 +1380,7 @@ impl ScratchAcousticDsp {
         } else {
             start_frame
         };
+        self.enforce_locked_groove();
         Ok(())
     }
 
@@ -1447,7 +1449,9 @@ impl ScratchAcousticDsp {
 
     #[wasm_bindgen(js_name = setMotion)]
     pub fn set_motion(&mut self, position: f64, rate: f64, impulse: f64) {
-        self.target_position = self.clamp_source_position(position);
+        self.target_position = self.normalize_locked_groove_position(
+            self.clamp_source_position(position),
+        );
         self.target_rate = self.map_rate(rate);
         self.frames_since_motion = 0;
         if impulse > 0.0 {
@@ -1470,7 +1474,7 @@ impl ScratchAcousticDsp {
             self.release_grip = self.grip;
         } else if hand_contact {
             self.release_grip = 0.0;
-        self.movement_gain_state = f64::NAN;
+            self.movement_gain_state = f64::NAN;
         }
         let motor_rate =
             finite_or_zero(motor_rate).clamp(-self.config.max_rate, self.config.max_rate);
@@ -1509,7 +1513,9 @@ impl ScratchAcousticDsp {
 
     #[wasm_bindgen(js_name = setPosition)]
     pub fn set_position(&mut self, position: f64, impulse: f64) {
-        self.position = self.clamp_source_position(position);
+        self.position = self.normalize_locked_groove_position(
+            self.clamp_source_position(position),
+        );
         self.target_position = self.position;
         self.last_output_samples.clear();
         self.high_frequency_acceleration_limiter.reset();
@@ -1571,6 +1577,10 @@ impl ScratchAcousticDsp {
         let mut rendered_frames = frame_count;
         let mut ended_this_render = false;
         for frame in 0..frame_count {
+            // Lock ownership is checked before the source is sampled. A seek
+            // or scratch target outside the ring therefore cannot leak even
+            // one sample from another revolution.
+            self.enforce_locked_groove();
             self.frames_since_motion = self.frames_since_motion.saturating_add(1);
             self.grip += (self.grip_target - self.grip) * grip_alpha;
             // A still hand cannot reclaim angle that slipped underneath it.
@@ -1876,26 +1886,12 @@ impl ScratchAcousticDsp {
                     .clamp(-1.0, 1.0) as f32;
             }
 
-            let position_before_advance = self.position;
-            self.position = self.clamp_source_position(self.position + effective_rate * rate_scale);
-            // A locked groove wraps its own revolution. Only a stylus that
-            // was inside the ring wraps — a seek out of it escapes, which
-            // is the nudge.
-            if self.locked_groove_start >= 0.0 {
-                let frames_per_turn =
-                    self.source_sample_rate * 60.0 / self.native_rpm.max(1.0);
-                let start = self.locked_groove_start;
-                let end = start + frames_per_turn;
-                let was_inside = position_before_advance >= start
-                    && position_before_advance < end;
-                if was_inside {
-                    if self.position >= end {
-                        self.position -= frames_per_turn;
-                    } else if self.position < start {
-                        self.position += frames_per_turn;
-                    }
-                }
-            }
+            let advanced = self.position + effective_rate * rate_scale;
+            self.position = if self.locked_groove_start >= 0.0 {
+                self.normalize_locked_groove_position(advanced)
+            } else {
+                self.clamp_source_position(advanced)
+            };
             if self.grip < GRIP_OWNERSHIP {
                 self.target_position = self.position;
                 let physical_surface_region_active = self.surface_bed.is_some();
@@ -2771,6 +2767,25 @@ impl ScratchAcousticDsp {
         position.clamp(0.0, max_position)
     }
 
+    fn normalize_locked_groove_position(&self, position: f64) -> f64 {
+        if self.locked_groove_start < 0.0 {
+            return position;
+        }
+        let frames_per_turn =
+            self.source_sample_rate * 60.0 / self.native_rpm.max(1.0);
+        self.locked_groove_start
+            + (position - self.locked_groove_start).rem_euclid(frames_per_turn)
+    }
+
+    fn enforce_locked_groove(&mut self) {
+        if self.locked_groove_start < 0.0 {
+            return;
+        }
+        self.position = self.normalize_locked_groove_position(self.position);
+        self.target_position =
+            self.normalize_locked_groove_position(self.target_position);
+    }
+
     fn next_noise(&mut self) -> f64 {
         self.noise_seed = self
             .noise_seed
@@ -3330,7 +3345,7 @@ mod tests {
             dsp.position,
         );
 
-        // Clearing it is the nudge: the very next revolution walks out.
+        // Only an explicit clear lets the next revolution walk out.
         dsp.set_locked_groove(-1.0).unwrap();
         for _ in 0..300 {
             dsp.render(128, 1);
@@ -3339,6 +3354,34 @@ mod tests {
             dsp.position >= start + frames_per_turn,
             "still inside at {}",
             dsp.position,
+        );
+    }
+
+    #[test]
+    fn locked_groove_keeps_exact_anchor_and_wraps_every_transport_target() {
+        let mut dsp = simulation_dsp();
+        dsp.set_native_rpm(90.0).unwrap();
+        let frames_per_turn = 32_000.0;
+        dsp.set_position(190_000.375, 0.0);
+        let start = dsp.position;
+        dsp.set_locked_groove(start).unwrap();
+
+        assert_eq!(dsp.position, start, "arming moved the needle");
+
+        dsp.set_position(start + frames_per_turn * 2.25, 0.0);
+        assert!((dsp.position - (start + frames_per_turn * 0.25)).abs() < 1e-9);
+
+        dsp.set_position(start - frames_per_turn * 0.25, 0.0);
+        assert!((dsp.position - (start + frames_per_turn * 0.75)).abs() < 1e-9);
+
+        dsp.set_motion(start + frames_per_turn * 3.5, -1.0, 0.0);
+        assert!((dsp.target_position - (start + frames_per_turn * 0.5)).abs() < 1e-9);
+
+        dsp.render(1, 1);
+        assert!(dsp.position >= start && dsp.position < start + frames_per_turn);
+        assert!(
+            dsp.target_position >= start
+                && dsp.target_position < start + frames_per_turn
         );
     }
 
