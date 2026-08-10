@@ -64,6 +64,9 @@ const WINDOW_MISS_FADE_SECONDS: f64 = 0.006;
 const MOMENTARY_CROSSFADER_TRANSITION_SECONDS: f64 = 0.00045;
 const PROGRAMME_END_POSITION_EPSILON_FRAMES: f64 = 1.0e-7;
 const DEFAULT_REPLAY_NOISE_SEED: u32 = 0x9e37_79b9;
+/// Matches EnCodec's fixed-context seam repair: twelve samples on either
+/// side of a join are replaced by one cubic Hermite bridge.
+const SEAM_REPAIR_SAMPLES: usize = 24;
 const LOOSE_SLIPMAT_COUPLING_SCALE: f64 = 0.65;
 const TIGHT_SLIPMAT_COUPLING_SCALE: f64 = 2.0;
 
@@ -410,6 +413,9 @@ struct AcousticReplaySnapshot {
     noise_seed: u32,
     last_noise: f64,
     last_output_samples: Vec<f64>,
+    last_emitted_samples: Vec<f64>,
+    seam_repair_from: Vec<f64>,
+    seam_repair_remaining: usize,
     window_miss_frames: usize,
     window_programme_gain: f64,
     frames_since_motion: usize,
@@ -501,6 +507,9 @@ pub struct ScratchAcousticDsp {
     noise_seed: u32,
     last_noise: f64,
     last_output_samples: Vec<f64>,
+    last_emitted_samples: Vec<f64>,
+    seam_repair_from: Vec<f64>,
+    seam_repair_remaining: usize,
     window_miss_frames: usize,
     window_programme_gain: f64,
     frames_since_motion: usize,
@@ -612,6 +621,9 @@ impl ScratchAcousticDsp {
             noise_seed: DEFAULT_REPLAY_NOISE_SEED,
             last_noise: 0.0,
             last_output_samples: Vec::new(),
+            last_emitted_samples: Vec::new(),
+            seam_repair_from: Vec::new(),
+            seam_repair_remaining: 0,
             window_miss_frames: 0,
             window_programme_gain: 1.0,
             frames_since_motion: output_sample_rate as usize,
@@ -911,6 +923,13 @@ impl ScratchAcousticDsp {
             snapshot
                 .last_output_samples
                 .clone_from(&self.last_output_samples);
+            snapshot
+                .last_emitted_samples
+                .clone_from(&self.last_emitted_samples);
+            snapshot
+                .seam_repair_from
+                .clone_from(&self.seam_repair_from);
+            snapshot.seam_repair_remaining = self.seam_repair_remaining;
             snapshot.window_miss_frames = self.window_miss_frames;
             snapshot.window_programme_gain = self.window_programme_gain;
             snapshot.frames_since_motion = self.frames_since_motion;
@@ -963,6 +982,9 @@ impl ScratchAcousticDsp {
             noise_seed: self.noise_seed,
             last_noise: self.last_noise,
             last_output_samples: self.last_output_samples.clone(),
+            last_emitted_samples: self.last_emitted_samples.clone(),
+            seam_repair_from: self.seam_repair_from.clone(),
+            seam_repair_remaining: self.seam_repair_remaining,
             window_miss_frames: self.window_miss_frames,
             window_programme_gain: self.window_programme_gain,
             frames_since_motion: self.frames_since_motion,
@@ -1028,6 +1050,9 @@ impl ScratchAcousticDsp {
         swap_replay_field!(noise_seed);
         swap_replay_field!(last_noise);
         swap_replay_field!(last_output_samples);
+        swap_replay_field!(last_emitted_samples);
+        swap_replay_field!(seam_repair_from);
+        swap_replay_field!(seam_repair_remaining);
         swap_replay_field!(window_miss_frames);
         swap_replay_field!(window_programme_gain);
         swap_replay_field!(frames_since_motion);
@@ -1375,12 +1400,16 @@ impl ScratchAcousticDsp {
         if start_frame.is_nan() {
             return Err(JsValue::from_str("locked groove start must be a number"));
         }
+        let previous_position = self.position;
         self.locked_groove_start = if start_frame < 0.0 {
             -1.0
         } else {
             start_frame
         };
         self.enforce_locked_groove();
+        if (self.position - previous_position).abs() > f64::EPSILON {
+            self.begin_output_seam_repair();
+        }
         Ok(())
     }
 
@@ -1513,11 +1542,11 @@ impl ScratchAcousticDsp {
 
     #[wasm_bindgen(js_name = setPosition)]
     pub fn set_position(&mut self, position: f64, impulse: f64) {
+        self.begin_output_seam_repair();
         self.position = self.normalize_locked_groove_position(
             self.clamp_source_position(position),
         );
         self.target_position = self.position;
-        self.last_output_samples.clear();
         self.high_frequency_acceleration_limiter.reset();
         self.window_miss_frames = 0;
         self.window_programme_gain = 1.0;
@@ -1927,6 +1956,7 @@ impl ScratchAcousticDsp {
         self.mix_foley(rendered_frames, output_channel_count);
         self.apply_crossfader_trace(rendered_frames, output_channel_count);
         self.apply_output_gain(rendered_frames, output_channel_count);
+        self.apply_output_seam_repair(rendered_frames, output_channel_count);
         self.maybe_request_window(rendered_frames);
         u32::try_from(rendered_frames).unwrap_or(u32::MAX)
     }
@@ -2867,17 +2897,116 @@ impl ScratchAcousticDsp {
         }
         let index = local.floor() as usize;
         let t = local - index as f64;
-        let p0 = channel[index.saturating_sub(1)] as f64;
-        let p1 = channel[index] as f64;
-        let p2 = channel[(index + 1).min(channel.len() - 1)] as f64;
-        let p3 = channel[(index + 2).min(channel.len() - 1)] as f64;
+        let global_index = self.window_start as f64 + index as f64;
+        let p0 = self.repaired_source_sample(
+            channel_index,
+            global_index - 1.0,
+            source_step,
+        )?;
+        let p1 = self.repaired_source_sample(channel_index, global_index, source_step)?;
+        let p2 = self.repaired_source_sample(
+            channel_index,
+            global_index + 1.0,
+            source_step,
+        )?;
+        let p3 = self.repaired_source_sample(
+            channel_index,
+            global_index + 2.0,
+            source_step,
+        )?;
         let a = p2 - p0;
         let b = 2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3;
         let c = 3.0 * (p1 - p2) + p3 - p0;
         let slope = 0.5 * (a + 2.0 * b * t + 3.0 * c * t * t);
         let curvature = (p0 - 2.0 * p1 + p2) * (1.0 - t) + (p1 - 2.0 * p2 + p3) * t;
-        let sample = adaptive_sample(channel, local, source_step)?;
+        let sample = self.repaired_source_sample(channel_index, position, source_step)?;
         Some((sample, slope, curvature))
+    }
+
+    /// Reads a locked revolution through the same 24-sample cubic Hermite
+    /// bridge as fixed-context EnCodec chunks. Its anchor and duration stay
+    /// exact because only samples around the circular join are replaced.
+    fn repaired_source_sample(
+        &self,
+        channel_index: usize,
+        position: f64,
+        source_step: f64,
+    ) -> Option<f64> {
+        let raw = |source_position: f64| {
+            let channel = self.channels.get(channel_index)?;
+            let local = (source_position - self.window_start as f64)
+                .clamp(0.0, channel.len().saturating_sub(2) as f64);
+            adaptive_sample(channel, local, source_step)
+        };
+        if self.locked_groove_start < 0.0 {
+            return raw(position);
+        }
+
+        let turn = self.source_sample_rate * 60.0 / self.native_rpm.max(1.0);
+        let phase = (position - self.locked_groove_start).rem_euclid(turn);
+        let each_side = SEAM_REPAIR_SAMPLES as f64 / 2.0;
+        let offset = if phase >= turn - each_side {
+            phase - turn
+        } else if phase < each_side {
+            phase
+        } else {
+            return raw(position);
+        };
+
+        let tail = self.locked_groove_start + turn;
+        let y0 = raw(tail - each_side - 1.0)?;
+        let m0 = raw(tail - each_side)? - y0;
+        let y1 = raw(self.locked_groove_start + each_side)?;
+        let m1 = y1 - raw(self.locked_groove_start + each_side - 1.0)?;
+        let span = SEAM_REPAIR_SAMPLES as f64;
+        let t = (offset + each_side + 1.0) / (span + 1.0);
+        let t2 = t * t;
+        let t3 = t2 * t;
+        let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+        let h10 = t3 - 2.0 * t2 + t;
+        let h01 = -2.0 * t3 + 3.0 * t2;
+        let h11 = t3 - t2;
+        Some(h00 * y0 + h10 * span * m0 + h01 * y1 + h11 * span * m1)
+    }
+
+    fn begin_output_seam_repair(&mut self) {
+        if self.last_emitted_samples.is_empty() {
+            return;
+        }
+        self.seam_repair_from
+            .clone_from(&self.last_emitted_samples);
+        self.seam_repair_remaining = SEAM_REPAIR_SAMPLES;
+    }
+
+    /// A nudge is a transport join rather than a source join. Ease from the
+    /// final emitted value into the new stream with a zero-slope cubic, with
+    /// no added frames or callback latency.
+    fn apply_output_seam_repair(&mut self, frames: usize, channels: usize) {
+        if frames == 0 || channels == 0 {
+            return;
+        }
+        let repair_frames = frames.min(self.seam_repair_remaining);
+        for frame in 0..repair_frames {
+            let completed = SEAM_REPAIR_SAMPLES - self.seam_repair_remaining + frame + 1;
+            let t = completed as f64 / SEAM_REPAIR_SAMPLES as f64;
+            let weight = t * t * (3.0 - 2.0 * t);
+            for channel in 0..channels {
+                let index = frame * channels + channel;
+                let from = self
+                    .seam_repair_from
+                    .get(channel)
+                    .copied()
+                    .unwrap_or(0.0);
+                let next = f64::from(self.output[index]);
+                self.output[index] = (from + (next - from) * weight) as f32;
+            }
+        }
+        self.seam_repair_remaining -= repair_frames;
+        self.last_emitted_samples.resize(channels, 0.0);
+        let last = (frames - 1) * channels;
+        for channel in 0..channels {
+            self.last_emitted_samples[channel] = f64::from(self.output[last + channel]);
+        }
     }
 
     fn advance_deck_mechanics(&mut self, hand_rate: f64) -> f64 {
@@ -3383,6 +3512,47 @@ mod tests {
             dsp.target_position >= start
                 && dsp.target_position < start + frames_per_turn
         );
+    }
+
+    #[test]
+    fn locked_groove_uses_codec_hermite_repair_at_its_circular_seam() {
+        let mut dsp = simulation_dsp();
+        dsp.set_native_rpm(90.0).unwrap();
+        let start = 190_000.0;
+        let turn = 32_000.0;
+        let channel = Arc::make_mut(&mut dsp.channels)
+            .first_mut()
+            .unwrap();
+        channel[start as usize..(start + turn / 2.0) as usize].fill(1.0);
+        channel[(start + turn / 2.0) as usize..(start + turn) as usize]
+            .fill(-1.0);
+        dsp.set_position(start, 0.0);
+        dsp.set_locked_groove(start).unwrap();
+
+        let tail = dsp
+            .repaired_source_sample(0, start + turn - 0.001, 1.0)
+            .unwrap();
+        let head = dsp.repaired_source_sample(0, start, 1.0).unwrap();
+
+        assert!((head - tail).abs() < 0.2, "repaired jump was {}", head - tail);
+        assert_eq!(
+            dsp.repaired_source_sample(0, start + 100.0, 1.0),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn transport_jump_eases_over_the_codec_repair_span() {
+        let mut dsp = simulation_dsp();
+        dsp.last_emitted_samples = vec![0.8];
+        dsp.begin_output_seam_repair();
+        dsp.output = vec![-0.8; SEAM_REPAIR_SAMPLES];
+
+        dsp.apply_output_seam_repair(SEAM_REPAIR_SAMPLES, 1);
+
+        assert!(dsp.output[0] > 0.79);
+        assert_eq!(dsp.output[SEAM_REPAIR_SAMPLES - 1], -0.8);
+        assert_eq!(dsp.seam_repair_remaining, 0);
     }
 
     #[test]
