@@ -2807,6 +2807,28 @@ impl ScratchAcousticDsp {
             + (position - self.locked_groove_start).rem_euclid(frames_per_turn)
     }
 
+    /// Signed shortest distance between two positions in the groove domain.
+    ///
+    /// A locked groove is circular. Once playback crosses its seam, a small
+    /// forward hand movement has a numerically low target and a numerically
+    /// high current position. Subtracting those values directly makes the
+    /// hand servo demand almost one full revolution backwards. Pointer
+    /// samples are incremental and stay below half a turn, so the shortest
+    /// circular displacement preserves their physical direction.
+    fn locked_groove_position_delta(&self, target: f64, current: f64) -> f64 {
+        if self.locked_groove_start < 0.0 {
+            return target - current;
+        }
+        let frames_per_turn =
+            self.source_sample_rate * 60.0 / self.native_rpm.max(1.0);
+        let forward = (target - current).rem_euclid(frames_per_turn);
+        if forward > frames_per_turn * 0.5 {
+            forward - frames_per_turn
+        } else {
+            forward
+        }
+    }
+
     fn enforce_locked_groove(&mut self) {
         if self.locked_groove_start < 0.0 {
             return;
@@ -3052,7 +3074,10 @@ impl ScratchAcousticDsp {
                 self.source_sample_rate * 60.0 / self.native_rpm.max(f64::EPSILON);
             Some(
                 before.record_angle_turns
-                    + (self.target_position - self.position) / frames_per_turn,
+                    + self.locked_groove_position_delta(
+                        self.target_position,
+                        self.position,
+                    ) / frames_per_turn,
             )
         } else {
             None
@@ -3512,6 +3537,24 @@ mod tests {
             dsp.target_position >= start
                 && dsp.target_position < start + frames_per_turn
         );
+    }
+
+    #[test]
+    fn locked_groove_scratch_servo_uses_circular_distance_across_the_seam() {
+        let mut dsp = simulation_dsp();
+        dsp.set_native_rpm(90.0).unwrap();
+        let frames_per_turn = 32_000.0;
+        let start = 190_000.375;
+        dsp.set_position(start, 0.0);
+        dsp.set_locked_groove(start).unwrap();
+
+        let tail = start + frames_per_turn - 4.0;
+        let head = start + 6.0;
+        assert_eq!(dsp.locked_groove_position_delta(head, tail), 10.0);
+        assert_eq!(dsp.locked_groove_position_delta(tail, head), -10.0);
+
+        dsp.set_locked_groove(-1.0).unwrap();
+        assert_eq!(dsp.locked_groove_position_delta(head, tail), 10.0 - frames_per_turn);
     }
 
     #[test]
