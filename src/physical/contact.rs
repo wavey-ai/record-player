@@ -1572,6 +1572,7 @@ pub(crate) struct CoupledFixedModeKktLhs {
     pub(crate) equality_basis: [JointDynamicVelocityRow; 5],
 }
 
+#[cfg(test)]
 impl CoupledFixedModeKktLhs {
     pub(crate) const fn dynamic_coefficient(
         self,
