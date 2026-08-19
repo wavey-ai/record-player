@@ -1,6 +1,8 @@
 use js_sys::{Array, Float32Array};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+use crate::vinyl_vfx::{VinylVfxContext, VinylVfxProcessor, VINYL_VFX_MAX_SCENE};
 use wasm_bindgen::prelude::*;
 
 use crate::{
@@ -445,6 +447,9 @@ pub struct ScratchAcousticDsp {
     deck_recovery_count: u64,
     last_deck_recovery: Option<DeckRecoveryDiagnostic>,
     channels: Arc<Vec<Vec<f32>>>,
+    /// The vinyl Vfx scene riding this platter: geometry-driven, phase
+    /// locked to the record's angle like every other press effect.
+    vinyl_vfx: VinylVfxProcessor,
     total_frames: usize,
     window_start: usize,
     window_end: usize,
@@ -615,6 +620,7 @@ impl ScratchAcousticDsp {
             groove_wear_rate: 0.0,
             groove_wear: Vec::new(),
             pressing_seed: 0,
+            vinyl_vfx: VinylVfxProcessor::new(),
             ended: false,
             contact_impulse: 0.0,
             last_effective_rate: 0.0,
@@ -1391,6 +1397,21 @@ impl ScratchAcousticDsp {
         Ok(())
     }
 
+    /// The live vinyl Vfx scene: the shared geometry-driven processor the
+    /// offline REMIX render and the iOS deck already play. Scene zero is
+    /// off; amount rides 0..=1.
+    #[wasm_bindgen(js_name = setVinylVfx)]
+    pub fn set_vinyl_vfx(&mut self, scene: u32, amount: f64) -> Result<(), JsValue> {
+        if scene > VINYL_VFX_MAX_SCENE {
+            return Err(JsValue::from_str("vinyl vfx scene is out of range"));
+        }
+        if !amount.is_finite() || !(0.0..=1.0).contains(&amount) {
+            return Err(JsValue::from_str("vinyl vfx amount must be 0..=1"));
+        }
+        self.vinyl_vfx.set_scene(scene, amount);
+        Ok(())
+    }
+
     /// Drops the needle into a locked groove starting at `start_frame`:
     /// playback wraps every revolution inside that ring until the host
     /// passes a negative frame to clear it. Seeks and hand motion are phase
@@ -1565,6 +1586,8 @@ impl ScratchAcousticDsp {
     pub fn render(&mut self, frame_count: u32, output_channel_count: u32) -> u32 {
         let frame_count = frame_count as usize;
         let output_channel_count = (output_channel_count as usize).clamp(1, 2);
+        let vfx_start_turns = self.platter_rotation_turns;
+        let vfx_start_position = self.position;
         self.output
             .resize(frame_count.saturating_mul(output_channel_count), 0.0);
         self.output.fill(0.0);
@@ -1585,6 +1608,12 @@ impl ScratchAcousticDsp {
             self.mix_foley(frame_count, output_channel_count);
             self.apply_crossfader_trace(frame_count, output_channel_count);
             self.apply_output_gain(frame_count, output_channel_count);
+            self.apply_vinyl_vfx(
+                frame_count,
+                output_channel_count,
+                vfx_start_turns,
+                vfx_start_position,
+            );
             return u32::try_from(frame_count).unwrap_or(u32::MAX);
         }
         self.drag_lowpass_state.resize(output_channel_count, 0.0);
@@ -1958,7 +1987,48 @@ impl ScratchAcousticDsp {
         self.apply_output_gain(rendered_frames, output_channel_count);
         self.apply_output_seam_repair(rendered_frames, output_channel_count);
         self.maybe_request_window(rendered_frames);
+        self.apply_vinyl_vfx(
+            rendered_frames,
+            output_channel_count,
+            vfx_start_turns,
+            vfx_start_position,
+        );
         u32::try_from(rendered_frames).unwrap_or(u32::MAX)
+    }
+
+    /// The scene rides the finished block in record coordinates — the
+    /// same call the shared bridge makes after its own render.
+    fn apply_vinyl_vfx(
+        &mut self,
+        frame_count: usize,
+        channel_count: usize,
+        start_turns: f64,
+        start_position: f64,
+    ) {
+        if frame_count == 0 {
+            return;
+        }
+        let context = VinylVfxContext {
+            sample_rate: self.output_sample_rate,
+            rpm: self.native_rpm,
+            start_turns,
+            end_turns: self.platter_rotation_turns,
+            start_position,
+            end_position: self.position,
+            total_frames: self.total_frames.max(1),
+            pressing_seed: self.pressing_seed,
+        };
+        let sample_count = frame_count
+            .saturating_mul(channel_count)
+            .min(self.output.len());
+        let output = std::mem::take(&mut self.output);
+        let mut output = output;
+        self.vinyl_vfx.process_interleaved(
+            &mut output[..sample_count],
+            channel_count,
+            context,
+        );
+        self.output = output;
     }
 
     #[wasm_bindgen(js_name = renderWindowMissing)]

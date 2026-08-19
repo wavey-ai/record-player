@@ -12,6 +12,7 @@ pub mod gesture;
 pub mod mechanics;
 mod mixer;
 pub mod physical;
+mod vinyl_vfx;
 mod resampler;
 pub mod scratch_gate;
 pub mod spsc;
