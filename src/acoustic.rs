@@ -717,14 +717,25 @@ impl ScratchAcousticDsp {
         }
 
         self.source_sample_rate = source_sample_rate;
-        // A new source is a new record: the ring and the wear stay only if
-        // the host restores them for this pressing.
         self.locked_groove_start = -1.0;
-        self.groove_wear = if self.groove_wear_rate > 0.0 {
-            vec![0.0; (total_frames as usize) / WEAR_BUCKET_FRAMES + 1]
+        // Committing a window is a *page*, not a record: a streamed side
+        // commits one of these every few seconds, and wear that is
+        // reallocated on each of them can never reach the fifty passes it is
+        // scaled for. So the map is only rebuilt when its shape changes,
+        // which is a differently sized source; wear on the record that is
+        // playing survives paging.
+        //
+        // Clearing wear for a *new* record is the host's call —
+        // `resetWear("all")` — because only the host knows that the pressing
+        // changed rather than the window.
+        let wanted_buckets = if self.groove_wear_rate > 0.0 {
+            (total_frames as usize) / WEAR_BUCKET_FRAMES + 1
         } else {
-            Vec::new()
+            0
         };
+        if self.groove_wear.len() != wanted_buckets {
+            self.groove_wear = vec![0.0; wanted_buckets];
+        }
         self.window_start = window_start as usize;
         self.window_end = self.window_start.saturating_add(length);
         self.total_frames = (total_frames as usize).max(self.window_end);
@@ -1471,6 +1482,124 @@ impl ScratchAcousticDsp {
             *slot = value.clamp(0.0, 1.0);
         }
         self.groove_wear = restored;
+    }
+
+    /// Clears accumulated wear, by scope.
+    ///
+    /// Wear is the one thing here meant to outlive a pass, so it only goes
+    /// away when something says so — one of these scopes, or a new record
+    /// on the platter. The scopes are the three things that actually
+    /// accumulate, and nothing else in the engine does:
+    ///
+    /// - `groove` — the WEAR dial's map, one bucket per
+    ///   `WEAR_BUCKET_FRAMES` of source, so it wears where the stylus went.
+    /// - `halo` — WORN HALO's bins, indexed by phase within one revolution,
+    ///   so it wears where on the *turn* the stylus went. A different
+    ///   quantity from `groove`, and cleared separately.
+    /// - `polar` — the revolution memory ADJACENT GHOST, THREE NEEDLES and
+    ///   SPLIT WALLS read back from, and the filters riding on it.
+    /// - `all` — the three above.
+    #[wasm_bindgen(js_name = resetWear)]
+    pub fn reset_wear(&mut self, scope: &str) -> Result<(), JsValue> {
+        let Some(scope) = WearScope::parse(scope) else {
+            return Err(JsValue::from_str(
+                "wear scope must be groove, halo, polar or all",
+            ));
+        };
+        self.reset_wear_scope(scope);
+        Ok(())
+    }
+
+    /// The meters' numbers, one scalar at a time.
+    ///
+    /// `wearSummary` allocates a string, which the render thread must not do
+    /// at telemetry rate, so the worklet reads these instead and the summary
+    /// is kept for one-shot queries. Each walks its buffer and allocates
+    /// nothing.
+    #[wasm_bindgen(getter, js_name = grooveWearLevel)]
+    pub fn groove_wear_level(&self) -> f64 {
+        if self.groove_wear.is_empty() {
+            return 0.0;
+        }
+        self.groove_wear
+            .iter()
+            .map(|value| f64::from(*value))
+            .sum::<f64>()
+            / self.groove_wear.len() as f64
+    }
+
+    #[wasm_bindgen(getter, js_name = grooveWearPeak)]
+    pub fn groove_wear_peak(&self) -> f64 {
+        self.groove_wear
+            .iter()
+            .fold(0.0_f64, |peak, value| peak.max(f64::from(*value)))
+    }
+
+    #[wasm_bindgen(getter, js_name = grooveWearBuckets)]
+    pub fn groove_wear_buckets(&self) -> u32 {
+        self.groove_wear.len() as u32
+    }
+
+    #[wasm_bindgen(getter, js_name = haloWearLevel)]
+    pub fn halo_wear_level(&self) -> f64 {
+        self.vinyl_vfx.wear_level()
+    }
+
+    #[wasm_bindgen(getter, js_name = haloWearPeak)]
+    pub fn halo_wear_peak(&self) -> f64 {
+        self.vinyl_vfx.wear_peak()
+    }
+
+    #[wasm_bindgen(getter, js_name = polarFill)]
+    pub fn polar_fill(&self) -> f64 {
+        self.vinyl_vfx.polar_fill_ratio()
+    }
+
+    /// Every accumulator's real allocation, in bytes.
+    #[wasm_bindgen(getter, js_name = wearBytes)]
+    pub fn wear_bytes(&self) -> u32 {
+        (self.vinyl_vfx.memory_bytes()
+            + self.groove_wear.len() * std::mem::size_of::<f32>()) as u32
+    }
+
+    /// What each accumulator is holding — the numbers behind the meters.
+    ///
+    /// Levels are 0..=1 and bytes are the real allocation, so a deck can
+    /// report what the revolution memory actually costs rather than quoting
+    /// a constant that drifts when the bin counts change.
+    #[wasm_bindgen(js_name = wearSummary)]
+    pub fn wear_summary(&self) -> String {
+        let groove_level = if self.groove_wear.is_empty() {
+            0.0
+        } else {
+            self.groove_wear
+                .iter()
+                .map(|value| f64::from(*value))
+                .sum::<f64>()
+                / self.groove_wear.len() as f64
+        };
+        let groove_peak = self
+            .groove_wear
+            .iter()
+            .fold(0.0_f64, |peak, value| peak.max(f64::from(*value)));
+        serde_json::json!({
+            "grooveRate": self.groove_wear_rate,
+            "grooveLevel": groove_level,
+            "groovePeak": groove_peak,
+            "grooveBuckets": self.groove_wear.len(),
+            "grooveBytes": self.groove_wear.len() * std::mem::size_of::<f32>(),
+            "grooveBucketFrames": WEAR_BUCKET_FRAMES,
+            "haloLevel": self.vinyl_vfx.wear_level(),
+            "haloPeak": self.vinyl_vfx.wear_peak(),
+            "haloBins": VinylVfxProcessor::wear_bin_count(),
+            "polarFill": self.vinyl_vfx.polar_fill_ratio(),
+            "polarBins": VinylVfxProcessor::polar_bin_count(),
+            "vfxBytes": self.vinyl_vfx.memory_bytes(),
+            "scene": self.vinyl_vfx.scene(),
+            "totalBytes": self.vinyl_vfx.memory_bytes()
+                + self.groove_wear.len() * std::mem::size_of::<f32>(),
+        })
+        .to_string()
     }
 
     /// Seeds this pressing's surface character. Two pressings of the same
@@ -3342,6 +3471,68 @@ fn finite_or_zero(value: f64) -> f64 {
 const SINGLE_OUTER_GROOVE_MM: f64 = 84.0;
 const SINGLE_INNER_GROOVE_MM: f64 = 54.0;
 
+/// The three things in the engine that accumulate, and the word each is
+/// asked for by.
+///
+/// Nothing else in the deck holds history: every other effect is a filter
+/// or a gain that starts from wherever the signal leaves it. These are the
+/// exceptions, and they are the reason a take cannot be reproduced from its
+/// gesture stream alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WearScope {
+    /// The WEAR dial's map, one bucket per `WEAR_BUCKET_FRAMES` of source:
+    /// it wears where along the record the stylus went.
+    Groove,
+    /// WORN HALO's bins, indexed by phase within one revolution: it wears
+    /// where around the *turn* the stylus went. A different quantity from
+    /// `Groove`, and cleared separately.
+    Halo,
+    /// The revolution memory ADJACENT GHOST, THREE NEEDLES and SPLIT WALLS
+    /// read back from, and the filters riding on it.
+    Polar,
+    /// The three above.
+    All,
+}
+
+impl WearScope {
+    pub fn parse(scope: &str) -> Option<Self> {
+        match scope {
+            "groove" => Some(Self::Groove),
+            "halo" => Some(Self::Halo),
+            "polar" => Some(Self::Polar),
+            "all" => Some(Self::All),
+            _ => None,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Groove => "groove",
+            Self::Halo => "halo",
+            Self::Polar => "polar",
+            Self::All => "all",
+        }
+    }
+}
+
+impl ScratchAcousticDsp {
+    /// Clears one accumulator, off the wasm binding.
+    ///
+    /// `resetWear` is the browser's door onto this; the C ABI and the tests
+    /// come in here instead, because a `JsValue` cannot be built off wasm32.
+    pub fn reset_wear_scope(&mut self, scope: WearScope) {
+        match scope {
+            WearScope::Groove => self.groove_wear.fill(0.0),
+            WearScope::Halo => self.vinyl_vfx.reset_wear(),
+            WearScope::Polar => self.vinyl_vfx.reset_transient_state(),
+            WearScope::All => {
+                self.groove_wear.fill(0.0);
+                self.vinyl_vfx.reset_all();
+            }
+        }
+    }
+}
+
 /// Source frames per wear bucket. At 48k this is about 21 ms of groove —
 /// fine enough that a scratched bar wears where the scratching happened.
 pub const WEAR_BUCKET_FRAMES: usize = 1024;
@@ -3733,6 +3924,99 @@ mod tests {
         fresh.set_groove_wear(4.0).unwrap();
         fresh.restore_groove_wear_map(&map);
         assert_eq!(fresh.groove_wear[bucket], dsp.groove_wear[bucket]);
+    }
+
+    #[test]
+    fn each_accumulator_clears_on_its_own_scope() {
+        use crate::VINYL_VFX_WORN_HALO;
+        let mut dsp = simulation_dsp();
+        dsp.set_native_rpm(90.0).unwrap();
+        dsp.set_groove_wear(4.0).unwrap();
+        dsp.set_vinyl_vfx(VINYL_VFX_WORN_HALO, 1.0).unwrap();
+        settle_motor(&mut dsp);
+        for _ in 0..75 {
+            dsp.render(128, 1);
+        }
+
+        assert!(dsp.vinyl_vfx.wear_level() > 0.0, "the halo never wore");
+        let groove_before = dsp.groove_wear_map();
+        assert!(
+            groove_before.iter().any(|value| *value > 0.0),
+            "the groove never wore"
+        );
+
+        // A scope clears its own accumulator and leaves the others standing.
+        dsp.reset_wear_scope(WearScope::Halo);
+        assert_eq!(dsp.vinyl_vfx.wear_level(), 0.0, "halo survived its reset");
+        assert_eq!(
+            dsp.groove_wear_map(),
+            groove_before,
+            "the groove map was cleared by the halo's scope"
+        );
+
+        dsp.reset_wear_scope(WearScope::Groove);
+        assert!(
+            dsp.groove_wear_map().iter().all(|value| *value == 0.0),
+            "groove survived its reset"
+        );
+
+        assert_eq!(WearScope::parse("nonsense"), None, "an unknown scope parsed");
+        assert_eq!(WearScope::parse("halo"), Some(WearScope::Halo));
+    }
+
+    #[test]
+    fn paging_a_window_keeps_the_wear_the_record_has_earned() {
+        use crate::VINYL_VFX_ADJACENT_GHOST;
+        const WINDOW_FRAMES: usize = 48_000 * 6;
+        let mut dsp = simulation_dsp();
+        dsp.set_native_rpm(90.0).unwrap();
+        dsp.set_groove_wear(4.0).unwrap();
+        dsp.set_vinyl_vfx(VINYL_VFX_ADJACENT_GHOST, 1.0).unwrap();
+        settle_motor(&mut dsp);
+        for _ in 0..75 {
+            dsp.render(128, 1);
+        }
+        let groove_before = dsp.groove_wear_map();
+        let polar_before = dsp.vinyl_vfx.polar_fill_ratio();
+        assert!(groove_before.iter().any(|value| *value > 0.0));
+        assert!(polar_before > 0.0);
+
+        // A streamed side commits one of these every few seconds. Wear that
+        // reset here could never reach the fifty passes it is scaled for.
+        let total = dsp.total_frames as u32;
+        dsp.prepare_window(1, WINDOW_FRAMES as u32).unwrap();
+        dsp.commit_window(48_000.0, 0, total, None).unwrap();
+
+        assert_eq!(
+            dsp.groove_wear_map(),
+            groove_before,
+            "paging a window wiped the groove's wear"
+        );
+        assert_eq!(
+            dsp.vinyl_vfx.polar_fill_ratio(),
+            polar_before,
+            "paging a window wiped the revolution memory"
+        );
+
+        // A new record is the host's call, and clears all three.
+        dsp.reset_wear_scope(WearScope::All);
+        assert!(dsp.groove_wear_map().iter().all(|value| *value == 0.0));
+        assert_eq!(dsp.vinyl_vfx.polar_fill_ratio(), 0.0);
+        assert_eq!(dsp.vinyl_vfx.wear_level(), 0.0);
+    }
+
+    #[test]
+    fn the_wear_summary_reports_what_the_meters_show() {
+        let mut dsp = simulation_dsp();
+        dsp.set_groove_wear(1.0).unwrap();
+        let summary: serde_json::Value =
+            serde_json::from_str(&dsp.wear_summary()).expect("summary is not JSON");
+        assert_eq!(summary["haloBins"], 2_048);
+        assert_eq!(summary["polarBins"], 131_072);
+        assert_eq!(summary["grooveBucketFrames"], WEAR_BUCKET_FRAMES);
+        // 1 MiB of samples, 1 MiB of write tags, 8 KiB of wear bins.
+        assert_eq!(summary["vfxBytes"], 2 * 1_048_576 + 2_048 * 4);
+        assert_eq!(summary["polarFill"], 0.0);
     }
 
     #[test]
