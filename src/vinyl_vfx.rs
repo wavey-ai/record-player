@@ -110,6 +110,11 @@ impl Default for VinylVfxContext {
 ///
 /// Live players keep one instance beside the acoustic DSP. Offline buses use
 /// the same type, so a scene's block order and state transitions are shared.
+///
+/// `Clone` is for the replay snapshot: a replay is a transaction on the live
+/// deck, and the revolution memory and the halo it leaves behind belong to
+/// the record that was playing, not to the take that was replayed.
+#[derive(Clone)]
 pub struct VinylVfxProcessor {
     scene: u32,
     amount: f64,
@@ -123,6 +128,20 @@ pub struct VinylVfxProcessor {
     wear: Vec<f32>,
     lowpass: [f64; 2],
     gate_gain: f64,
+}
+
+/// Two million bins are not a debug line. The scene, the amount and how
+/// much of each buffer is holding something are.
+impl std::fmt::Debug for VinylVfxProcessor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VinylVfxProcessor")
+            .field("scene", &self.scene)
+            .field("amount", &self.amount)
+            .field("polar_filled", &self.polar_filled)
+            .field("wear_level", &self.wear_level())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for VinylVfxProcessor {
@@ -188,6 +207,21 @@ impl VinylVfxProcessor {
     pub fn reset_all(&mut self) {
         self.reset_transient_state();
         self.reset_wear();
+    }
+
+    /// The halo, for a take's world: WORN HALO's bins, 0..=1 by phase
+    /// within one revolution.
+    pub fn halo_wear_map(&self) -> Vec<f32> {
+        self.wear.clone()
+    }
+
+    /// Restores a halo. Shorter maps leave the rest of the turn mint;
+    /// longer ones are cut to the bins there are.
+    pub fn restore_halo_wear(&mut self, map: &[f32]) {
+        self.wear.fill(0.0);
+        for (slot, value) in self.wear.iter_mut().zip(map.iter()) {
+            *slot = if value.is_finite() { value.clamp(0.0, 1.0) } else { 0.0 };
+        }
     }
 
     /// Mean wear around the revolution, 0..=1 — the number the meter fills to.

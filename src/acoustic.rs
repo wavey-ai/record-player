@@ -435,6 +435,63 @@ struct AcousticReplaySnapshot {
     surface_bed: Option<SurfaceBed>,
     needle_thump: Option<NeedleThump>,
     needle_burst: Option<SurfaceBurst>,
+    // The record's character and its history. A replay is a transaction on
+    // the live deck: it plays a take's world — its press dials, its wear —
+    // and hands the platter back with the record's own. Without these in
+    // the snapshot a replayed take left its dials on the live record, and
+    // its wear on the live maps.
+    eccentricity_mm: f64,
+    warp_mm: f64,
+    stylus_tap_degrees: f64,
+    stylus_tap_level: f64,
+    tap_lowpass_state: [f64; 2],
+    angle_gate_sectors: u32,
+    angle_gate_depth: f64,
+    angle_gate_gain: f64,
+    locked_groove_start: f64,
+    groove_wear_rate: f64,
+    groove_wear: Vec<f32>,
+    pressing_seed: u32,
+    free_spin_drive_per_second: f64,
+    vinyl_vfx: VinylVfxProcessor,
+}
+
+/// One revolution of the record, lifted out of the render by platter angle.
+///
+/// A locked groove is one turn, and a groove cut from it has to be that
+/// turn exactly: from the ring's start, for one revolution of the platter,
+/// at whatever speed and wow the platter has. Cut by time it is wrong by
+/// the pitch, and cut from a tap it is wrong by a buffer. So the render loop
+/// watches the platter's angle frame by frame, begins the capture on the
+/// frame the ring's start comes round, reseeds the take there (a replay of
+/// the log begins from the same seed at the same frame), and ends it on the
+/// frame the angle has advanced by one turn. The block is copied after the
+/// scene and every gain, so what is kept is what was heard.
+struct RevolutionCapture {
+    /// The platter angle the ring starts at, as a fraction of a turn: how a
+    /// free cut (no ring) finds its start and its end.
+    target_phase: f64,
+    /// The ring's first source frame, when there is one. A locked groove's
+    /// seam is where the *position* comes back to its start, and an
+    /// off-centre hole makes the groove lead or lag the platter's angle
+    /// within a turn, so a ring is cut on its own seam rather than on the
+    /// platter's.
+    ring_start: Option<f64>,
+    previous_position: f64,
+    replay_seed: u32,
+    previous_turns: f64,
+    begin_turns: Option<f64>,
+    start_frame: u64,
+    /// The engine's frame the turn closed on (exclusive); zero until then.
+    end_frame: u64,
+    start_position: f64,
+    start_rotation_turns: f64,
+    block_start: Option<usize>,
+    block_end: Option<usize>,
+    channels: usize,
+    samples: Vec<f32>,
+    done: bool,
+    overflow: bool,
 }
 
 #[wasm_bindgen]
@@ -539,6 +596,11 @@ pub struct ScratchAcousticDsp {
     needle_thump: Option<NeedleThump>,
     needle_burst: Option<SurfaceBurst>,
     replay_snapshot: Option<Box<AcousticReplaySnapshot>>,
+    revolution_capture: Option<RevolutionCapture>,
+    /// Output frames this engine has rendered, the clock a capture's start
+    /// is stamped on. The host converts it to its own clock by the frames
+    /// rendered since.
+    rendered_frame_counter: u64,
 }
 
 #[wasm_bindgen]
@@ -654,6 +716,8 @@ impl ScratchAcousticDsp {
             needle_thump: None,
             needle_burst: None,
             replay_snapshot: None,
+            revolution_capture: None,
+            rendered_frame_counter: 0,
         }
     }
 
@@ -964,6 +1028,20 @@ impl ScratchAcousticDsp {
             snapshot.surface_bed.clone_from(&self.surface_bed);
             snapshot.needle_thump = self.needle_thump;
             snapshot.needle_burst.clone_from(&self.needle_burst);
+            snapshot.eccentricity_mm = self.eccentricity_mm;
+            snapshot.warp_mm = self.warp_mm;
+            snapshot.stylus_tap_degrees = self.stylus_tap_degrees;
+            snapshot.stylus_tap_level = self.stylus_tap_level;
+            snapshot.tap_lowpass_state = self.tap_lowpass_state;
+            snapshot.angle_gate_sectors = self.angle_gate_sectors;
+            snapshot.angle_gate_depth = self.angle_gate_depth;
+            snapshot.angle_gate_gain = self.angle_gate_gain;
+            snapshot.locked_groove_start = self.locked_groove_start;
+            snapshot.groove_wear_rate = self.groove_wear_rate;
+            snapshot.groove_wear.clone_from(&self.groove_wear);
+            snapshot.pressing_seed = self.pressing_seed;
+            snapshot.free_spin_drive_per_second = self.free_spin_drive_per_second;
+            snapshot.vinyl_vfx.clone_from(&self.vinyl_vfx);
             snapshot.restore_pending = true;
             return;
         }
@@ -1019,6 +1097,20 @@ impl ScratchAcousticDsp {
             surface_bed: self.surface_bed.clone(),
             needle_thump: self.needle_thump,
             needle_burst: self.needle_burst.clone(),
+            eccentricity_mm: self.eccentricity_mm,
+            warp_mm: self.warp_mm,
+            stylus_tap_degrees: self.stylus_tap_degrees,
+            stylus_tap_level: self.stylus_tap_level,
+            tap_lowpass_state: self.tap_lowpass_state,
+            angle_gate_sectors: self.angle_gate_sectors,
+            angle_gate_depth: self.angle_gate_depth,
+            angle_gate_gain: self.angle_gate_gain,
+            locked_groove_start: self.locked_groove_start,
+            groove_wear_rate: self.groove_wear_rate,
+            groove_wear: self.groove_wear.clone(),
+            pressing_seed: self.pressing_seed,
+            free_spin_drive_per_second: self.free_spin_drive_per_second,
+            vinyl_vfx: self.vinyl_vfx.clone(),
         }));
     }
 
@@ -1087,6 +1179,20 @@ impl ScratchAcousticDsp {
         swap_replay_field!(surface_bed);
         swap_replay_field!(needle_thump);
         swap_replay_field!(needle_burst);
+        swap_replay_field!(eccentricity_mm);
+        swap_replay_field!(warp_mm);
+        swap_replay_field!(stylus_tap_degrees);
+        swap_replay_field!(stylus_tap_level);
+        swap_replay_field!(tap_lowpass_state);
+        swap_replay_field!(angle_gate_sectors);
+        swap_replay_field!(angle_gate_depth);
+        swap_replay_field!(angle_gate_gain);
+        swap_replay_field!(locked_groove_start);
+        swap_replay_field!(groove_wear_rate);
+        swap_replay_field!(groove_wear);
+        swap_replay_field!(pressing_seed);
+        swap_replay_field!(free_spin_drive_per_second);
+        swap_replay_field!(vinyl_vfx);
         snapshot.restore_pending = false;
         true
     }
@@ -1102,19 +1208,226 @@ impl ScratchAcousticDsp {
         rotation_turns: f64,
         replay_seed: u32,
     ) -> Result<(), JsValue> {
+        self.begin_deterministic_replay_from(position, rotation_turns, replay_seed, 0.0)
+    }
+
+    /// `beginDeterministicReplay`, with the platter already turning.
+    ///
+    /// A take punched in on a running record starts at speed. Beginning its
+    /// replay from rest put a spin-up under the first beat that the take
+    /// never had: the motor model ramped from zero toward the transport the
+    /// first events set. `rate` is the platter's rate at punch-in, in units
+    /// of the native speed, and the platter is reset *to* it rather than
+    /// toward it.
+    #[wasm_bindgen(js_name = beginDeterministicReplayFrom)]
+    pub fn begin_deterministic_replay_from(
+        &mut self,
+        position: f64,
+        rotation_turns: f64,
+        replay_seed: u32,
+        rate: f64,
+    ) -> Result<(), JsValue> {
+        self.begin_replay(position, rotation_turns, replay_seed, rate)
+            .map_err(JsValue::from_str)
+    }
+}
+
+impl ScratchAcousticDsp {
+    /// Takes another engine's record as this engine's own, without a copy.
+    ///
+    /// The source PCM sits behind an `Arc`; a headless engine that renders a
+    /// take's log to audio shares the live deck's record for the length of
+    /// the render and lets it go. The record's speed, seed and wear come
+    /// with it, so a log with no world replays on the record as it is.
+    /// Transport starts from rest at the top of the side.
+    pub fn share_source(&mut self, other: &ScratchAcousticDsp) {
+        self.channels = Arc::clone(&other.channels);
+        self.source_sample_rate = other.source_sample_rate;
+        self.window_start = other.window_start;
+        self.window_end = other.window_end;
+        self.total_frames = other.total_frames;
+        self.native_rpm = other.native_rpm;
+        self.pressing_seed = other.pressing_seed;
+        self.groove_wear_rate = other.groove_wear_rate;
+        self.groove_wear = other.groove_wear.clone();
+        self.vinyl_vfx.restore_halo_wear(&other.vinyl_vfx.halo_wear_map());
+        self.locked_groove_start = -1.0;
+        self.reset_position(0.0);
+    }
+
+    /// `armRevolutionCapture`, off the wasm binding.
+    pub fn arm_revolution(
+        &mut self,
+        start_position: f64,
+        max_frames: u32,
+        replay_seed: u32,
+    ) -> Result<(), &'static str> {
+        if !start_position.is_finite() {
+            return Err("revolution start must be finite");
+        }
+        // `max_frames` of zero is a stamp: the capture marks where the ring
+        // came round and when it closed, and keeps no audio — a groove that
+        // is its log wants the punch-in, not the wav.
+        let frames_per_turn = self.source_sample_rate * 60.0 / self.native_rpm.max(f64::EPSILON);
+        if !(frames_per_turn.is_finite() && frames_per_turn > 0.0) {
+            return Err("the record has no revolution");
+        }
+        // The ring's start as a platter angle: where the platter is now,
+        // less how far into the ring the needle has got.
+        let target_phase = if start_position < 0.0 {
+            self.platter_rotation_turns.rem_euclid(1.0)
+        } else {
+            let into_ring = (self.position - start_position).rem_euclid(frames_per_turn);
+            (self.platter_rotation_turns - into_ring / frames_per_turn).rem_euclid(1.0)
+        };
+        self.revolution_capture = Some(RevolutionCapture {
+            target_phase,
+            ring_start: if start_position < 0.0 { None } else { Some(start_position) },
+            previous_position: self.position,
+            replay_seed,
+            previous_turns: self.platter_rotation_turns,
+            begin_turns: None,
+            start_frame: 0,
+            end_frame: 0,
+            start_position: 0.0,
+            start_rotation_turns: 0.0,
+            block_start: None,
+            block_end: None,
+            channels: 0,
+            samples: Vec::with_capacity(max_frames as usize * 2),
+            done: false,
+            overflow: false,
+        });
+        Ok(())
+    }
+
+    /// One render frame, after the platter has stepped: does the ring's
+    /// start come round on this frame, or has a full turn gone by?
+    fn revolution_capture_frame(&mut self, frame: usize) {
+        let turns = self.platter_rotation_turns;
+        let position = self.position;
+        let counter = self.rendered_frame_counter;
+        let mut reseed = None;
+        if let Some(capture) = self.revolution_capture.as_mut() {
+            if capture.done {
+                return;
+            }
+            let previous = capture.previous_turns;
+            capture.previous_turns = turns;
+            let previous_position = capture.previous_position;
+            capture.previous_position = position;
+            // Did the start come round on this frame? On a ring, that is
+            // the position reaching the ring's first frame going forward —
+            // by passing it, or by the ring wrapping back onto it. Free,
+            // it is the platter reaching the angle it was armed at.
+            let crossed = match capture.ring_start {
+                Some(start) => {
+                    let wrapped = position < previous_position
+                        && previous_position - position > 1.0;
+                    let passed = previous_position < start && position >= start;
+                    (wrapped && (position - start).abs() < 1.0) || passed
+                }
+                None => {
+                    if turns <= previous {
+                        false
+                    } else {
+                        let target = capture.target_phase + (previous - capture.target_phase).ceil();
+                        turns >= target
+                    }
+                }
+            };
+            match capture.begin_turns {
+                None => {
+                    if crossed {
+                        capture.begin_turns = Some(turns);
+                        capture.start_frame = counter + frame as u64;
+                        capture.start_position = position;
+                        capture.start_rotation_turns = turns;
+                        capture.block_start = Some(frame);
+                        reseed = Some(capture.replay_seed);
+                    }
+                }
+                Some(begin) => {
+                    // One turn on: the ring's seam again, or a full turn of
+                    // the platter for a free cut.
+                    let closed = match capture.ring_start {
+                        Some(_) => crossed && turns > begin + 0.5,
+                        None => turns >= begin + 1.0,
+                    };
+                    if closed {
+                        capture.block_end = Some(frame);
+                        capture.end_frame = counter + frame as u64;
+                        capture.done = true;
+                    }
+                }
+            }
+        }
+        if let Some(seed) = reseed {
+            self.seed_take_capture(seed);
+        }
+    }
+
+    /// After the block is final: the frames the capture covers, into it.
+    fn revolution_capture_copy(&mut self, frames: usize, channels: usize) {
+        let Some(capture) = self.revolution_capture.as_mut() else {
+            return;
+        };
+        if capture.begin_turns.is_none() || (capture.done && capture.block_end.is_none()) {
+            return;
+        }
+        let from = capture.block_start.take().unwrap_or(0).min(frames);
+        let to = capture.block_end.take().unwrap_or(frames).min(frames);
+        if capture.channels == 0 {
+            capture.channels = channels.max(1);
+        }
+        if capture.channels != channels {
+            capture.overflow = true;
+            capture.done = true;
+            return;
+        }
+        if capture.samples.capacity() == 0 {
+            return;
+        }
+        let wanted = (to.saturating_sub(from)) * channels;
+        let room = capture.samples.capacity() - capture.samples.len();
+        if wanted > room {
+            capture.overflow = true;
+            capture.done = true;
+        }
+        let take = wanted.min(room);
+        let start = (from * channels).min(self.output.len());
+        let end = (start + take).min(self.output.len());
+        capture.samples.extend_from_slice(&self.output[start..end]);
+    }
+
+    /// `beginDeterministicReplayFrom`, off the wasm binding.
+    ///
+    /// The C ABI and the tests come in here: a `JsValue` cannot be built on
+    /// a host target, so an invalid argument on the binding's path is an
+    /// abort on the phone rather than a refused call.
+    pub fn begin_replay(
+        &mut self,
+        position: f64,
+        rotation_turns: f64,
+        replay_seed: u32,
+        rate: f64,
+    ) -> Result<(), &'static str> {
         if !position.is_finite() {
-            return Err(JsValue::from_str("replay position must be finite"));
+            return Err("replay position must be finite");
         }
         if !rotation_turns.is_finite() {
-            return Err(JsValue::from_str("replay rotationTurns must be finite"));
+            return Err("replay rotationTurns must be finite");
+        }
+        if !rate.is_finite() || rate.abs() > self.config.max_rate {
+            return Err("replay rate must be finite and within maxRate");
         }
 
         self.active = true;
         self.position = self.clamp_source_position(position);
         self.target_position = self.position;
-        self.rate = 0.0;
+        self.rate = rate;
         self.rate_velocity = 0.0;
-        self.target_rate = 0.0;
+        self.target_rate = rate;
         self.wow_phase = rotation_turns.rem_euclid(1.0);
         self.flutter_phase = f64::from(replay_seed) / (f64::from(u32::MAX) + 1.0);
         self.platter_rotation_turns = rotation_turns;
@@ -1125,15 +1438,15 @@ impl ScratchAcousticDsp {
         self.release_grip = 0.0;
         self.movement_gain_state = f64::NAN;
         self.grip_target = 0.0;
-        self.motor_rate = 0.0;
-        self.motor_delivered_rate = 0.0;
+        self.motor_rate = rate;
+        self.motor_delivered_rate = rate;
         self.unpowered_throw_rate = 0.0;
         self.ended = false;
         self.contact_impulse = 0.0;
-        self.last_effective_rate = 0.0;
+        self.last_effective_rate = rate;
         self.deck_state
-            .reset(0.0, 0.0, rotation_turns, rotation_turns)
-            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+            .reset(rate, rate, rotation_turns, rotation_turns)
+            .map_err(|_| "replay could not reset the platter")?;
         self.noise_seed = if replay_seed == 0 {
             DEFAULT_REPLAY_NOISE_SEED
         } else {
@@ -1160,6 +1473,115 @@ impl ScratchAcousticDsp {
         self.needle_thump = None;
         self.needle_burst = None;
         Ok(())
+    }
+}
+
+#[wasm_bindgen]
+impl ScratchAcousticDsp {
+    /// Arms a one-revolution capture from the ring starting at
+    /// `start_position` (source frames; negative means from wherever the
+    /// platter is), holding at most `max_frames`, reseeding the take with
+    /// `replay_seed` on the frame it begins. See `RevolutionCapture`.
+    #[wasm_bindgen(js_name = armRevolutionCapture)]
+    pub fn arm_revolution_capture(
+        &mut self,
+        start_position: f64,
+        max_frames: u32,
+        replay_seed: u32,
+    ) -> Result<(), JsValue> {
+        self.arm_revolution(start_position, max_frames, replay_seed)
+            .map_err(JsValue::from_str)
+    }
+
+    #[wasm_bindgen(js_name = cancelRevolutionCapture)]
+    pub fn cancel_revolution_capture(&mut self) {
+        self.revolution_capture = None;
+    }
+
+    #[wasm_bindgen(getter, js_name = revolutionCaptureArmed)]
+    pub fn revolution_capture_armed(&self) -> bool {
+        self.revolution_capture.is_some()
+    }
+
+    #[wasm_bindgen(getter, js_name = revolutionCaptureBegan)]
+    pub fn revolution_capture_began(&self) -> bool {
+        self.revolution_capture
+            .as_ref()
+            .is_some_and(|capture| capture.begin_turns.is_some())
+    }
+
+    #[wasm_bindgen(getter, js_name = revolutionCaptureDone)]
+    pub fn revolution_capture_done(&self) -> bool {
+        self.revolution_capture
+            .as_ref()
+            .is_some_and(|capture| capture.done)
+    }
+
+    #[wasm_bindgen(getter, js_name = revolutionCaptureOverflowed)]
+    pub fn revolution_capture_overflowed(&self) -> bool {
+        self.revolution_capture
+            .as_ref()
+            .is_some_and(|capture| capture.overflow)
+    }
+
+    /// This engine's rendered-frame counter at the frame the capture began.
+    #[wasm_bindgen(getter, js_name = revolutionCaptureStartFrame)]
+    pub fn revolution_capture_start_frame(&self) -> f64 {
+        self.revolution_capture
+            .as_ref()
+            .map_or(0.0, |capture| capture.start_frame as f64)
+    }
+
+    /// This engine's rendered-frame counter at the frame the capture closed
+    /// on (exclusive); zero until it has.
+    #[wasm_bindgen(getter, js_name = revolutionCaptureEndFrame)]
+    pub fn revolution_capture_end_frame(&self) -> f64 {
+        self.revolution_capture
+            .as_ref()
+            .map_or(0.0, |capture| capture.end_frame as f64)
+    }
+
+    #[wasm_bindgen(getter, js_name = revolutionCaptureStartPosition)]
+    pub fn revolution_capture_start_position(&self) -> f64 {
+        self.revolution_capture
+            .as_ref()
+            .map_or(0.0, |capture| capture.start_position)
+    }
+
+    #[wasm_bindgen(getter, js_name = revolutionCaptureStartRotationTurns)]
+    pub fn revolution_capture_start_rotation_turns(&self) -> f64 {
+        self.revolution_capture
+            .as_ref()
+            .map_or(0.0, |capture| capture.start_rotation_turns)
+    }
+
+    #[wasm_bindgen(getter, js_name = revolutionCaptureChannels)]
+    pub fn revolution_capture_channels(&self) -> u32 {
+        self.revolution_capture
+            .as_ref()
+            .map_or(0, |capture| capture.channels as u32)
+    }
+
+    #[wasm_bindgen(getter, js_name = revolutionCaptureFrames)]
+    pub fn revolution_capture_frames(&self) -> u32 {
+        self.revolution_capture
+            .as_ref()
+            .map_or(0, |capture| (capture.samples.len() / capture.channels.max(1)) as u32)
+    }
+
+    /// The captured revolution, interleaved, and the capture is over.
+    #[wasm_bindgen(js_name = takeRevolutionCapture)]
+    pub fn take_revolution_capture(&mut self) -> Vec<f32> {
+        self.revolution_capture
+            .take()
+            .map_or_else(Vec::new, |capture| capture.samples)
+    }
+
+    /// Output frames rendered so far, the clock `revolutionCaptureStartFrame`
+    /// is on.
+    #[wasm_bindgen(getter, js_name = renderedFrames)]
+    pub fn rendered_frames(&self) -> f64 {
+        self.rendered_frame_counter as f64
     }
 
     #[wasm_bindgen(js_name = setHighFrequencyAccelerationLimit)]
@@ -1464,6 +1886,7 @@ impl ScratchAcousticDsp {
     }
 
     /// The wear map, for persistence: a record's biography rides with it.
+    #[wasm_bindgen(js_name = grooveWearMap)]
     pub fn groove_wear_map(&self) -> Vec<f32> {
         self.groove_wear.clone()
     }
@@ -1471,6 +1894,7 @@ impl ScratchAcousticDsp {
     /// Restores a persisted wear map. Length is reconciled to the loaded
     /// source; a map from another pressing simply wears the wrong places,
     /// which is the caller's mistake to avoid via the record hash.
+    #[wasm_bindgen(js_name = restoreGrooveWearMap)]
     pub fn restore_groove_wear_map(&mut self, map: &[f32]) {
         let len = if self.total_frames > 0 {
             self.total_frames / WEAR_BUCKET_FRAMES + 1
@@ -1482,6 +1906,41 @@ impl ScratchAcousticDsp {
             *slot = value.clamp(0.0, 1.0);
         }
         self.groove_wear = restored;
+    }
+
+    /// The halo, for a take's world.
+    #[wasm_bindgen(js_name = haloWearMap)]
+    pub fn halo_wear_map(&self) -> Vec<f32> {
+        self.vinyl_vfx.halo_wear_map()
+    }
+
+    #[wasm_bindgen(js_name = restoreHaloWearMap)]
+    pub fn restore_halo_wear_map(&mut self, map: &[f32]) {
+        self.vinyl_vfx.restore_halo_wear(map);
+    }
+
+    /// The seed a take is cut under.
+    ///
+    /// A replay begins from `replay_seed` — its surface noise and its flutter
+    /// phase are derived from the take's identity — so the recording has to
+    /// have begun from the same place or the two can never agree. Called at
+    /// punch-in with the take's seed: the noise generator and the flutter
+    /// phase are re-seeded, and nothing else moves, because the platter is
+    /// live and a hand may be on it. Noise is noise, so the join is silent.
+    #[wasm_bindgen(js_name = seedTakeCapture)]
+    pub fn seed_take_capture(&mut self, replay_seed: u32) {
+        self.noise_seed = if replay_seed == 0 {
+            DEFAULT_REPLAY_NOISE_SEED
+        } else {
+            replay_seed
+        };
+        self.last_noise = 0.0;
+        self.flutter_phase = f64::from(replay_seed) / (f64::from(u32::MAX) + 1.0);
+        // The wow runs on its own clock, and a replay begins it at the
+        // platter's angle — so the recording begins it there too. A once-
+        // per-revolution phase step, taken while the record is live: a
+        // fraction of a cent for one turn.
+        self.wow_phase = self.platter_rotation_turns.rem_euclid(1.0);
     }
 
     /// Clears accumulated wear, by scope.
@@ -1743,6 +2202,8 @@ impl ScratchAcousticDsp {
                 vfx_start_turns,
                 vfx_start_position,
             );
+            self.revolution_capture_copy(frame_count, output_channel_count);
+            self.rendered_frame_counter += frame_count as u64;
             return u32::try_from(frame_count).unwrap_or(u32::MAX);
         }
         self.drag_lowpass_state.resize(output_channel_count, 0.0);
@@ -1792,6 +2253,7 @@ impl ScratchAcousticDsp {
                 self.unpowered_throw_rate
             };
             let corrected_rate = self.advance_deck_mechanics(hand_rate);
+            self.revolution_capture_frame(frame);
             let abs_rate = corrected_rate.abs();
             let effective_rate = if self.config.acoustic_enabled {
                 corrected_rate
@@ -2122,6 +2584,8 @@ impl ScratchAcousticDsp {
             vfx_start_turns,
             vfx_start_position,
         );
+        self.revolution_capture_copy(rendered_frames, output_channel_count);
+        self.rendered_frame_counter += rendered_frames as u64;
         u32::try_from(rendered_frames).unwrap_or(u32::MAX)
     }
 
@@ -3962,6 +4426,168 @@ mod tests {
 
         assert_eq!(WearScope::parse("nonsense"), None, "an unknown scope parsed");
         assert_eq!(WearScope::parse("halo"), Some(WearScope::Halo));
+    }
+
+    #[test]
+    fn a_replay_hands_back_the_record_it_found() {
+        use crate::{VINYL_VFX_ADJACENT_GHOST, VINYL_VFX_WORN_HALO};
+        let mut dsp = simulation_dsp();
+        dsp.set_native_rpm(90.0).unwrap();
+        dsp.set_groove_wear(4.0).unwrap();
+        dsp.set_press_defects(1.25, 0.5).unwrap();
+        dsp.set_stylus_tap(90.0, 0.4).unwrap();
+        dsp.set_angle_gate(8, 0.6).unwrap();
+        dsp.set_pressing_seed(77);
+        dsp.set_free_spin_drive(0.1).unwrap();
+        dsp.set_vinyl_vfx(VINYL_VFX_WORN_HALO, 1.0).unwrap();
+        settle_motor(&mut dsp);
+        for _ in 0..75 {
+            dsp.render(128, 1);
+        }
+        let groove_before = dsp.groove_wear_map();
+        let halo_before = dsp.halo_wear_map();
+        assert!(groove_before.iter().any(|value| *value > 0.0));
+        assert!(halo_before.iter().any(|value| *value > 0.0));
+
+        // The take's world: a flat record, a different scene, no wear.
+        dsp.capture_replay_state();
+        dsp.begin_deterministic_replay_from(0.0, 0.0, 12_345, 1.0)
+            .unwrap();
+        dsp.set_press_defects(0.0, 0.0).unwrap();
+        dsp.set_stylus_tap(0.0, 0.0).unwrap();
+        dsp.set_angle_gate(0, 0.0).unwrap();
+        dsp.set_pressing_seed(0);
+        dsp.set_free_spin_drive(0.0).unwrap();
+        dsp.set_vinyl_vfx(VINYL_VFX_ADJACENT_GHOST, 0.5).unwrap();
+        dsp.reset_wear_scope(WearScope::All);
+        dsp.set_transport(false, 1.0, 0.0, 0.0);
+        for _ in 0..40 {
+            dsp.render(128, 1);
+        }
+        assert_ne!(dsp.groove_wear_map(), groove_before);
+        assert_eq!(dsp.vinyl_vfx.scene(), VINYL_VFX_ADJACENT_GHOST);
+
+        assert!(dsp.restore_replay_state());
+        assert_eq!(dsp.eccentricity_mm, 1.25, "the replay left its hole on the record");
+        assert_eq!(dsp.warp_mm, 0.5);
+        assert_eq!(dsp.stylus_tap_degrees, 90.0);
+        assert_eq!(dsp.stylus_tap_level, 0.4);
+        assert_eq!(dsp.angle_gate_sectors, 8);
+        assert_eq!(dsp.angle_gate_depth, 0.6);
+        assert_eq!(dsp.pressing_seed, 77);
+        assert_eq!(dsp.free_spin_drive_per_second, 0.1);
+        assert_eq!(dsp.vinyl_vfx.scene(), VINYL_VFX_WORN_HALO);
+        assert_eq!(dsp.groove_wear_map(), groove_before, "the replay wore the live record");
+        assert_eq!(dsp.halo_wear_map(), halo_before, "the replay cleared the live halo");
+    }
+
+    #[test]
+    fn a_replay_from_a_rate_starts_at_speed() {
+        let mut dsp = simulation_dsp();
+        dsp.set_native_rpm(45.0).unwrap();
+        settle_motor(&mut dsp);
+        dsp.capture_replay_state();
+        dsp.begin_deterministic_replay_from(1_000.0, 0.25, 9, 1.0).unwrap();
+        assert_eq!(dsp.rate, 1.0);
+        assert_eq!(dsp.motor_rate, 1.0);
+        assert_eq!(dsp.motor_delivered_rate, 1.0);
+        dsp.set_transport(false, 1.0, 0.0, 0.0);
+        let before = dsp.position;
+        dsp.render(128, 1);
+        // One quantum on, the platter has moved a full quantum's worth at
+        // speed rather than a spin-up's worth.
+        assert!(dsp.position - before > 100.0, "the platter spun up from rest");
+        assert!(dsp.restore_replay_state());
+
+        // From rest is still from rest.
+        dsp.capture_replay_state();
+        dsp.begin_deterministic_replay(1_000.0, 0.25, 9).unwrap();
+        assert_eq!(dsp.rate, 0.0);
+        assert!(dsp.restore_replay_state());
+        assert!(dsp.begin_replay(0.0, 0.0, 1, 99.0).is_err());
+    }
+
+    #[test]
+    fn a_take_is_cut_from_its_own_seed() {
+        let mut dsp = simulation_dsp();
+        dsp.seed_take_capture(0xdead_beef);
+        assert_eq!(dsp.noise_seed, 0xdead_beef);
+        assert_eq!(dsp.flutter_phase, f64::from(0xdead_beef_u32) / (f64::from(u32::MAX) + 1.0));
+        dsp.seed_take_capture(0);
+        assert_eq!(dsp.noise_seed, DEFAULT_REPLAY_NOISE_SEED);
+        dsp.platter_rotation_turns = 3.25;
+        dsp.wow_phase = 0.9;
+        dsp.seed_take_capture(5);
+        assert!((dsp.wow_phase - 0.25).abs() < 1e-12, "the wow was not brought to the platter");
+
+        let mut halo = vec![0.0_f32; 4];
+        halo[2] = 0.5;
+        dsp.restore_halo_wear_map(&halo);
+        let restored = dsp.halo_wear_map();
+        assert_eq!(restored[2], 0.5);
+        assert_eq!(restored.len(), VinylVfxProcessor::wear_bin_count());
+    }
+
+    #[test]
+    fn a_revolution_is_cut_by_angle_from_the_ring_start() {
+        let mut dsp = simulation_dsp();
+        dsp.set_native_rpm(45.0).unwrap();
+        settle_motor(&mut dsp);
+        let frames_per_turn = dsp.source_sample_rate * 60.0 / 45.0;
+        // A ring a little way in, the needle a third of a turn past its
+        // start when CUT lands.
+        let ring = 4_000.0;
+        dsp.set_locked_groove(ring).unwrap();
+        dsp.reset_position(ring + frames_per_turn / 3.0);
+        for _ in 0..20 {
+            dsp.render(128, 2);
+        }
+        let seed = 0x1234_5678;
+        dsp.arm_revolution(ring, 200_000, seed).unwrap();
+        assert!(dsp.revolution_capture_armed());
+
+        // Render on, keeping every block, until the turn is in.
+        let mut rendered = Vec::new();
+        let mut counter_before = dsp.rendered_frame_counter;
+        let mut blocks = 0;
+        let mut begin_seen_at = None;
+        while !dsp.revolution_capture_done() && blocks < 2_000 {
+            dsp.render(128, 2);
+            rendered.extend_from_slice(&dsp.output[..256]);
+            if begin_seen_at.is_none() && dsp.revolution_capture_began() {
+                begin_seen_at = Some((counter_before, dsp.revolution_capture_start_frame() as u64));
+            }
+            counter_before = dsp.rendered_frame_counter;
+            blocks += 1;
+        }
+        assert!(dsp.revolution_capture_done(), "the turn never closed");
+        assert!(!dsp.revolution_capture_overflowed());
+        let start_frame = dsp.revolution_capture_start_frame() as u64;
+        let start_position = dsp.revolution_capture_start_position();
+        // Began on the ring's start, not where CUT landed: within a frame's
+        // travel of the ring.
+        assert!(
+            (start_position - ring).abs() < 1.0,
+            "began at {start_position}, ring at {ring}"
+        );
+        // Not on the first frame: the needle had two thirds of a turn to go.
+        let first_counter = begin_seen_at.expect("began").0;
+        assert!(start_frame > first_counter, "began before the ring came round");
+        // Exactly one turn long at this rate, to the frame.
+        let frames = dsp.revolution_capture_frames() as f64;
+        let expected = frames_per_turn / dsp.rate.max(f64::EPSILON);
+        assert!(
+            (frames - expected).abs() <= 2.0,
+            "captured {frames} frames for a turn of {expected}"
+        );
+        // The seed went on at the crossing.
+        assert_eq!(dsp.noise_seed != seed, true, "noise has advanced past the seed");
+        // And what was kept is what was rendered, frame for frame.
+        let offset = ((start_frame - (dsp.rendered_frame_counter - rendered.len() as u64 / 2)) * 2) as usize;
+        let kept = dsp.take_revolution_capture();
+        assert_eq!(kept.len(), frames as usize * 2);
+        assert_eq!(&kept[..], &rendered[offset..offset + kept.len()]);
+        assert!(!dsp.revolution_capture_armed());
     }
 
     #[test]
