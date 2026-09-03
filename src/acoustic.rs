@@ -18,6 +18,7 @@ use crate::{
 const OUTPUT_GAIN: f64 = 1.0;
 const MAX_FINAL_OUTPUT_GAIN: f64 = 4.0;
 const MAX_FINAL_OUTPUT_GAIN_RAMP_MS: f64 = 60_000.0;
+const POSITION_CATCHUP_SECONDS: f64 = 0.28;
 const MOTION_HOLD_SECONDS: f64 = 0.05;
 const MOTION_HOLD_RELEASE_SECONDS: f64 = 0.06;
 // A landing finger develops its force in single-digit milliseconds; a
@@ -1921,6 +1922,8 @@ impl ScratchAcousticDsp {
         let telemetry = self.deck_state.telemetry();
         let mut deck_config = self.deck_state.config();
         deck_config.nominal_rpm = native_rpm;
+        deck_config.hand_max_position_correction_rad_s =
+            0.12 * deck_config.nominal_angular_velocity_rad_s();
         self.deck_state
             .reconfigure(deck_config)
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
@@ -4294,14 +4297,14 @@ fn production_deck_config(output_sample_rate: f64, native_rpm: f64) -> PhysicalD
     let mut config = PhysicalDeckConfig::high_torque_dj_seed();
     config.nominal_rpm = native_rpm.clamp(16.0, 90.0);
     config.integration_hz = output_sample_rate.clamp(1_000.0, 768_000.0);
-    // The hand servo is the seed's — a finger pressed on a record owns its
-    // position within milliseconds. The loose pair the deck shipped with
-    // (0.28 s, a twelfth of nominal) was chosen by ear
-    // while the target stood still between pointer samples and a tight
-    // servo stopped and lurched at sixty hertz; with the target
-    // dead-reckoned the tight one is steady, and measured on a stroke the
-    // loose one let the record fall seven milliseconds behind the hand. The
-    // loose pair stays reachable through `set_hand_servo`.
+    // The loose hand servo the deck shipped with, restored: the tight
+    // physical seed (4 ms, 25 rad/s) won `hand-spin.mjs` offline and lost
+    // in the hand on the phone. Measured-better, felt-worse — so the pair
+    // chosen by ear stands until something felt beats it, and the seed's
+    // stays reachable through `set_hand_servo`. The dead-reckoned target
+    // that shipped alongside it is kept; only the servo goes back.
+    config.hand_position_stabilization_seconds = POSITION_CATCHUP_SECONDS;
+    config.hand_max_position_correction_rad_s = 0.12 * config.nominal_angular_velocity_rad_s();
     config
 }
 
@@ -5555,13 +5558,23 @@ mod tests {
     /// millisecond at full grip. This is a probe as much as a test: the
     /// message says how far the read fell behind the hand.
     #[test]
-    fn a_stroking_hand_sampled_at_sixty_hertz_is_followed_within_a_millisecond() {
+    fn a_stroking_hand_sampled_at_sixty_hertz_is_followed_without_a_lurch() {
         // A lazy quarter-turn swing at half a hertz, and a tenth-of-a-turn
         // flick at two hertz — a scratch stroke.
-        // The flick's rate turns over faster than sixty samples a second can
-        // say, so the record is allowed a millisecond there and a quarter of
-        // one on the swing.
-        for (turns, hertz, within_frames) in [(0.25, 0.5, 12.0), (0.1, 2.0, 48.0)] {
+        //
+        // These budgets are the loose servo's measured standing, not a
+        // target, and they are wider than the tight physical seed's: the
+        // seed held the swing inside a quarter of a millisecond and the
+        // flick inside one, where the loose pair reads 0.37 ms and 3.1 ms.
+        // The seed was reverted anyway, because it lost in the hand on the
+        // phone — the deck ships the pair chosen by ear, so these are the
+        // numbers that can be regressed against.
+        //
+        // What the test actually pins is the dead-reckoned target. A frozen
+        // one put the record seven milliseconds — 336 frames — behind a
+        // stroking hand and lurched every sixteen, and no amount of servo
+        // stiffness fixes that.
+        for (turns, hertz, within_frames) in [(0.25, 0.5, 24.0), (0.1, 2.0, 168.0)] {
             stroke_is_followed(turns, hertz, within_frames);
         }
     }

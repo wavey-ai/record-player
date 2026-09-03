@@ -791,3 +791,31 @@ worklet's stamp answer carries the position the DSP was actually given and
 the runtime writes it into the event. `dubplate-web/scripts/golden-take.mjs`
 passes at −337 dB again (it read a constant first-sample lateness off until
 the answer carried the *anchored* position rather than the advanced host one).
+
+## The tight servo lost in the hand (2026-09-03, evening)
+
+The entry above argues the loose position-catchup servo is the main cause of the
+scrubber sound, and `7204964` acted on it: the physical seed's pair (0.004 s,
+25 rad/s) in place of the shipped one (0.28 s, 0.12·ω), with catch-up authority
+scaled by the hand's bearing on the record so a fingertip could not yank.
+
+Felt on the phone, it was worse — clearly worse, immediately. The servo half is
+reverted; `production_deck_config` ships the loose pair again and `set_hand_servo`
+still reaches the seed's.
+
+The measurements that chose it were not wrong, and they are worth keeping in view:
+under motion the tight servo tracked a ramp at r 0.87 against the loose pair's
+0.31, a slow reversal 0.78 against 0.19, and it holds a two-hertz flick inside a
+millisecond where the loose pair falls 3.1 ms behind. Every one of those favours
+the seed. The hand disagreed, so the hand wins, and the analysis above should be
+read as an open question rather than a settled cause.
+
+What stays from `7204964` is the dead-reckoned target, which was the real defect
+and is independent of servo stiffness: `set_motion` froze the hand's position
+between sixty-hertz pointer samples, so the servo chased where the hand *was* and
+a steady stroke stopped and lurched every sixteen milliseconds — the record
+sitting seven milliseconds behind the hand. Offline hand-spin went from
+-5 dB / r 0.90 to -76 dB / r 1.000 on that change alone.
+
+So the next thing to try is not the servo pair. It is the double-filtered gesture
+trackers below, which sit upstream of both.

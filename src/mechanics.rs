@@ -26,8 +26,6 @@ const PALM_GRIP_FORCE_N: f64 = 35.0;
 /// Extra normal force from a planted full-grip press, on top of the
 /// square-law fingertip force.
 const STATIONARY_PRESS_FORCE_N: f64 = 15.0;
-/// What a moving hand bears at full grip: the two terms above, summed.
-const FULL_GRIP_FORCE_N: f64 = FINGERTIP_GRIP_FORCE_N + PALM_GRIP_FORCE_N;
 /// Hand speed (in units of nominal rate) at which the planted-press
 /// force boost has fully faded back to the square law.
 const STATIONARY_PRESS_FADE_RATE: f64 = 0.25;
@@ -1106,18 +1104,9 @@ fn effective_hand_velocity(
         // A fast-moving hand can also correct fast: catch-up authority grows
         // with stroke speed so tracking error from a hard stroke does not
         // linger for seconds under the fixed low cap.
-        //
-        // And only a hand that owns the record can put it where the hand
-        // is. The correction closes the gap between the hand's position and
-        // the record's; where a light fingertip is slipping, that gap is
-        // the slip, and driving the hand harder to close it only dragged
-        // the record through the viscous term. Authority follows the
-        // hand's bearing on the record: full at a planted press, a tenth
-        // of it under one fingertip.
-        let bearing = (control.hand_normal_force_n / FULL_GRIP_FORCE_N).clamp(0.0, 1.0);
         let correction_limit = config.hand_max_position_correction_rad_s.max(
             HAND_CATCHUP_RATE_SHARE * control.hand_target_angular_velocity_rad_s.abs(),
-        ) * bearing;
+        );
         ((target - record_angle_rad) / config.hand_position_stabilization_seconds)
             .clamp(-correction_limit, correction_limit)
     });
