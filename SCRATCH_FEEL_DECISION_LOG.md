@@ -734,3 +734,60 @@ dep bump.
 **Outcome.** Both builds out locally — web on :8787, DUBPLATE installed on the
 phone. Jamie's verdict: "its amazing on both". So `cartridge_velocity_gain` and
 `riaa_speed_tilt` stay on by default, and the adaptive rate filter stands.
+
+## The chop was the target standing still between samples (Sep 3 2026, afternoon)
+
+Jamie's test: motor off, needle down, the record turned "by hand" at exactly
+nominal speed must replicate motor playback; at any other path the read must
+be the source along that path, `m(p(t))·p'(t)`. `dubplate-web/scripts/hand-spin.mjs`
+delivers scripted trajectories to the live deck at a pointer rate (60 Hz
+default), keeps each as a take, renders the same log offline on an exact
+schedule, and measures both against the ideal read of the record's PCM.
+
+**Before** (60 Hz, hand at nominal, Candy record from the vocal at 50 s): live
+−4.9 dB / r 0.90, offline −6.7 dB / r 0.92, read position wandering 1–3 ms
+peak to peak; the motor row is −55 dB. Level 0.99, centroid 0.99: not blur,
+position wander. At 30 Hz and 120 Hz it was worse (r 0.43–0.73).
+
+**Cause.** `set_motion` stored the hand's position and held it until the next
+sample; `effective_hand_velocity` then pulled the platter toward that stale
+point through the servo. At 60 Hz a steady stroke became a stop and a lurch
+every 16 ms. The loose production servo (0.28 s, 0.12× nominal) hid the
+stall but could not hold position either: on a 0.5 Hz quarter-turn stroke the
+record fell 6.8 ms behind the hand and stayed there.
+
+**Fix, in three parts.**
+1. The target is dead-reckoned: between samples it advances at the hand's
+   rate, with the rate's slope across the last interval carried through
+   (`previous_target_rate`, `motion_interval_frames`), until the hold says
+   the hand has stopped. A steady hand asks nothing of the servo.
+2. The servo is the physical seed again (4 ms, 25 rad/s); with the target
+   moving it no longer stalls, and measured under motion the A/B is not
+   close (ramp r 0.31 loose vs 0.87 tight; slow reversal 0.19 vs 0.78).
+   Catch-up authority scales with the hand's bearing on the record
+   (`FULL_GRIP_FORCE_N`), so a fingertip cannot yank. The loose pair stays
+   reachable through `setHandServo(seconds, radS)`.
+3. On the web the pointer stamp was jittering ±2.7 ms (`currentTime` paired
+   with `performance.now()` at different instants); it now derives from
+   `getOutputTimestamp()` (steady to under a frame), and the worklet advances
+   each sample by its measured lateness (1.7–7 ms) before applying it.
+
+**After** (same record, 60 Hz): hand at nominal offline **−76.3 dB / r 1.000**
+— indistinguishable from the motor — live −18 dB / r 0.998, wander 0.01 ms.
+At 0.5/1.5/2× the read matches `r·m(rt)` plus the RIAA speed tilt to 1 % in
+level, centroid and >3 kHz share: the "muffling" at speed is the physics as
+designed. The quarter-turn swing tracks within 0.25 ms in the engine and reads
+at r 0.97–0.99 per 100 ms window; the 2 Hz flick tracks within 0.76 ms (the
+carried slope overshoots ~5 % past a rate peak — the 60 Hz sampling limit)
+and still reads poorly per window, which is where a better predictor would
+go if it is wanted. Engine suite 260 passed, 0 failed, with the two new
+tests (`a_steady_hand_sampled_at_sixty_hertz_turns_the_record_steadily`,
+`a_stroking_hand_sampled_at_sixty_hertz_is_followed_within_a_millisecond`).
+
+**Parity.** The take log used to record the raw pointer position; the live
+deck now applies the lateness-advanced one, taken through the gesture's
+anchor (positions are relative to where the deck was at the grab), so the
+worklet's stamp answer carries the position the DSP was actually given and
+the runtime writes it into the event. `dubplate-web/scripts/golden-take.mjs`
+passes at −337 dB again (it read a constant first-sample lateness off until
+the answer carried the *anchored* position rather than the advanced host one).

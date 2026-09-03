@@ -18,7 +18,6 @@ use crate::{
 const OUTPUT_GAIN: f64 = 1.0;
 const MAX_FINAL_OUTPUT_GAIN: f64 = 4.0;
 const MAX_FINAL_OUTPUT_GAIN_RAMP_MS: f64 = 60_000.0;
-const POSITION_CATCHUP_SECONDS: f64 = 0.28;
 const MOTION_HOLD_SECONDS: f64 = 0.05;
 const MOTION_HOLD_RELEASE_SECONDS: f64 = 0.06;
 // A landing finger develops its force in single-digit milliseconds; a
@@ -596,6 +595,13 @@ struct AcousticReplaySnapshot {
     window_miss_frames: usize,
     window_programme_gain: f64,
     frames_since_motion: usize,
+    /// Frames between the last two motion samples: how often the host is
+    /// sampling the hand, so the target is dead-reckoned for about that
+    /// long and no longer.
+    motion_interval_frames: usize,
+    /// The rate the sample before the last one carried, so the rate's
+    /// slope across the last interval can be carried through the next.
+    previous_target_rate: f64,
     frames_since_window_request: usize,
     scratch_gate: ScratchGate,
     manual_fader_gain: f64,
@@ -751,6 +757,13 @@ pub struct ScratchAcousticDsp {
     window_miss_frames: usize,
     window_programme_gain: f64,
     frames_since_motion: usize,
+    /// Frames between the last two motion samples: how often the host is
+    /// sampling the hand, so the target is dead-reckoned for about that
+    /// long and no longer.
+    motion_interval_frames: usize,
+    /// The rate the sample before the last one carried, so the rate's
+    /// slope across the last interval can be carried through the next.
+    previous_target_rate: f64,
     frames_since_window_request: usize,
     output: Vec<f32>,
     scratch_gate: ScratchGate,
@@ -872,6 +885,8 @@ impl ScratchAcousticDsp {
             window_miss_frames: 0,
             window_programme_gain: 1.0,
             frames_since_motion: output_sample_rate as usize,
+            motion_interval_frames: 0,
+            previous_target_rate: 0.0,
             frames_since_window_request: output_sample_rate as usize,
             output: Vec::new(),
             scratch_gate: ScratchGate::default(),
@@ -1194,6 +1209,8 @@ impl ScratchAcousticDsp {
             snapshot.window_miss_frames = self.window_miss_frames;
             snapshot.window_programme_gain = self.window_programme_gain;
             snapshot.frames_since_motion = self.frames_since_motion;
+            snapshot.motion_interval_frames = self.motion_interval_frames;
+            snapshot.previous_target_rate = self.previous_target_rate;
             snapshot.frames_since_window_request = self.frames_since_window_request;
             snapshot.scratch_gate.clone_from(&self.scratch_gate);
             snapshot.manual_fader_gain = self.manual_fader_gain;
@@ -1264,6 +1281,8 @@ impl ScratchAcousticDsp {
             window_miss_frames: self.window_miss_frames,
             window_programme_gain: self.window_programme_gain,
             frames_since_motion: self.frames_since_motion,
+            motion_interval_frames: self.motion_interval_frames,
+            previous_target_rate: self.previous_target_rate,
             frames_since_window_request: self.frames_since_window_request,
             scratch_gate: self.scratch_gate.clone(),
             manual_fader_gain: self.manual_fader_gain,
@@ -1347,6 +1366,8 @@ impl ScratchAcousticDsp {
         swap_replay_field!(window_miss_frames);
         swap_replay_field!(window_programme_gain);
         swap_replay_field!(frames_since_motion);
+        swap_replay_field!(motion_interval_frames);
+        swap_replay_field!(previous_target_rate);
         swap_replay_field!(frames_since_window_request);
         swap_replay_field!(scratch_gate);
         swap_replay_field!(manual_fader_gain);
@@ -1868,6 +1889,29 @@ impl ScratchAcousticDsp {
         self.needle_lifted = lifted;
     }
 
+    /// How firmly the hand owns the record's position: the seconds the
+    /// servo takes to close a position error, and the most it may correct
+    /// by in rad/s. Non-finite or non-positive values leave that half alone.
+    #[wasm_bindgen(js_name = setHandServo)]
+    pub fn set_hand_servo(&mut self, stabilization_seconds: f64, max_correction_rad_s: f64) {
+        let mut deck_config = self.deck_state.config();
+        if stabilization_seconds.is_finite() && stabilization_seconds > 0.0 {
+            deck_config.hand_position_stabilization_seconds = stabilization_seconds.clamp(0.001, 2.0);
+        }
+        if max_correction_rad_s.is_finite() && max_correction_rad_s > 0.0 {
+            deck_config.hand_max_position_correction_rad_s = max_correction_rad_s.clamp(0.01, 200.0);
+        }
+        let telemetry = self.deck_state.telemetry();
+        if let Err(error) = self.deck_state.reconfigure(deck_config) {
+            self.record_deck_recovery(
+                DeckRecoveryOperation::MechanicalAdvance,
+                DeckMechanicalError::InvalidConfig(error),
+                telemetry,
+                self.target_rate,
+            );
+        }
+    }
+
     #[wasm_bindgen(js_name = setNativeRpm)]
     pub fn set_native_rpm(&mut self, native_rpm: f64) -> Result<(), JsValue> {
         if !native_rpm.is_finite() || native_rpm <= 0.0 {
@@ -1877,8 +1921,6 @@ impl ScratchAcousticDsp {
         let telemetry = self.deck_state.telemetry();
         let mut deck_config = self.deck_state.config();
         deck_config.nominal_rpm = native_rpm;
-        deck_config.hand_max_position_correction_rad_s =
-            0.12 * deck_config.nominal_angular_velocity_rad_s();
         self.deck_state
             .reconfigure(deck_config)
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
@@ -2273,7 +2315,9 @@ impl ScratchAcousticDsp {
         self.target_position = self.normalize_locked_groove_position(
             self.clamp_source_position(position),
         );
+        self.previous_target_rate = self.target_rate;
         self.target_rate = self.map_rate(rate);
+        self.motion_interval_frames = self.frames_since_motion;
         self.frames_since_motion = 0;
         if impulse > 0.0 {
             self.contact_impulse = self.contact_impulse.max(impulse).clamp(0.0, 1.0);
@@ -2394,6 +2438,12 @@ impl ScratchAcousticDsp {
         let dt = 1.0 / self.output_sample_rate;
         let hold_frames = (self.output_sample_rate * MOTION_HOLD_SECONDS).max(1.0) as usize;
         let hold_release_frames = (self.output_sample_rate * MOTION_HOLD_RELEASE_SECONDS).max(1.0);
+        // The hand is trusted to keep moving until the hold says it has
+        // stopped — the same span the rate feed-forward was always trusted
+        // for. A shorter reach froze the target while the rate still ran,
+        // and a firm hand's servo then balanced the two and stalled the
+        // record a few frames short of the target.
+        let reach_frames = hold_frames;
         let grip_seconds = if self.grip_target > self.grip {
             GRIP_ATTACK_SECONDS
         } else {
@@ -2413,6 +2463,34 @@ impl ScratchAcousticDsp {
             // one sample from another revolution.
             self.enforce_locked_groove();
             self.frames_since_motion = self.frames_since_motion.saturating_add(1);
+            // The host samples the hand at its pointer rate, and the hand
+            // keeps moving in between. Held still until the next sample
+            // arrived, the target dragged the record back to where the hand
+            // *was*: at sixty hertz a steady stroke became a stop and a
+            // lurch every sixteen milliseconds, which is the chop heard
+            // under every scratch. The target moves at the hand's own rate
+            // until the next sample says otherwise, so a steady hand asks
+            // nothing of the servo and only a change of speed does.
+            // A hand that is speeding up or slowing down carries on doing so
+            // until the next sample: the rate's slope across the last
+            // interval is carried through this one. Held flat, a changing
+            // hand accrued half the acceleration times the interval squared
+            // every sample, which the servo then had to remove as a jerk.
+            let reckoned_rate = if self.hand_contact
+                && self.frames_since_motion <= reach_frames
+                && self.motion_interval_frames > 0
+            {
+                let slope = (self.target_rate - self.previous_target_rate)
+                    / self.motion_interval_frames as f64;
+                self.map_rate(self.target_rate + slope * self.frames_since_motion as f64)
+            } else {
+                self.target_rate
+            };
+            if self.hand_contact && self.frames_since_motion <= reach_frames {
+                self.target_position = self.clamp_source_position(
+                    self.target_position + reckoned_rate * rate_scale,
+                );
+            }
             self.grip += (self.grip_target - self.grip) * grip_alpha;
             // A still hand cannot reclaim angle that slipped underneath it.
             // Once motion input stops, the anchor follows the record instead
@@ -2426,7 +2504,7 @@ impl ScratchAcousticDsp {
                     * (-((self.frames_since_motion - hold_frames) as f64) / hold_release_frames)
                         .exp()
             } else {
-                self.target_rate
+                reckoned_rate
             };
             let held_target_rate = if self.hand_contact {
                 hand_rate
@@ -4216,8 +4294,14 @@ fn production_deck_config(output_sample_rate: f64, native_rpm: f64) -> PhysicalD
     let mut config = PhysicalDeckConfig::high_torque_dj_seed();
     config.nominal_rpm = native_rpm.clamp(16.0, 90.0);
     config.integration_hz = output_sample_rate.clamp(1_000.0, 768_000.0);
-    config.hand_position_stabilization_seconds = POSITION_CATCHUP_SECONDS;
-    config.hand_max_position_correction_rad_s = 0.12 * config.nominal_angular_velocity_rad_s();
+    // The hand servo is the seed's — a finger pressed on a record owns its
+    // position within milliseconds. The loose pair the deck shipped with
+    // (0.28 s, a twelfth of nominal) was chosen by ear
+    // while the target stood still between pointer samples and a tight
+    // servo stopped and lurched at sixty hertz; with the target
+    // dead-reckoned the tight one is steady, and measured on a stroke the
+    // loose one let the record fall seven milliseconds behind the hand. The
+    // loose pair stays reachable through `set_hand_servo`.
     config
 }
 
@@ -5412,6 +5496,126 @@ mod tests {
         assert_eq!(dsp.map_rate(0.70), 0.70);
         assert_eq!(dsp.map_rate(-0.70), -0.70);
         assert_eq!(dsp.map_rate(100.0), dsp.config.max_rate);
+    }
+
+    /// A hand turning the record at exactly nominal speed, sampled at the
+    /// pointer rate, has to turn it steadily: the read advances the same
+    /// amount in every block and never stands still. Before the target was
+    /// dead-reckoned between samples the record stopped and lurched at sixty
+    /// hertz — over a sixteen-millisecond period the smallest block advanced
+    /// under a tenth of the largest.
+    #[test]
+    fn a_steady_hand_sampled_at_sixty_hertz_turns_the_record_steadily() {
+        for updates_per_second in [30.0_f64, 60.0, 120.0] {
+            let mut dsp = simulation_dsp();
+            dsp.set_effects(false, false);
+            dsp.start();
+            let start = 2_400_000.0;
+            dsp.set_position(start, 0.0);
+            dsp.set_transport(true, 0.0, 1.0, 1.0);
+            dsp.set_motion(start, 1.0, 0.22);
+            dsp.grip = 1.0;
+            seed_deck_rates(&mut dsp, 1.0, 1.0, 0.0);
+            let period = (48_000.0 / updates_per_second).round() as usize;
+            let block = 128;
+            let mut elapsed = 0usize;
+            let mut advances = Vec::new();
+            let mut worst_error = 0.0_f64;
+            // Two seconds: the first half settles the grab, the second is
+            // measured.
+            while elapsed < 96_000 {
+                dsp.set_motion(start + elapsed as f64, 1.0, 0.0);
+                let mut within = 0usize;
+                while within < period {
+                    let before = dsp.position;
+                    dsp.render(block as u32, 1);
+                    within += block;
+                    elapsed += block;
+                    if elapsed >= 48_000 {
+                        advances.push(dsp.position - before);
+                        worst_error = worst_error.max((dsp.position - (start + elapsed as f64)).abs());
+                    }
+                }
+            }
+            let smallest = advances.iter().cloned().fold(f64::INFINITY, f64::min);
+            let largest = advances.iter().cloned().fold(0.0, f64::max);
+            assert!(
+                smallest > largest * 0.8,
+                "{updates_per_second} Hz: the record stopped and lurched — blocks advanced between {smallest:.1} and {largest:.1} frames",
+            );
+            assert!(
+                worst_error < 48.0,
+                "{updates_per_second} Hz: the read fell {worst_error:.1} frames from the hand",
+            );
+        }
+    }
+
+    /// A hand that changes speed — a stroke that swings a quarter turn
+    /// either way at half a hertz — is followed by the record within a
+    /// millisecond at full grip. This is a probe as much as a test: the
+    /// message says how far the read fell behind the hand.
+    #[test]
+    fn a_stroking_hand_sampled_at_sixty_hertz_is_followed_within_a_millisecond() {
+        // A lazy quarter-turn swing at half a hertz, and a tenth-of-a-turn
+        // flick at two hertz — a scratch stroke.
+        // The flick's rate turns over faster than sixty samples a second can
+        // say, so the record is allowed a millisecond there and a quarter of
+        // one on the swing.
+        for (turns, hertz, within_frames) in [(0.25, 0.5, 12.0), (0.1, 2.0, 48.0)] {
+            stroke_is_followed(turns, hertz, within_frames);
+        }
+    }
+
+    fn stroke_is_followed(turns: f64, hertz: f64, within_frames: f64) {
+        let mut dsp = simulation_dsp();
+        dsp.set_effects(false, false);
+        dsp.start();
+        let start = 2_400_000.0;
+        let frames_per_turn = 48_000.0 * 60.0 / 45.0;
+        let amplitude = turns * frames_per_turn;
+        let omega = 2.0 * std::f64::consts::PI * hertz;
+        let p = |t: f64| amplitude * (omega * t).sin();
+        let r = |t: f64| amplitude * omega * (omega * t).cos() / 48_000.0;
+        dsp.set_position(start, 0.0);
+        dsp.set_transport(true, 0.0, r(0.0), 1.0);
+        dsp.set_motion(start + p(0.0), r(0.0), 0.22);
+        dsp.grip = 1.0;
+        let period = 800usize;
+        let block = 128usize;
+        let mut elapsed = 0usize;
+        let mut worst = 0.0_f64;
+        let mut worst_at = 0.0;
+        let mut trace = String::new();
+        while elapsed < 4 * 48_000 {
+            let t = elapsed as f64 / 48_000.0;
+            dsp.set_motion(start + p(t), r(t), 0.0);
+            let mut within = 0usize;
+            while within < period {
+                dsp.render(block as u32, 1);
+                within += block;
+                elapsed += block;
+                let now = elapsed as f64 / 48_000.0;
+                if now > 1.0 {
+                    let signed = dsp.position - (start + p(now));
+                    let error = signed.abs();
+                    if error > worst { worst = error; worst_at = now; }
+                    // A row every fifty milliseconds over one stroke: the
+                    // signed error against the hand's rate and acceleration,
+                    // so a lag can be read as viscous, inertial or constant.
+                    if now > 2.30 && now <= 2.80 && elapsed % 480 == 0 {
+                        trace.push_str(&format!(
+                            "\n  t {now:.3}  err {:+7.2} ms  hand {:+.3}  record {:+.3}  platter {:+.3}  target {:+.3}",
+                            signed / 48.0, r(now), dsp.rate, dsp.motor_delivered_rate, dsp.target_rate
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            worst < within_frames,
+            "{turns} turn at {hertz} Hz: the read fell {worst:.1} frames ({:.2} ms) behind the hand at {worst_at:.3} s{trace}",
+            worst / 48.0,
+        );
     }
 
     #[test]
