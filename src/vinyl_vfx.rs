@@ -47,12 +47,52 @@ const THREE_NEEDLE_SPACINGS: [f64; 6] = [
     3.0 / 8.0,
 ];
 
-/// The rung SPREAD is standing on. Zero never arrives: an amount at the
-/// bottom has already turned the whole processor off upstream.
-fn three_needle_spacing(amount: f64) -> f64 {
+/// Where each rung of the ladder stands on the SPREAD's throw: the centre
+/// of its sixth, so the amounts that landed the rungs when the ladder was
+/// stepped land them still.
+fn three_needle_anchor(index: usize) -> f64 {
+    (index as f64 + 0.5) / THREE_NEEDLE_SPACINGS.len() as f64
+}
+
+/// The spacing SPREAD is standing on. The ladder's six rungs are anchors
+/// and the throw between them is continuous: a record's own beat divides a
+/// turn where it divides it — `cut_rpm ÷ (k × BPM₀)`, which is 0.267 on an
+/// 84 BPM pressing and on no rung — and the heads have to be able to stand
+/// there, or they beat against every record that is not cut at a round
+/// number. Below the first anchor is the first rung, above the last the
+/// last; zero never arrives, an amount that low having already turned the
+/// processor off upstream.
+pub(crate) fn three_needle_spacing(amount: f64) -> f64 {
     let count = THREE_NEEDLE_SPACINGS.len();
-    let rung = ((amount * count as f64).ceil() as usize).clamp(1, count) - 1;
-    THREE_NEEDLE_SPACINGS[rung]
+    let amount = if amount.is_finite() { amount.clamp(0.0, 1.0) } else { three_needle_anchor(4) };
+    if amount <= three_needle_anchor(0) {
+        return THREE_NEEDLE_SPACINGS[0];
+    }
+    for index in 1..count {
+        let (low, high) = (three_needle_anchor(index - 1), three_needle_anchor(index));
+        if amount <= high {
+            let along = (amount - low) / (high - low);
+            return THREE_NEEDLE_SPACINGS[index - 1] + (THREE_NEEDLE_SPACINGS[index] - THREE_NEEDLE_SPACINGS[index - 1]) * along;
+        }
+    }
+    THREE_NEEDLE_SPACINGS[count - 1]
+}
+
+/// The inverse: the amount that lands a spacing, on a rung or between two.
+pub(crate) fn three_needle_amount(spacing: f64) -> f64 {
+    let count = THREE_NEEDLE_SPACINGS.len();
+    let spacing = if spacing.is_finite() { spacing } else { THREE_NEEDLE_SPACINGS[4] };
+    if spacing <= THREE_NEEDLE_SPACINGS[0] {
+        return three_needle_anchor(0);
+    }
+    for index in 1..count {
+        let (low, high) = (THREE_NEEDLE_SPACINGS[index - 1], THREE_NEEDLE_SPACINGS[index]);
+        if spacing <= high {
+            let along = (spacing - low) / (high - low);
+            return three_needle_anchor(index - 1) + (three_needle_anchor(index) - three_needle_anchor(index - 1)) * along;
+        }
+    }
+    three_needle_anchor(count - 1)
 }
 
 /// The swing that pinches: only the slow, wide lateral motion carries the
@@ -670,11 +710,23 @@ mod tests {
 
     #[test]
     fn spread_walks_the_three_needle_ladder_and_still_reaches_even_thirds() {
-        // Every rung is reachable, in order, across the throw.
-        let walked = (1..=THREE_NEEDLE_SPACINGS.len())
-            .map(|step| three_needle_spacing(step as f64 / THREE_NEEDLE_SPACINGS.len() as f64))
+        // Every rung is reachable, in order, at its anchor on the throw —
+        // the same amounts that landed it when the ladder was stepped.
+        let walked = (0..THREE_NEEDLE_SPACINGS.len())
+            .map(|index| three_needle_spacing(three_needle_anchor(index)))
             .collect::<Vec<_>>();
         assert_eq!(walked, THREE_NEEDLE_SPACINGS.to_vec());
+        // Between two rungs the throw is continuous and monotonic, and the
+        // inverse lands back where it started: a record's own division of a
+        // turn, 0.267 on an 84 BPM pressing, is a place the heads can stand.
+        let mut last = 0.0;
+        for step in 0..=200 {
+            let spacing = three_needle_spacing(step as f64 / 200.0);
+            assert!(spacing >= last, "the ladder went backwards at {step}");
+            last = spacing;
+            assert!((three_needle_spacing(three_needle_amount(spacing)) - spacing).abs() < 1e-9);
+        }
+        assert!((three_needle_spacing(three_needle_amount(0.267)) - 0.267).abs() < 1e-9);
         // The placement the scene was nailed down at is one of them.
         assert!(THREE_NEEDLE_SPACINGS.contains(&(1.0 / 3.0)));
         // The bottom of the throw is the closest spacing, not silence: an
