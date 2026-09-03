@@ -11,7 +11,6 @@ mod event;
 pub mod gesture;
 pub mod mechanics;
 mod mixer;
-pub mod physical;
 mod vinyl_vfx;
 
 pub use vinyl_vfx::{

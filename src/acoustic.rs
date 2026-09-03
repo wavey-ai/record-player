@@ -39,7 +39,25 @@ const EDGE_FADE_SECONDS: f64 = 0.01;
 const MOVEMENT_GAIN_SECONDS: f64 = 0.003;
 const GRIP_OWNERSHIP: f64 = 0.5;
 const DEADZONE_RATE: f64 = 0.006;
-const STOP_GAIN_FULL_RATE: f64 = 0.10;
+/// Full music gain is reached at 2% of nominal speed, not 10%. A cartridge
+/// outputs full-spectrum signal at slow groove velocity (pitched down into
+/// bass — the dub body), going silent only at true standstill. The old 10%
+/// knee muted exactly the gentle-motion region, chopping every turnaround of
+/// a slow scratch. Velocity-responsive: full body for any real motion, taper
+/// only into the deadzone at rest.
+const STOP_GAIN_FULL_RATE: f64 = 0.02;
+/// RIAA time constants (IEC 60098): 3180 us, 318 us, 75 us.
+const RIAA_T1_SECONDS: f64 = 3180.0e-6;
+const RIAA_T2_SECONDS: f64 = 318.0e-6;
+const RIAA_T3_SECONDS: f64 = 75.0e-6;
+/// The speed tilt's high-frequency asymptote is 1/rate, so the rate that
+/// shapes it is held above a floor. Its partner, the cartridge velocity gain,
+/// is `rate`, so the pair's product stays bounded at unity.
+const RIAA_TILT_MIN_RATE: f64 = 0.1;
+const RIAA_TILT_MAX_RATE: f64 = 4.0;
+/// A cartridge really does put out more voltage the faster the groove passes,
+/// without limit. Bound it so a runaway rate cannot blow up the programme.
+const MAX_CARTRIDGE_VELOCITY_GAIN: f64 = 4.0;
 const DRAG_LOWPASS_MAX_HZ: f64 = 19_000.0;
 const DRAG_LOWPASS_RATE_KNEE: f64 = 0.95;
 const TRACING_LOSS_START_RATE: f64 = 2.5;
@@ -131,6 +149,143 @@ impl BiquadLowpass {
 
 /// Stereo-linked limiter for physically demanding programme upper-band motion.
 ///
+/// The speed-dependent half of a phono chain.
+///
+/// A lacquer is cut with RIAA pre-emphasis `P` and played back through the
+/// preamp's fixed de-emphasis `D = 1/P`. At nominal speed the two cancel
+/// exactly and the master comes back untouched. Off speed they no longer
+/// cancel: the groove's content shifts in frequency by the play rate while
+/// the preamp's curve stays where it is, so what comes out carries a genuine
+/// speed-dependent tilt
+///
+/// ```text
+///     T(f) = D(f) / D(f/r)
+/// ```
+///
+/// where `D(s) = (1 + s*T2) / ((1 + s*T1)(1 + s*T3))`. Expanding the ratio
+/// gives three first-order sections, each a zero over a pole:
+///
+/// ```text
+///     (1 + s*T2)   (1 + s*T1/r)   (1 + s*T3/r)
+///     ---------- * ------------ * ------------
+///     (1 + s*T2/r) (1 + s*T1)     (1 + s*T3)
+/// ```
+///
+/// This is reproduction, not colour. At `r == 1` every section has its zero
+/// on its pole, so the response is exactly unity and a settled filter passes
+/// the programme through bit-exact — the transparent-master rule holds. The
+/// tilt exists only while the record is off speed, which is the whole point:
+/// a scratched record genuinely does not read the same spectrum as a record
+/// running at 33.
+///
+/// Its high-frequency asymptote is `1/r`, which pairs with the cartridge
+/// velocity gain of `r` to leave presence roughly intact while the bass
+/// scales with speed — slow strokes read thin and quiet, fast strokes read
+/// loud and full, as a real deck does.
+#[derive(Clone, Debug, PartialEq)]
+struct RiaaSpeedTilt {
+    /// `(b0, b1, a1)` per section.
+    sections: [(f64, f64, f64); 3],
+    /// `(x[n-1], y[n-1])` per section, per channel.
+    state: [[(f64, f64); 3]; 2],
+    rate: f64,
+    /// The rate the coefficients are actually built from. `T(f)` is derived
+    /// for a record held at a steady speed, so it is applied quasi-statically
+    /// and its control is eased rather than snapped. Without that, a reversal
+    /// restructures a resonant filter sample by sample and the modulation
+    /// itself lands in the programme as a step.
+    control_rate: f64,
+    sample_rate: f64,
+}
+
+impl RiaaSpeedTilt {
+    fn new(sample_rate: f64) -> Self {
+        let mut tilt = Self {
+            sections: [(1.0, 0.0, 0.0); 3],
+            state: [[(0.0, 0.0); 3]; 2],
+            rate: f64::NAN,
+            control_rate: f64::NAN,
+            sample_rate: if sample_rate.is_finite() && sample_rate > 0.0 {
+                sample_rate
+            } else {
+                48_000.0
+            },
+        };
+        tilt.set_rate(1.0);
+        tilt
+    }
+
+    fn reset(&mut self) {
+        self.state = [[(0.0, 0.0); 3]; 2];
+        self.control_rate = f64::NAN;
+    }
+
+    /// Ease the control toward the record's actual rate. A deck seeded at
+    /// speed starts converged, so steady playback is transparent immediately.
+    fn follow_rate(&mut self, abs_rate: f64, alpha: f64) {
+        let target = finite_or_zero(abs_rate).abs();
+        if self.control_rate.is_nan() {
+            self.control_rate = target;
+        } else {
+            self.control_rate += (target - self.control_rate) * alpha;
+            if (self.control_rate - target).abs() < 1.0e-6 {
+                self.control_rate = target;
+            }
+        }
+        self.set_rate(self.control_rate);
+    }
+
+    /// Bilinear transform of `(1 + s*zero) / (1 + s*pole)`.
+    fn first_order(zero_seconds: f64, pole_seconds: f64, k: f64) -> (f64, f64, f64) {
+        let zero = zero_seconds * k;
+        let pole = pole_seconds * k;
+        let denominator = 1.0 + pole;
+        (
+            (1.0 + zero) / denominator,
+            (1.0 - zero) / denominator,
+            (1.0 - pole) / denominator,
+        )
+    }
+
+    fn set_rate(&mut self, rate: f64) {
+        let rate = finite_or_zero(rate)
+            .abs()
+            .clamp(RIAA_TILT_MIN_RATE, RIAA_TILT_MAX_RATE);
+        // Coefficients only move when the rate does. Steady playback recomputes
+        // nothing, and a scratch resolves at whatever resolution it moves with.
+        if (rate - self.rate).abs() < 1.0e-9 {
+            return;
+        }
+        self.rate = rate;
+        let k = 2.0 * self.sample_rate;
+        self.sections = [
+            Self::first_order(RIAA_T2_SECONDS, RIAA_T2_SECONDS / rate, k),
+            Self::first_order(RIAA_T1_SECONDS / rate, RIAA_T1_SECONDS, k),
+            Self::first_order(RIAA_T3_SECONDS / rate, RIAA_T3_SECONDS, k),
+        ];
+    }
+
+    fn process(&mut self, channel: usize, sample: f64) -> f64 {
+        let Some(state) = self.state.get_mut(channel) else {
+            return sample;
+        };
+        let mut value = sample;
+        for (section, memory) in self.sections.iter().zip(state.iter_mut()) {
+            let (b0, b1, a1) = *section;
+            let (previous_input, previous_output) = *memory;
+            // The two state terms are summed with each other before they
+            // reach the input term. At nominal speed a section's zero sits on
+            // its pole, so `b1 == a1` and the pair cancels to exactly zero,
+            // leaving `b0 * value` with `b0 == 1.0` — bit-exact transparency.
+            // Adding the input first would round that cancellation away.
+            let output = b0 * value + (b1 * previous_input - a1 * previous_output);
+            *memory = (value, output);
+            value = output;
+        }
+        finite_or_zero(value)
+    }
+}
+
 /// A one-pole low-pass and its exact residual form a complementary split. The
 /// shared envelope only scales that residual; the base band is never run
 /// through a blanket low-pass or full-band gain stage.
@@ -314,6 +469,23 @@ pub struct AcousticConfig {
     /// it exactly; `1` applies the full soft-knee reduction.
     #[serde(default = "default_high_frequency_acceleration_limit")]
     pub high_frequency_acceleration_limit: f64,
+    /// A magnetic cartridge is a velocity transducer: its output is
+    /// proportional to how fast the groove passes the stylus, so playing at
+    /// rate `r` yields `r * m(r*t)`. The rate factor is the whole law. It is
+    /// exactly 1 at nominal speed, and it reaches silence continuously at
+    /// rest, which is why a stopped record is silent — no stop knee needed.
+    #[serde(default = "default_true")]
+    pub cartridge_velocity_gain: bool,
+    /// The speed-dependent half of the phono chain: a groove cut with RIAA
+    /// pre-emphasis and replayed off speed no longer cancels the preamp's
+    /// fixed de-emphasis. See [`RiaaSpeedTilt`]. Physically the partner of
+    /// `cartridge_velocity_gain`; the two are meant to run together.
+    #[serde(default = "default_true")]
+    pub riaa_speed_tilt: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_max_rate() -> f64 {
@@ -340,6 +512,8 @@ impl Default for AcousticConfig {
             flutter_hz: default_flutter_hz(),
             acoustic_enabled: false,
             surface_enabled: false,
+            cartridge_velocity_gain: default_true(),
+            riaa_speed_tilt: default_true(),
             stylus_tracing_limit: default_stylus_tracing_limit(),
             high_frequency_acceleration_limit: default_high_frequency_acceleration_limit(),
         }
@@ -399,6 +573,7 @@ struct AcousticReplaySnapshot {
     platter_rotation_turns: f64,
     drag_lowpass_state: Vec<f64>,
     high_frequency_acceleration_limiter: HighFrequencyAccelerationLimiter,
+    riaa_tilt: RiaaSpeedTilt,
     active: bool,
     needle_lifted: bool,
     hand_contact: bool,
@@ -520,6 +695,7 @@ pub struct ScratchAcousticDsp {
     platter_rotation_turns: f64,
     drag_lowpass_state: Vec<f64>,
     high_frequency_acceleration_limiter: HighFrequencyAccelerationLimiter,
+    riaa_tilt: RiaaSpeedTilt,
     active: bool,
     needle_lifted: bool,
     hand_contact: bool,
@@ -659,6 +835,7 @@ impl ScratchAcousticDsp {
             platter_rotation_turns: 0.0,
             drag_lowpass_state: Vec::new(),
             high_frequency_acceleration_limiter: HighFrequencyAccelerationLimiter::default(),
+            riaa_tilt: RiaaSpeedTilt::new(output_sample_rate),
             active: false,
             needle_lifted: false,
             hand_contact: false,
@@ -824,6 +1001,7 @@ impl ScratchAcousticDsp {
         self.frames_since_motion = 0;
         self.last_output_samples.clear();
         self.high_frequency_acceleration_limiter.reset();
+        self.riaa_tilt.reset();
         self.window_miss_frames = 0;
         self.window_programme_gain = 1.0;
         self.ended = false;
@@ -855,6 +1033,7 @@ impl ScratchAcousticDsp {
         self.contact_impulse = 0.0;
         self.last_output_samples.clear();
         self.high_frequency_acceleration_limiter.reset();
+        self.riaa_tilt.reset();
         self.window_miss_frames = 0;
         self.window_programme_gain = 1.0;
         self.ended = false;
@@ -988,6 +1167,7 @@ impl ScratchAcousticDsp {
             snapshot
                 .high_frequency_acceleration_limiter
                 .clone_from(&self.high_frequency_acceleration_limiter);
+            snapshot.riaa_tilt.clone_from(&self.riaa_tilt);
             snapshot.active = self.active;
             snapshot.needle_lifted = self.needle_lifted;
             snapshot.hand_contact = self.hand_contact;
@@ -1061,6 +1241,7 @@ impl ScratchAcousticDsp {
             platter_rotation_turns: self.platter_rotation_turns,
             drag_lowpass_state: self.drag_lowpass_state.clone(),
             high_frequency_acceleration_limiter: self.high_frequency_acceleration_limiter.clone(),
+            riaa_tilt: self.riaa_tilt.clone(),
             active: self.active,
             needle_lifted: self.needle_lifted,
             hand_contact: self.hand_contact,
@@ -1143,6 +1324,7 @@ impl ScratchAcousticDsp {
         swap_replay_field!(platter_rotation_turns);
         swap_replay_field!(drag_lowpass_state);
         swap_replay_field!(high_frequency_acceleration_limiter);
+        swap_replay_field!(riaa_tilt);
         swap_replay_field!(active);
         swap_replay_field!(needle_lifted);
         swap_replay_field!(hand_contact);
@@ -1433,6 +1615,7 @@ impl ScratchAcousticDsp {
         self.platter_rotation_turns = rotation_turns;
         self.drag_lowpass_state.clear();
         self.high_frequency_acceleration_limiter.reset();
+        self.riaa_tilt.reset();
         self.hand_contact = false;
         self.grip = 0.0;
         self.release_grip = 0.0;
@@ -2333,7 +2516,11 @@ impl ScratchAcousticDsp {
                     .process(dt, self.hand_contact, hand_rate, effective_rate)
                     as f32;
             let movement_gain_target =
-                compute_movement_gain(abs_rate, self.config.acoustic_enabled);
+                compute_movement_gain(
+                    abs_rate,
+                    self.config.acoustic_enabled,
+                    self.config.cartridge_velocity_gain,
+                );
             if self.movement_gain_state.is_nan() {
                 // First render after a start or reset: the deck is already
                 // wherever it is, so the gain begins there — a deck seeded
@@ -2424,6 +2611,14 @@ impl ScratchAcousticDsp {
             let mut programme = [0.0_f64; 2];
             let mut source_textures = [0.0_f64; 2];
 
+            // The preamp's de-emphasis curve does not move with the record, so
+            // the tilt is shaped by how fast the groove is actually passing.
+            if self.config.riaa_speed_tilt {
+                let alpha =
+                    1.0 - (-1.0 / (self.output_sample_rate * MOVEMENT_GAIN_SECONDS)).exp();
+                self.riaa_tilt.follow_rate(abs_rate, alpha);
+            }
+
             for channel_index in 0..output_channel_count {
                 if self.needle_lifted {
                     continue;
@@ -2495,7 +2690,13 @@ impl ScratchAcousticDsp {
                 } else {
                     music
                 };
-                programme[channel_index] = music;
+                // Both styli feed one phono stage, so the tilt lands on their
+                // sum rather than on each pickup separately.
+                programme[channel_index] = if self.config.riaa_speed_tilt {
+                    self.riaa_tilt.process(channel_index, music)
+                } else {
+                    music
+                };
                 source_textures[channel_index] = source_texture;
             }
 
@@ -2535,7 +2736,17 @@ impl ScratchAcousticDsp {
                     .clamp(-1.0, 1.0) as f32;
             }
 
-            let advanced = self.position + effective_rate * rate_scale;
+            // A lifted stylus is not in the groove, so nothing is reading the
+            // programme. The platter keeps turning underneath — its angle
+            // still advances, and the revolution counters with it — but the
+            // read head holds where it was left. Dropping the needle back at
+            // the same radius lands at the same point in the programme, not
+            // wherever playback would have run on to in the meantime.
+            let advanced = if self.needle_lifted {
+                self.position
+            } else {
+                self.position + effective_rate * rate_scale
+            };
             self.position = if self.locked_groove_start >= 0.0 {
                 self.normalize_locked_groove_position(advanced)
             } else {
@@ -4024,8 +4235,21 @@ fn sign_nonzero(primary: f64, fallback: f64) -> f64 {
     }
 }
 
-fn compute_movement_gain(abs_rate: f64, acoustic_enabled: bool) -> f64 {
-    let stop_gain = smoothstep_unit(abs_rate / STOP_GAIN_FULL_RATE);
+fn compute_movement_gain(
+    abs_rate: f64,
+    acoustic_enabled: bool,
+    cartridge_velocity_gain: bool,
+) -> f64 {
+    // A magnetic cartridge is a velocity transducer, so playing the groove at
+    // rate `r` puts out `r * m(r*t)`: the level rides the rate. That is one
+    // law for the whole range, exactly 1.0 at nominal speed and continuously
+    // silent at rest, so it needs no stop knee — a stationary record is quiet
+    // because nothing is moving past the coils, not because a gate closed.
+    let stop_gain = if cartridge_velocity_gain {
+        abs_rate.min(MAX_CARTRIDGE_VELOCITY_GAIN)
+    } else {
+        smoothstep_unit(abs_rate / STOP_GAIN_FULL_RATE)
+    };
     if !acoustic_enabled {
         return stop_gain;
     }
@@ -4037,7 +4261,12 @@ fn compute_movement_gain(abs_rate: f64, acoustic_enabled: bool) -> f64 {
     } else {
         overspeed
     };
-    (acoustic * stop_gain).clamp(0.0, 1.08)
+    let ceiling = if cartridge_velocity_gain {
+        MAX_CARTRIDGE_VELOCITY_GAIN * 1.08
+    } else {
+        1.08
+    };
+    (acoustic * stop_gain).clamp(0.0, ceiling)
 }
 
 /// Approximate the finite acceleration a cartridge can trace. Curvature is the
@@ -5316,28 +5545,222 @@ mod tests {
 
     #[test]
     fn movement_gain_reaches_silence_continuously_at_rest() {
-        assert_eq!(compute_movement_gain(0.0, false), 0.0);
-        assert!(compute_movement_gain(DEADZONE_RATE * 0.5, false) > 0.0);
+        assert_eq!(compute_movement_gain(0.0, false, false), 0.0);
+        assert!(compute_movement_gain(DEADZONE_RATE * 0.5, false, false) > 0.0);
         assert!(
-            compute_movement_gain(DEADZONE_RATE, false)
-                > compute_movement_gain(DEADZONE_RATE * 0.5, false)
+            compute_movement_gain(DEADZONE_RATE, false, false)
+                > compute_movement_gain(DEADZONE_RATE * 0.5, false, false)
         );
-        assert_eq!(compute_movement_gain(STOP_GAIN_FULL_RATE, false), 1.0);
+        assert_eq!(compute_movement_gain(STOP_GAIN_FULL_RATE, false, false), 1.0);
+    }
+
+    /// Steady-state gain of the tilt at DC and at Nyquist, by driving it.
+    fn tilt_gain(rate: f64, alternating: bool) -> f64 {
+        let mut tilt = RiaaSpeedTilt::new(48_000.0);
+        tilt.set_rate(rate);
+        let mut last = 0.0;
+        for n in 0..400_000 {
+            let input = if alternating && n % 2 == 1 { -1.0 } else { 1.0 };
+            last = tilt.process(0, input) * input;
+        }
+        last
+    }
+
+    /// A lifted stylus reads nothing, so the programme position holds while
+    /// the platter keeps turning underneath it.
+    #[test]
+    fn lifted_needle_holds_the_programme_position() {
+        let mut dsp = scratch_signal_dsp(ScratchPreset::Baby, 0.0);
+        dsp.set_transport(false, 1.0, 0.0, 0.0);
+        seed_deck_rates(&mut dsp, 1.0, 1.0, 0.0);
+        dsp.render(480, 1);
+        let playing_from = dsp.position;
+        dsp.render(4_800, 1);
+        assert!(
+            dsp.position > playing_from,
+            "a tracking stylus must advance the programme"
+        );
+
+        dsp.set_needle_lifted(true);
+        let lifted_at = dsp.position;
+        let turns_at = dsp.platter_rotation_turns();
+        dsp.render(48_000, 1);
+        assert_eq!(
+            dsp.position, lifted_at,
+            "a lifted stylus advanced the programme it is not touching"
+        );
+        assert!(
+            dsp.platter_rotation_turns() > turns_at + 0.5,
+            "the platter should keep turning under a lifted stylus"
+        );
+
+        // Dropped back down, it reads on from where it was left.
+        dsp.set_needle_lifted(false);
+        dsp.render(4_800, 1);
+        assert!(dsp.position > lifted_at, "the stylus did not resume reading");
+    }
+
+    /// Magnitude of the analog RIAA playback curve `D` at an angular
+    /// frequency: `(1 + s*T2) / ((1 + s*T1)(1 + s*T3))`.
+    fn riaa_playback_magnitude(angular_frequency: f64) -> f64 {
+        let term = |time_constant: f64| {
+            (1.0 + (angular_frequency * time_constant).powi(2)).sqrt()
+        };
+        term(RIAA_T2_SECONDS) / (term(RIAA_T1_SECONDS) * term(RIAA_T3_SECONDS))
+    }
+
+    /// Magnitude of the built filter at a digital frequency, straight from the
+    /// coefficients: `|b0 + b1 e^-jw| / |1 + a1 e^-jw|` per section.
+    fn tilt_magnitude(tilt: &RiaaSpeedTilt, frequency_hz: f64) -> f64 {
+        let omega = std::f64::consts::TAU * frequency_hz / 48_000.0;
+        let cos_omega = omega.cos();
+        tilt.sections.iter().fold(1.0, |gain, (b0, b1, a1)| {
+            let numerator = (b0 * b0 + b1 * b1 + 2.0 * b0 * b1 * cos_omega).sqrt();
+            let denominator = (1.0 + a1 * a1 + 2.0 * a1 * cos_omega).sqrt();
+            gain * numerator / denominator
+        })
+    }
+
+    /// The coefficients are checked against the analog prototype they claim to
+    /// be, not merely against themselves. A bilinear transform maps the
+    /// digital frequency `f` to the analog frequency `2*fs*tan(pi*f/fs)`, so
+    /// the built filter must match `|D(w)/D(w/r)|` evaluated there exactly.
+    ///
+    /// Harvested from `physical/riaa.rs` before that module was removed: it
+    /// used the same unprewarped bilinear form (`scale = 2*sample_rate`, and
+    /// `b0/b1/a1` in this same layout), so this pins the house convention
+    /// rather than leaving the tilt to vouch for itself.
+    #[test]
+    fn riaa_speed_tilt_matches_the_analog_curve_it_claims_to_be() {
+        for rate in [0.25, 0.5, 2.0, 4.0] {
+            let mut tilt = RiaaSpeedTilt::new(48_000.0);
+            tilt.set_rate(rate);
+            for frequency in [20.0, 50.0, 100.0, 200.0, 500.0, 1_000.0, 2_000.0, 5_000.0] {
+                // The bilinear frequency mapping, applied honestly rather than
+                // assuming the analog and digital axes coincide.
+                let analog = 2.0
+                    * 48_000.0
+                    * (std::f64::consts::PI * frequency / 48_000.0).tan();
+                let expected = riaa_playback_magnitude(analog)
+                    / riaa_playback_magnitude(analog / rate);
+                let measured = tilt_magnitude(&tilt, frequency);
+                assert!(
+                    (measured - expected).abs() < 1.0e-9,
+                    "rate {rate} at {frequency} Hz: built {measured}, analog curve {expected}"
+                );
+            }
+        }
+    }
+
+    /// The whole justification for the tilt: at nominal speed the cut
+    /// pre-emphasis and the preamp de-emphasis cancel exactly, so a settled
+    /// filter is bit-exact and the transparent-master rule holds.
+    #[test]
+    fn riaa_speed_tilt_is_exactly_unity_at_nominal_speed() {
+        let mut tilt = RiaaSpeedTilt::new(48_000.0);
+        tilt.set_rate(1.0);
+        let mut phase = 0.0_f64;
+        for _ in 0..10_000 {
+            phase += 0.1;
+            let input = phase.sin() * 0.7;
+            assert_eq!(
+                tilt.process(0, input),
+                input,
+                "nominal speed must pass the programme through untouched"
+            );
+        }
+    }
+
+    /// Off speed the two curves no longer cancel. DC is untouched (both
+    /// curves are flat there), while the top end scales as 1/rate — which is
+    /// what pairs with the cartridge's own rate gain.
+    #[test]
+    fn riaa_speed_tilt_shapes_only_off_speed_content() {
+        assert!((tilt_gain(1.0, false) - 1.0).abs() < 1.0e-9);
+        assert!((tilt_gain(1.0, true) - 1.0).abs() < 1.0e-9);
+        for rate in [0.25, 0.5, 2.0, 4.0] {
+            assert!(
+                (tilt_gain(rate, false) - 1.0).abs() < 1.0e-6,
+                "rate {rate} shifted DC, but both curves are flat there"
+            );
+            assert!(
+                (tilt_gain(rate, true) - 1.0 / rate).abs() < 1.0e-6,
+                "rate {rate} did not scale the top end as 1/rate"
+            );
+        }
+    }
+
+    /// The pair is the point: velocity gain scales everything by rate and the
+    /// tilt takes the top back by 1/rate, so a slow stroke reads thin and
+    /// quiet while a fast one reads loud and full.
+    #[test]
+    fn cartridge_and_tilt_together_leave_presence_and_scale_body() {
+        for rate in [0.25, 0.5, 2.0] {
+            let velocity = compute_movement_gain(rate, false, true);
+            let body = velocity * tilt_gain(rate, false);
+            let presence = velocity * tilt_gain(rate, true);
+            assert!(
+                (body - rate).abs() < 1.0e-6,
+                "body at rate {rate} should scale with speed"
+            );
+            assert!(
+                (presence - 1.0).abs() < 1.0e-6,
+                "presence at rate {rate} should survive the speed change"
+            );
+        }
+    }
+
+    /// A cartridge is a velocity transducer: output rides the rate, exactly
+    /// 1.0 at nominal speed and continuously silent at rest.
+    #[test]
+    fn cartridge_velocity_gain_is_linear_in_rate() {
+        assert_eq!(compute_movement_gain(0.0, false, true), 0.0);
+        assert_eq!(compute_movement_gain(1.0, false, true), 1.0);
+        for rate in [0.02, 0.1, 0.25, 0.5, 1.0, 2.0, 3.0] {
+            assert!(
+                (compute_movement_gain(rate, false, true) - rate).abs() < 1.0e-12,
+                "rate {rate} did not read back as its own gain"
+            );
+        }
+        // Bounded, so a runaway rate cannot blow up the programme.
+        assert_eq!(
+            compute_movement_gain(50.0, false, true),
+            MAX_CARTRIDGE_VELOCITY_GAIN
+        );
+    }
+
+    /// The velocity law needs no stop knee: it is already continuous to
+    /// silence, so nothing has to gate the programme off at rest.
+    #[test]
+    fn cartridge_velocity_gain_needs_no_stop_knee() {
+        let mut previous = 0.0;
+        for step in 0..64 {
+            let rate = f64::from(step) / 64.0 * STOP_GAIN_FULL_RATE * 2.0;
+            let gain = compute_movement_gain(rate, false, true);
+            assert!(gain >= previous, "gain went backwards at rate {rate}");
+            assert!(gain - previous < 0.01, "gain stepped at rate {rate}");
+            previous = gain;
+        }
     }
 
     #[test]
     fn movement_gain_stays_bounded() {
         for rate in [0.01, 0.1, 1.0, 3.0, 10.0] {
-            let gain = compute_movement_gain(rate, true);
+            let gain = compute_movement_gain(rate, true, false);
             assert!((0.0..=1.08).contains(&gain));
+            let velocity = compute_movement_gain(rate, true, true);
+            assert!((0.0..=MAX_CARTRIDGE_VELOCITY_GAIN * 1.08).contains(&velocity));
         }
-        assert_eq!(compute_movement_gain(1.0, true), 1.0);
+        assert_eq!(compute_movement_gain(1.0, true, false), 1.0);
+        assert_eq!(compute_movement_gain(1.0, true, true), 1.0);
     }
 
     #[test]
     fn default_moving_playback_has_no_unmeasured_speed_gain() {
+        // With the cartridge law off, the dry path is flat above the knee:
+        // no invented speed colour, which is what this has always pinned.
         for rate in [0.1, 0.5, 1.0, 2.0, 8.0] {
-            assert_eq!(compute_movement_gain(rate, false), 1.0);
+            assert_eq!(compute_movement_gain(rate, false, false), 1.0);
         }
     }
 
@@ -5992,6 +6415,11 @@ mod tests {
         let mut dsp = scratch_signal_dsp(ScratchPreset::Baby, 1.0);
         dsp.render(512, 1);
         let full_level = *dsp.output.last().unwrap();
+        // The hand target in this fixture never advances, so the record eases
+        // off against it and the cartridge's output eases with it. The resume
+        // is measured against the programme level the deck's own rate implies
+        // at that moment, not against a level captured at a faster one.
+        let full_gain = dsp.movement_gain_state;
         let held_position = dsp.position;
 
         dsp.render_window_missing(64, 1);
@@ -6016,7 +6444,9 @@ mod tests {
         assert!(dsp.output[127].abs() > dsp.output[0].abs());
         assert!(dsp.position > second_held_position);
         dsp.render(512, 1);
-        assert!((*dsp.output.last().unwrap()).abs() > full_level.abs() * 0.95);
+        let recovered =
+            f64::from(full_level.abs()) * (dsp.movement_gain_state / full_gain);
+        assert!(f64::from((*dsp.output.last().unwrap()).abs()) > recovered * 0.95);
     }
 
     #[test]
