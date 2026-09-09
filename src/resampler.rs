@@ -9,8 +9,8 @@ const MIN_SINC_RADIUS: isize = 12;
 const SINC_RADIUS_OUTPUT_FRAMES: f64 = 8.0;
 const MAX_SINC_RADIUS: isize = 256;
 const RENDERED_CUTOFF: f64 = 0.44;
-pub(crate) const BANDLIMIT_BLEND_START: f64 = 1.05;
-pub(crate) const BANDLIMIT_BLEND_END: f64 = 1.5;
+const BANDLIMIT_BLEND_START: f64 = 1.05;
+const BANDLIMIT_BLEND_END: f64 = 1.5;
 
 fn clamped_sample(channel: &[f32], index: isize) -> f64 {
     channel[index.clamp(0, channel.len().saturating_sub(1) as isize) as usize] as f64
@@ -100,62 +100,30 @@ fn bandlimited(channel: &[f32], position: f64, source_step: f64) -> f64 {
     }
 }
 
-/// The interpolator with an explicit cubic→sinc blend window. Lowering
-/// `blend_start` engages the bandlimited kernel through the scratch band so
-/// slow hand motion gets the better interpolator, not just fast motion.
-/// Out-of-range bounds fall back to the historical window exactly.
-pub(crate) fn adaptive_sample_with_blend(
-    channel: &[f32],
-    position: f64,
-    source_step: f64,
-    blend_start: f64,
-    blend_end: f64,
-) -> Option<f64> {
+pub(crate) fn adaptive_sample(channel: &[f32], position: f64, source_step: f64) -> Option<f64> {
     if channel.len() < 2 || !position.is_finite() || !source_step.is_finite() {
         return None;
     }
     if position < 0.0 || position >= channel.len().saturating_sub(1) as f64 {
         return None;
     }
-    let blend_start = if blend_start.is_finite() && blend_start > 0.0 {
-        blend_start
-    } else {
-        BANDLIMIT_BLEND_START
-    };
-    let blend_end = if blend_end.is_finite() && blend_end > blend_start {
-        blend_end
-    } else {
-        BANDLIMIT_BLEND_END
-    };
 
     let speed = source_step.abs();
     let cubic_sample = cubic(channel, position);
-    if speed <= blend_start {
+    if speed <= BANDLIMIT_BLEND_START {
         return Some(cubic_sample);
     }
     let sinc_sample = bandlimited(channel, position, speed);
-    if speed >= blend_end {
+    if speed >= BANDLIMIT_BLEND_END {
         return Some(sinc_sample);
     }
-    let blend = (speed - blend_start) / (blend_end - blend_start);
+    let blend = (speed - BANDLIMIT_BLEND_START) / (BANDLIMIT_BLEND_END - BANDLIMIT_BLEND_START);
     Some(cubic_sample + (sinc_sample - cubic_sample) * blend)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The historical window: what production renders when no test flag
-    /// moves the blend start.
-    fn default_sample(channel: &[f32], position: f64, source_step: f64) -> Option<f64> {
-        adaptive_sample_with_blend(
-            channel,
-            position,
-            source_step,
-            BANDLIMIT_BLEND_START,
-            BANDLIMIT_BLEND_END,
-        )
-    }
 
     fn vocal_like_sample(position: f64) -> f64 {
         [
@@ -187,7 +155,7 @@ mod tests {
         let mut sum = 0.0;
         let mut count = 0;
         while position >= 64.0 && position < channel.len() as f64 - 64.0 {
-            let sample = default_sample(channel, position, source_step).unwrap();
+            let sample = adaptive_sample(channel, position, source_step).unwrap();
             sum += sample * sample;
             count += 1;
             position += source_step;
@@ -225,65 +193,9 @@ mod tests {
         let channel = sine(512, 0.08);
         let position = 127.375;
         assert!(
-            (default_sample(&channel, position, 1.0).unwrap() - cubic(&channel, position)).abs()
+            (adaptive_sample(&channel, position, 1.0).unwrap() - cubic(&channel, position)).abs()
                 < 1e-12
         );
-    }
-
-    #[test]
-    fn explicit_default_window_matches_the_historical_path() {
-        // The historical knee is exactly `with_blend` at (START, END): the
-        // default configuration changes no sample.
-        let channel = sine(512, 0.08);
-        for source_step in [0.25, 0.9, 1.2, 2.0, 8.0, -0.6] {
-            let wired = default_sample(&channel, 127.375, source_step).unwrap();
-            let explicit = adaptive_sample_with_blend(
-                &channel,
-                127.375,
-                source_step,
-                BANDLIMIT_BLEND_START,
-                BANDLIMIT_BLEND_END,
-            )
-            .unwrap();
-            assert!((wired - explicit).abs() < 1e-12);
-        }
-    }
-
-    #[test]
-    fn lowered_blend_start_engages_the_kernel_below_normal_speed() {
-        let channel = (0..4_096)
-            .map(|frame| {
-                let first = (std::f64::consts::TAU * 0.043 * frame as f64).sin();
-                let second = (std::f64::consts::TAU * 0.211 * frame as f64).sin();
-                (first * 0.61 + second * 0.39) as f32
-            })
-            .collect::<Vec<_>>();
-        let position = 2_047.375;
-        // At rest the blend start the path stays cubic below the window.
-        assert!(
-            (adaptive_sample_with_blend(&channel, position, 0.2, 0.3, BANDLIMIT_BLEND_END).unwrap()
-                - cubic(&channel, position))
-            .abs()
-                < 1e-12
-        );
-        // Inside the lowered window the kernel contributes: no longer cubic.
-        let lowered =
-            adaptive_sample_with_blend(&channel, position, 0.5, 0.3, BANDLIMIT_BLEND_END).unwrap();
-        assert!((lowered - cubic(&channel, position)).abs() > 1e-9);
-        // The lowered window is still continuous across its own start.
-        let epsilon = 1e-7;
-        let before =
-            adaptive_sample_with_blend(&channel, position, 0.3 - epsilon, 0.3, BANDLIMIT_BLEND_END)
-                .unwrap();
-        let after =
-            adaptive_sample_with_blend(&channel, position, 0.3 + epsilon, 0.3, BANDLIMIT_BLEND_END)
-                .unwrap();
-        assert!((after - before).abs() < 1e-6);
-        // Degenerate bounds fall back to the historical window exactly.
-        let fallback =
-            adaptive_sample_with_blend(&channel, position, 0.5, f64::NAN, 0.1).unwrap();
-        let historical = default_sample(&channel, position, 0.5).unwrap();
-        assert!((fallback - historical).abs() < 1e-12);
     }
 
     #[test]
@@ -321,8 +233,8 @@ mod tests {
             .into_iter()
             .chain((13..=80).map(|radius| radius as f64 / SINC_RADIUS_OUTPUT_FRAMES));
         for source_step in boundaries {
-            let before = default_sample(&channel, 2_047.375, source_step - epsilon).unwrap();
-            let after = default_sample(&channel, 2_047.375, source_step + epsilon).unwrap();
+            let before = adaptive_sample(&channel, 2_047.375, source_step - epsilon).unwrap();
+            let after = adaptive_sample(&channel, 2_047.375, source_step + epsilon).unwrap();
             assert!(
                 (after - before).abs() < 1e-6,
                 "filter jumped from {before} to {after} around {source_step}x"
@@ -367,8 +279,8 @@ mod tests {
         let channel = sine(2_048, 0.07);
         for source_step in [2.0, 4.0, 8.0] {
             for position in [128.125, 511.5, 1_024.875] {
-                let forward = default_sample(&channel, position, source_step).unwrap();
-                let reverse = default_sample(&channel, position, -source_step).unwrap();
+                let forward = adaptive_sample(&channel, position, source_step).unwrap();
+                let reverse = adaptive_sample(&channel, position, -source_step).unwrap();
                 assert!((forward - reverse).abs() < 1e-12);
             }
         }
@@ -390,7 +302,7 @@ mod tests {
             let mut error_energy = 0.0;
             let mut reference_energy = 0.0;
             for _ in 0..8_192 {
-                let rendered = default_sample(&channel, position, source_step).unwrap();
+                let rendered = adaptive_sample(&channel, position, source_step).unwrap();
                 let reference = vocal_like_sample(position);
                 error_energy += (rendered - reference).powi(2);
                 reference_energy += reference.powi(2);
@@ -415,7 +327,7 @@ mod tests {
         for frame in 0..12_000 {
             let progress = frame as f64 / 11_999.0;
             let source_step = -0.8 + 2.4 * progress;
-            let rendered = default_sample(&channel, position, source_step).unwrap();
+            let rendered = adaptive_sample(&channel, position, source_step).unwrap();
             let reference = vocal_like_sample(position);
             error_energy += (rendered - reference).powi(2);
             reference_energy += reference.powi(2);

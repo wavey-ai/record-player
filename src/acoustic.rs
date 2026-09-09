@@ -11,9 +11,7 @@ use crate::{
         MotorMode, NormalizedDeckControl, PhysicalDeckConfig,
     },
     mixer::{sharp_crossfader_gains, DEFAULT_SHARP_CROSSFADER_WIDTH},
-    resampler::{
-        adaptive_sample_with_blend, BANDLIMIT_BLEND_END, BANDLIMIT_BLEND_START,
-    },
+    resampler::adaptive_sample,
     scratch_gate::{ScratchGate, ScratchPreset},
 };
 
@@ -30,10 +28,6 @@ const GRIP_ATTACK_SECONDS: f64 = 0.004;
 const GRIP_RELEASE_SECONDS: f64 = 0.045;
 /// Below this residual force a released hand counts as fully separated.
 const GRIP_CONTACT_EPSILON: f64 = 0.02;
-/// Full-strength gesture smoothing sleeps the hand-rate target with this
-/// time constant: slow enough to absorb pointer jitter, fast enough that a
-/// deliberate stroke still leads.
-const GESTURE_SMOOTHING_MAX_TAU_SECONDS: f64 = 0.03;
 /// A lifting finger's normal force collapses over this span.
 const HAND_RELEASE_SECONDS: f64 = 0.008;
 /// The stylus fades over this span approaching a pinned record edge so a
@@ -475,21 +469,6 @@ pub struct AcousticConfig {
     /// it exactly; `1` applies the full soft-knee reduction.
     #[serde(default = "default_high_frequency_acceleration_limit")]
     pub high_frequency_acceleration_limit: f64,
-    /// Where the resampler starts blending from cubic to bandlimited sinc,
-    /// in units of source-frame step. `1.05` is the historical knee; lowering
-    /// it engages the sinc interpolator through the scratch band so slow
-    /// hand motion gets the better interpolator, not just fast motion.
-    #[serde(default = "default_bandlimit_blend_start")]
-    pub bandlimit_blend_start: f64,
-    /// One-pole smoothing on incoming hand-rate targets. `0` assigns the
-    /// mapped rate directly — the historical path, bit for bit. Above `0`
-    /// the target sleeps toward the incoming rate with the previous target
-    /// as the pole memory, so pointer jitter stops arriving as servo jerk.
-    /// The time constant scales with the interval since the previous motion
-    /// sample, up to 30 ms at full strength; a motion with no interval
-    /// behind it (the grab) still lands immediately.
-    #[serde(default = "default_gesture_smoothing")]
-    pub gesture_smoothing: f64,
     /// Scales the scratch-excited friction terms: contact noise (with its
     /// acceleration lift), needle-drop impulse noise, and the
     /// slope/curvature source texture. `1` is the historical level, bit for
@@ -538,12 +517,6 @@ fn default_stylus_tracing_limit() -> f64 {
 fn default_high_frequency_acceleration_limit() -> f64 {
     0.0
 }
-fn default_bandlimit_blend_start() -> f64 {
-    BANDLIMIT_BLEND_START
-}
-fn default_gesture_smoothing() -> f64 {
-    0.0
-}
 fn default_texture_scale() -> f64 {
     1.0
 }
@@ -560,8 +533,6 @@ impl Default for AcousticConfig {
             riaa_speed_tilt: default_true(),
             stylus_tracing_limit: default_stylus_tracing_limit(),
             high_frequency_acceleration_limit: default_high_frequency_acceleration_limit(),
-            bandlimit_blend_start: default_bandlimit_blend_start(),
-            gesture_smoothing: default_gesture_smoothing(),
             texture_scale: default_texture_scale(),
             soft_clip: false,
         }
@@ -865,16 +836,6 @@ impl ScratchAcousticDsp {
         if !valid_unit_interval(config.stylus_tracing_limit) {
             return Err(JsValue::from_str(
                 "stylusTracingLimit must be between 0 and 1",
-            ));
-        }
-        if !valid_blend_start(config.bandlimit_blend_start) {
-            return Err(JsValue::from_str(
-                "bandlimitBlendStart must be positive and below the blend end",
-            ));
-        }
-        if !valid_unit_interval(config.gesture_smoothing) {
-            return Err(JsValue::from_str(
-                "gestureSmoothing must be between 0 and 1",
             ));
         }
         if !valid_texture_scale(config.texture_scale) {
@@ -1884,38 +1845,6 @@ impl ScratchAcousticDsp {
         self.config.stylus_tracing_limit
     }
 
-    #[wasm_bindgen(js_name = setBandlimitBlendStart)]
-    pub fn set_bandlimit_blend_start(&mut self, blend_start: f64) -> Result<(), JsValue> {
-        if !valid_blend_start(blend_start) {
-            return Err(JsValue::from_str(
-                "bandlimitBlendStart must be positive and below the blend end",
-            ));
-        }
-        self.config.bandlimit_blend_start = blend_start;
-        Ok(())
-    }
-
-    #[wasm_bindgen(getter, js_name = bandlimitBlendStart)]
-    pub fn bandlimit_blend_start(&self) -> f64 {
-        self.config.bandlimit_blend_start
-    }
-
-    #[wasm_bindgen(js_name = setGestureSmoothing)]
-    pub fn set_gesture_smoothing(&mut self, strength: f64) -> Result<(), JsValue> {
-        if !valid_unit_interval(strength) {
-            return Err(JsValue::from_str(
-                "gestureSmoothing must be between 0 and 1",
-            ));
-        }
-        self.config.gesture_smoothing = strength;
-        Ok(())
-    }
-
-    #[wasm_bindgen(getter, js_name = gestureSmoothing)]
-    pub fn gesture_smoothing(&self) -> f64 {
-        self.config.gesture_smoothing
-    }
-
     #[wasm_bindgen(js_name = setTextureScale)]
     pub fn set_texture_scale(&mut self, scale: f64) -> Result<(), JsValue> {
         if !valid_texture_scale(scale) {
@@ -2074,15 +2003,20 @@ impl ScratchAcousticDsp {
         Ok(())
     }
 
-    /// Sets the slipmat coupling from loose at zero to tight at one.
+    /// Sets how much the record slips: none at zero, loosest mat at one.
+    ///
+    /// The mat is named for what it does, so the number runs with the name.
+    /// Zero is the tightest coupling the deck has — the record turns with the
+    /// platter — and one is the loosest mat, which lets the record slide on
+    /// after the hand leaves it.
     #[wasm_bindgen(js_name = setSlipmatResponse)]
-    pub fn set_slipmat_response(&mut self, response: f64) -> Result<(), JsValue> {
-        if !valid_unit_interval(response) {
+    pub fn set_slipmat_response(&mut self, slip: f64) -> Result<(), JsValue> {
+        if !valid_unit_interval(slip) {
             return Err(JsValue::from_str("slipmatResponse must be between 0 and 1"));
         }
         let reference = production_deck_config(self.output_sample_rate, self.native_rpm);
-        let scale = LOOSE_SLIPMAT_COUPLING_SCALE
-            + response * (TIGHT_SLIPMAT_COUPLING_SCALE - LOOSE_SLIPMAT_COUPLING_SCALE);
+        let scale = TIGHT_SLIPMAT_COUPLING_SCALE
+            + slip * (LOOSE_SLIPMAT_COUPLING_SCALE - TIGHT_SLIPMAT_COUPLING_SCALE);
         let mut deck_config = self.deck_state.config();
         deck_config.slipmat_static_torque_nm = reference.slipmat_static_torque_nm * scale;
         deck_config.slipmat_kinetic_torque_nm = reference.slipmat_kinetic_torque_nm * scale;
@@ -2454,22 +2388,7 @@ impl ScratchAcousticDsp {
             self.clamp_source_position(position),
         );
         self.previous_target_rate = self.target_rate;
-        let incoming = self.map_rate(rate);
-        // The pole memory is the previous target, so no new render state is
-        // needed and replay stays a pure function of the motion log. A
-        // motion with no interval behind it (the grab, or two samples in one
-        // frame) assigns directly: there is no jitter to smooth yet, and the
-        // latest sample always wins, exactly as before.
-        self.target_rate = if self.config.gesture_smoothing <= 0.0
-            || self.frames_since_motion == 0
-        {
-            incoming
-        } else {
-            let tau = self.config.gesture_smoothing * GESTURE_SMOOTHING_MAX_TAU_SECONDS;
-            let dt = self.frames_since_motion as f64 / self.output_sample_rate;
-            let alpha = 1.0 - (-dt / tau).exp();
-            self.previous_target_rate + (incoming - self.previous_target_rate) * alpha
-        };
+        self.target_rate = self.map_rate(rate);
         self.motion_interval_frames = self.frames_since_motion;
         self.frames_since_motion = 0;
         if impulse > 0.0 {
@@ -3323,12 +3242,6 @@ impl ScratchAcousticDsp {
         if !valid_unit_interval(config.stylus_tracing_limit) {
             return Err("stylus tracing limit must be between 0 and 1".to_owned());
         }
-        if !valid_blend_start(config.bandlimit_blend_start) {
-            return Err("bandlimit blend start must be positive and below the blend end".to_owned());
-        }
-        if !valid_unit_interval(config.gesture_smoothing) {
-            return Err("gesture smoothing must be between 0 and 1".to_owned());
-        }
         if !valid_texture_scale(config.texture_scale) {
             return Err("texture scale must be between 0 and 4".to_owned());
         }
@@ -4081,13 +3994,7 @@ impl ScratchAcousticDsp {
             let channel = self.channels.get(channel_index)?;
             let local = (source_position - self.window_start as f64)
                 .clamp(0.0, channel.len().saturating_sub(2) as f64);
-            adaptive_sample_with_blend(
-                channel,
-                local,
-                source_step,
-                self.config.bandlimit_blend_start,
-                BANDLIMIT_BLEND_END,
-            )
+            adaptive_sample(channel, local, source_step)
         };
         if self.locked_groove_start < 0.0 {
             return raw(position);
@@ -4491,11 +4398,6 @@ fn valid_texture_scale(value: f64) -> bool {
     value.is_finite() && (0.0..=4.0).contains(&value)
 }
 
-/// A cubic→sinc blend window needs a positive start below the fixed end.
-fn valid_blend_start(value: f64) -> bool {
-    value.is_finite() && value > 0.0 && value < BANDLIMIT_BLEND_END
-}
-
 fn sign_nonzero(primary: f64, fallback: f64) -> f64 {
     if primary != 0.0 {
         primary.signum()
@@ -4610,32 +4512,7 @@ mod tests {
         dsp.platter_rotation_turns = turns;
     }
 
-    #[test]
-    fn bandlimit_blend_start_defaults_to_the_historical_knee() {
-        assert_eq!(
-            AcousticConfig::default().bandlimit_blend_start,
-            BANDLIMIT_BLEND_START
-        );
-    }
 
-    #[test]
-    fn bandlimit_blend_start_setter_accepts_only_a_positive_window() {
-        // The window predicate is shared by both constructors and the live
-        // setter. (The setter's `Err` path builds a `JsValue`, which only
-        // exists on wasm32, so rejection itself is exercised through the
-        // predicate it delegates to.)
-        assert!(valid_blend_start(0.3));
-        assert!(valid_blend_start(BANDLIMIT_BLEND_START));
-        assert!(!valid_blend_start(0.0));
-        assert!(!valid_blend_start(-0.5));
-        assert!(!valid_blend_start(BANDLIMIT_BLEND_END));
-        assert!(!valid_blend_start(f64::NAN));
-        assert!(!valid_blend_start(f64::INFINITY));
-        // The live setter wires through on the accept path.
-        let mut dsp = simulation_dsp();
-        assert!(dsp.set_bandlimit_blend_start(0.3).is_ok());
-        assert_eq!(dsp.bandlimit_blend_start(), 0.3);
-    }
 
     #[test]
     fn soft_clip_folds_peaks_and_preserves_silence() {
@@ -4679,31 +4556,7 @@ mod tests {
         assert_eq!(dsp.texture_scale(), 0.5);
     }
 
-    #[test]
-    fn gesture_smoothing_bypass_assigns_the_mapped_rate() {
-        let mut dsp = simulation_dsp();
-        assert_eq!(AcousticConfig::default().gesture_smoothing, 0.0);
-        dsp.set_motion(0.0, 1.0, 0.0);
-        dsp.frames_since_motion = 480;
-        dsp.set_motion(0.0, 2.0, 0.0);
-        // Bypassed, the latest sample always wins, exactly as before.
-        assert_eq!(dsp.target_rate, 2.0);
-    }
 
-    #[test]
-    fn gesture_smoothing_lags_fast_rate_changes_but_not_the_grab() {
-        let mut dsp = simulation_dsp();
-        dsp.config.gesture_smoothing = 1.0;
-        // No interval behind the grab: lands immediately.
-        dsp.set_motion(0.0, 1.0, 0.0);
-        assert!((dsp.target_rate - 1.0).abs() < 1e-12);
-        // 10 ms later a doubled rate only partly arrives.
-        dsp.frames_since_motion = 480;
-        dsp.set_motion(0.0, 2.0, 0.0);
-        let alpha = 1.0 - (-480.0 / 48_000.0 / GESTURE_SMOOTHING_MAX_TAU_SECONDS).exp();
-        assert!((dsp.target_rate - (1.0 + (2.0 - 1.0) * alpha)).abs() < 1e-12);
-        assert!(dsp.target_rate > 1.0 && dsp.target_rate < 2.0);
-    }
 
     fn simulation_dsp() -> ScratchAcousticDsp {
         let mut config = AcousticConfig::default();
@@ -5664,7 +5517,7 @@ mod tests {
     }
 
     #[test]
-    fn tighter_slipmat_response_catches_the_powered_platter_sooner() {
+    fn less_slip_catches_the_powered_platter_sooner() {
         fn rate_after_release(response: f64) -> f64 {
             let mut dsp = simulation_dsp();
             dsp.set_effects(false, false);
@@ -5681,11 +5534,12 @@ mod tests {
             dsp.last_effective_rate
         }
 
-        let loose = rate_after_release(0.0);
-        let tight = rate_after_release(1.0);
+        // Zero slip is the tightest mat, so it catches soonest.
+        let tight = rate_after_release(0.0);
+        let loose = rate_after_release(1.0);
         assert!(
             tight > loose + 0.20,
-            "tight response {tight} did not clear loose response {loose}",
+            "no-slip {tight} did not clear full-slip {loose}",
         );
     }
 
