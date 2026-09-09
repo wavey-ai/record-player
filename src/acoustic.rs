@@ -11,7 +11,9 @@ use crate::{
         MotorMode, NormalizedDeckControl, PhysicalDeckConfig,
     },
     mixer::{sharp_crossfader_gains, DEFAULT_SHARP_CROSSFADER_WIDTH},
-    resampler::adaptive_sample,
+    resampler::{
+        adaptive_sample_with_blend, BANDLIMIT_BLEND_END, BANDLIMIT_BLEND_START,
+    },
     scratch_gate::{ScratchGate, ScratchPreset},
 };
 
@@ -469,6 +471,12 @@ pub struct AcousticConfig {
     /// it exactly; `1` applies the full soft-knee reduction.
     #[serde(default = "default_high_frequency_acceleration_limit")]
     pub high_frequency_acceleration_limit: f64,
+    /// Where the resampler starts blending from cubic to bandlimited sinc,
+    /// in units of source-frame step. `1.05` is the historical knee; lowering
+    /// it engages the sinc interpolator through the scratch band so slow
+    /// hand motion gets the better interpolator, not just fast motion.
+    #[serde(default = "default_bandlimit_blend_start")]
+    pub bandlimit_blend_start: f64,
     /// A magnetic cartridge is a velocity transducer: its output is
     /// proportional to how fast the groove passes the stylus, so playing at
     /// rate `r` yields `r * m(r*t)`. The rate factor is the whole law. It is
@@ -503,6 +511,9 @@ fn default_stylus_tracing_limit() -> f64 {
 fn default_high_frequency_acceleration_limit() -> f64 {
     0.0
 }
+fn default_bandlimit_blend_start() -> f64 {
+    BANDLIMIT_BLEND_START
+}
 
 impl Default for AcousticConfig {
     fn default() -> Self {
@@ -516,6 +527,7 @@ impl Default for AcousticConfig {
             riaa_speed_tilt: default_true(),
             stylus_tracing_limit: default_stylus_tracing_limit(),
             high_frequency_acceleration_limit: default_high_frequency_acceleration_limit(),
+            bandlimit_blend_start: default_bandlimit_blend_start(),
         }
     }
 }
@@ -817,6 +829,11 @@ impl ScratchAcousticDsp {
         if !valid_unit_interval(config.stylus_tracing_limit) {
             return Err(JsValue::from_str(
                 "stylusTracingLimit must be between 0 and 1",
+            ));
+        }
+        if !valid_blend_start(config.bandlimit_blend_start) {
+            return Err(JsValue::from_str(
+                "bandlimitBlendStart must be positive and below the blend end",
             ));
         }
         Ok(Self::new_internal(output_sample_rate, config))
@@ -1819,6 +1836,22 @@ impl ScratchAcousticDsp {
     #[wasm_bindgen(getter, js_name = stylusTracingLimit)]
     pub fn stylus_tracing_limit(&self) -> f64 {
         self.config.stylus_tracing_limit
+    }
+
+    #[wasm_bindgen(js_name = setBandlimitBlendStart)]
+    pub fn set_bandlimit_blend_start(&mut self, blend_start: f64) -> Result<(), JsValue> {
+        if !valid_blend_start(blend_start) {
+            return Err(JsValue::from_str(
+                "bandlimitBlendStart must be positive and below the blend end",
+            ));
+        }
+        self.config.bandlimit_blend_start = blend_start;
+        Ok(())
+    }
+
+    #[wasm_bindgen(getter, js_name = bandlimitBlendStart)]
+    pub fn bandlimit_blend_start(&self) -> f64 {
+        self.config.bandlimit_blend_start
     }
 
     #[wasm_bindgen(js_name = setScratchPreset)]
@@ -3164,6 +3197,9 @@ impl ScratchAcousticDsp {
         if !valid_unit_interval(config.stylus_tracing_limit) {
             return Err("stylus tracing limit must be between 0 and 1".to_owned());
         }
+        if !valid_blend_start(config.bandlimit_blend_start) {
+            return Err("bandlimit blend start must be positive and below the blend end".to_owned());
+        }
         Ok(Self::new_internal(output_sample_rate, config))
     }
 
@@ -3913,7 +3949,13 @@ impl ScratchAcousticDsp {
             let channel = self.channels.get(channel_index)?;
             let local = (source_position - self.window_start as f64)
                 .clamp(0.0, channel.len().saturating_sub(2) as f64);
-            adaptive_sample(channel, local, source_step)
+            adaptive_sample_with_blend(
+                channel,
+                local,
+                source_step,
+                self.config.bandlimit_blend_start,
+                BANDLIMIT_BLEND_END,
+            )
         };
         if self.locked_groove_start < 0.0 {
             return raw(position);
@@ -4312,6 +4354,11 @@ fn valid_unit_interval(value: f64) -> bool {
     value.is_finite() && (0.0..=1.0).contains(&value)
 }
 
+/// A cubic→sinc blend window needs a positive start below the fixed end.
+fn valid_blend_start(value: f64) -> bool {
+    value.is_finite() && value > 0.0 && value < BANDLIMIT_BLEND_END
+}
+
 fn sign_nonzero(primary: f64, fallback: f64) -> f64 {
     if primary != 0.0 {
         primary.signum()
@@ -4424,6 +4471,33 @@ mod tests {
         dsp.rate_velocity = 0.0;
         dsp.last_effective_rate = record_rate;
         dsp.platter_rotation_turns = turns;
+    }
+
+    #[test]
+    fn bandlimit_blend_start_defaults_to_the_historical_knee() {
+        assert_eq!(
+            AcousticConfig::default().bandlimit_blend_start,
+            BANDLIMIT_BLEND_START
+        );
+    }
+
+    #[test]
+    fn bandlimit_blend_start_setter_accepts_only_a_positive_window() {
+        // The window predicate is shared by both constructors and the live
+        // setter. (The setter's `Err` path builds a `JsValue`, which only
+        // exists on wasm32, so rejection itself is exercised through the
+        // predicate it delegates to.)
+        assert!(valid_blend_start(0.3));
+        assert!(valid_blend_start(BANDLIMIT_BLEND_START));
+        assert!(!valid_blend_start(0.0));
+        assert!(!valid_blend_start(-0.5));
+        assert!(!valid_blend_start(BANDLIMIT_BLEND_END));
+        assert!(!valid_blend_start(f64::NAN));
+        assert!(!valid_blend_start(f64::INFINITY));
+        // The live setter wires through on the accept path.
+        let mut dsp = simulation_dsp();
+        assert!(dsp.set_bandlimit_blend_start(0.3).is_ok());
+        assert_eq!(dsp.bandlimit_blend_start(), 0.3);
     }
 
     fn simulation_dsp() -> ScratchAcousticDsp {
