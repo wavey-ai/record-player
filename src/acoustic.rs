@@ -30,6 +30,10 @@ const GRIP_ATTACK_SECONDS: f64 = 0.004;
 const GRIP_RELEASE_SECONDS: f64 = 0.045;
 /// Below this residual force a released hand counts as fully separated.
 const GRIP_CONTACT_EPSILON: f64 = 0.02;
+/// Full-strength gesture smoothing sleeps the hand-rate target with this
+/// time constant: slow enough to absorb pointer jitter, fast enough that a
+/// deliberate stroke still leads.
+const GESTURE_SMOOTHING_MAX_TAU_SECONDS: f64 = 0.03;
 /// A lifting finger's normal force collapses over this span.
 const HAND_RELEASE_SECONDS: f64 = 0.008;
 /// The stylus fades over this span approaching a pinned record edge so a
@@ -477,6 +481,29 @@ pub struct AcousticConfig {
     /// hand motion gets the better interpolator, not just fast motion.
     #[serde(default = "default_bandlimit_blend_start")]
     pub bandlimit_blend_start: f64,
+    /// One-pole smoothing on incoming hand-rate targets. `0` assigns the
+    /// mapped rate directly — the historical path, bit for bit. Above `0`
+    /// the target sleeps toward the incoming rate with the previous target
+    /// as the pole memory, so pointer jitter stops arriving as servo jerk.
+    /// The time constant scales with the interval since the previous motion
+    /// sample, up to 30 ms at full strength; a motion with no interval
+    /// behind it (the grab) still lands immediately.
+    #[serde(default = "default_gesture_smoothing")]
+    pub gesture_smoothing: f64,
+    /// Scales the scratch-excited friction terms: contact noise (with its
+    /// acceleration lift), needle-drop impulse noise, and the
+    /// slope/curvature source texture. `1` is the historical level, bit for
+    /// bit — multiplying by exactly one changes no sample. The surface bed,
+    /// dust, groove position noise and wear crackle are untouched.
+    #[serde(default = "default_texture_scale")]
+    pub texture_scale: f64,
+    /// Replaces the final hard clamp with a tanh saturator. `false` keeps
+    /// the historical digital clamp, bit for bit. `tanh` has unity slope at
+    /// silence, so small signals render identically and only would-be-clipped
+    /// peaks fold over — the mechanical saturation a real groove has and a
+    /// clamp does not.
+    #[serde(default)]
+    pub soft_clip: bool,
     /// A magnetic cartridge is a velocity transducer: its output is
     /// proportional to how fast the groove passes the stylus, so playing at
     /// rate `r` yields `r * m(r*t)`. The rate factor is the whole law. It is
@@ -514,6 +541,12 @@ fn default_high_frequency_acceleration_limit() -> f64 {
 fn default_bandlimit_blend_start() -> f64 {
     BANDLIMIT_BLEND_START
 }
+fn default_gesture_smoothing() -> f64 {
+    0.0
+}
+fn default_texture_scale() -> f64 {
+    1.0
+}
 
 impl Default for AcousticConfig {
     fn default() -> Self {
@@ -528,6 +561,9 @@ impl Default for AcousticConfig {
             stylus_tracing_limit: default_stylus_tracing_limit(),
             high_frequency_acceleration_limit: default_high_frequency_acceleration_limit(),
             bandlimit_blend_start: default_bandlimit_blend_start(),
+            gesture_smoothing: default_gesture_smoothing(),
+            texture_scale: default_texture_scale(),
+            soft_clip: false,
         }
     }
 }
@@ -834,6 +870,16 @@ impl ScratchAcousticDsp {
         if !valid_blend_start(config.bandlimit_blend_start) {
             return Err(JsValue::from_str(
                 "bandlimitBlendStart must be positive and below the blend end",
+            ));
+        }
+        if !valid_unit_interval(config.gesture_smoothing) {
+            return Err(JsValue::from_str(
+                "gestureSmoothing must be between 0 and 1",
+            ));
+        }
+        if !valid_texture_scale(config.texture_scale) {
+            return Err(JsValue::from_str(
+                "textureScale must be between 0 and 4",
             ));
         }
         Ok(Self::new_internal(output_sample_rate, config))
@@ -1854,6 +1900,62 @@ impl ScratchAcousticDsp {
         self.config.bandlimit_blend_start
     }
 
+    #[wasm_bindgen(js_name = setGestureSmoothing)]
+    pub fn set_gesture_smoothing(&mut self, strength: f64) -> Result<(), JsValue> {
+        if !valid_unit_interval(strength) {
+            return Err(JsValue::from_str(
+                "gestureSmoothing must be between 0 and 1",
+            ));
+        }
+        self.config.gesture_smoothing = strength;
+        Ok(())
+    }
+
+    #[wasm_bindgen(getter, js_name = gestureSmoothing)]
+    pub fn gesture_smoothing(&self) -> f64 {
+        self.config.gesture_smoothing
+    }
+
+    #[wasm_bindgen(js_name = setTextureScale)]
+    pub fn set_texture_scale(&mut self, scale: f64) -> Result<(), JsValue> {
+        if !valid_texture_scale(scale) {
+            return Err(JsValue::from_str(
+                "textureScale must be between 0 and 4",
+            ));
+        }
+        self.config.texture_scale = scale;
+        Ok(())
+    }
+
+    #[wasm_bindgen(getter, js_name = textureScale)]
+    pub fn texture_scale(&self) -> f64 {
+        self.config.texture_scale
+    }
+
+    /// The speed-dependent half of the phono chain, live. At nominal speed
+    /// the tilt is exactly unity, so toggling it only changes off-speed
+    /// content — which makes it a clean A/B for how much of scratch's edge
+    /// is the pre-emphasis mismatch rather than the groove itself.
+    #[wasm_bindgen(js_name = setRiaaSpeedTilt)]
+    pub fn set_riaa_speed_tilt(&mut self, enabled: bool) {
+        self.config.riaa_speed_tilt = enabled;
+    }
+
+    #[wasm_bindgen(getter, js_name = riaaSpeedTilt)]
+    pub fn riaa_speed_tilt(&self) -> bool {
+        self.config.riaa_speed_tilt
+    }
+
+    #[wasm_bindgen(js_name = setSoftClip)]
+    pub fn set_soft_clip(&mut self, enabled: bool) {
+        self.config.soft_clip = enabled;
+    }
+
+    #[wasm_bindgen(getter, js_name = softClip)]
+    pub fn soft_clip(&self) -> bool {
+        self.config.soft_clip
+    }
+
     #[wasm_bindgen(js_name = setScratchPreset)]
     pub fn set_scratch_preset(&mut self, name: &str) -> Result<(), JsValue> {
         let preset = name
@@ -2352,7 +2454,22 @@ impl ScratchAcousticDsp {
             self.clamp_source_position(position),
         );
         self.previous_target_rate = self.target_rate;
-        self.target_rate = self.map_rate(rate);
+        let incoming = self.map_rate(rate);
+        // The pole memory is the previous target, so no new render state is
+        // needed and replay stays a pure function of the motion log. A
+        // motion with no interval behind it (the grab, or two samples in one
+        // frame) assigns directly: there is no jitter to smooth yet, and the
+        // latest sample always wins, exactly as before.
+        self.target_rate = if self.config.gesture_smoothing <= 0.0
+            || self.frames_since_motion == 0
+        {
+            incoming
+        } else {
+            let tau = self.config.gesture_smoothing * GESTURE_SMOOTHING_MAX_TAU_SECONDS;
+            let dt = self.frames_since_motion as f64 / self.output_sample_rate;
+            let alpha = 1.0 - (-dt / tau).exp();
+            self.previous_target_rate + (incoming - self.previous_target_rate) * alpha
+        };
         self.motion_interval_frames = self.frames_since_motion;
         self.frames_since_motion = 0;
         if impulse > 0.0 {
@@ -2668,9 +2785,11 @@ impl ScratchAcousticDsp {
             let rate_delta = (corrected_rate - self.last_effective_rate).abs();
             let acceleration_noise =
                 (rate_delta * 0.00028 * realtime_acceleration_dip).clamp(0.0, 0.0007);
-            let contact_noise_gain = compute_contact_noise_gain(abs_rate) + acceleration_noise;
+            let contact_noise_gain =
+                (compute_contact_noise_gain(abs_rate) + acceleration_noise)
+                    * self.config.texture_scale;
             let impulse_noise = if self.config.surface_enabled && self.contact_impulse > 0.0001 {
-                self.next_noise() * self.contact_impulse * 0.004
+                self.next_noise() * self.contact_impulse * 0.004 * self.config.texture_scale
             } else {
                 0.0
             };
@@ -2680,7 +2799,7 @@ impl ScratchAcousticDsp {
                 0.0
             };
             let source_texture_gain = if self.config.acoustic_enabled {
-                compute_source_texture_gain(abs_rate, rate_delta)
+                compute_source_texture_gain(abs_rate, rate_delta) * self.config.texture_scale
             } else {
                 0.0
             };
@@ -2837,7 +2956,7 @@ impl ScratchAcousticDsp {
                 } else {
                     0.0
                 };
-                self.output[output_index] = ((programme[channel_index]
+                let mixed = (programme[channel_index]
                     + source_textures[channel_index])
                     * self.window_programme_gain
                     * edge_gain
@@ -2846,8 +2965,15 @@ impl ScratchAcousticDsp {
                     + contact_texture
                     + dust_fleck
                     + impulse_noise
-                    + wear_crackle)
-                    .clamp(-1.0, 1.0) as f32;
+                    + wear_crackle;
+                // A clamp rectifies overs into broadband grit; tanh folds
+                // them the way a saturating stage does. Unity slope at
+                // silence keeps small signals identical either way.
+                self.output[output_index] = if self.config.soft_clip {
+                    mixed.tanh()
+                } else {
+                    mixed.clamp(-1.0, 1.0)
+                } as f32;
             }
 
             // A lifted stylus is not in the groove, so nothing is reading the
@@ -3199,6 +3325,12 @@ impl ScratchAcousticDsp {
         }
         if !valid_blend_start(config.bandlimit_blend_start) {
             return Err("bandlimit blend start must be positive and below the blend end".to_owned());
+        }
+        if !valid_unit_interval(config.gesture_smoothing) {
+            return Err("gesture smoothing must be between 0 and 1".to_owned());
+        }
+        if !valid_texture_scale(config.texture_scale) {
+            return Err("texture scale must be between 0 and 4".to_owned());
         }
         Ok(Self::new_internal(output_sample_rate, config))
     }
@@ -4354,6 +4486,11 @@ fn valid_unit_interval(value: f64) -> bool {
     value.is_finite() && (0.0..=1.0).contains(&value)
 }
 
+/// The friction terms scale from silent to four times the historical level.
+fn valid_texture_scale(value: f64) -> bool {
+    value.is_finite() && (0.0..=4.0).contains(&value)
+}
+
 /// A cubic→sinc blend window needs a positive start below the fixed end.
 fn valid_blend_start(value: f64) -> bool {
     value.is_finite() && value > 0.0 && value < BANDLIMIT_BLEND_END
@@ -4498,6 +4635,74 @@ mod tests {
         let mut dsp = simulation_dsp();
         assert!(dsp.set_bandlimit_blend_start(0.3).is_ok());
         assert_eq!(dsp.bandlimit_blend_start(), 0.3);
+    }
+
+    #[test]
+    fn soft_clip_folds_peaks_and_preserves_silence() {
+        assert!(!AcousticConfig::default().soft_clip);
+        // Pinned tanh behaviour: unity slope at silence, folded peaks.
+        assert_eq!(0.0_f64.tanh(), 0.0);
+        assert!((0.5_f64.tanh() - 0.462_117_157_260_009_74).abs() < 1e-15);
+        assert!(3.0_f64.tanh() < 1.0 && 3.0_f64.tanh() > 0.99);
+        assert_eq!((-2.0_f64.tanh()), -(2.0_f64.tanh()));
+        let mut dsp = simulation_dsp();
+        dsp.set_soft_clip(true);
+        assert!(dsp.soft_clip());
+        dsp.set_soft_clip(false);
+        assert!(!dsp.soft_clip());
+    }
+
+    #[test]
+    fn riaa_speed_tilt_toggles_live() {
+        assert!(AcousticConfig::default().riaa_speed_tilt);
+        let mut dsp = simulation_dsp();
+        dsp.set_riaa_speed_tilt(false);
+        assert!(!dsp.riaa_speed_tilt());
+        dsp.set_riaa_speed_tilt(true);
+        assert!(dsp.riaa_speed_tilt());
+    }
+
+    #[test]
+    fn texture_scale_defaults_to_the_historical_level() {
+        assert_eq!(AcousticConfig::default().texture_scale, 1.0);
+        // The friction predicate admits silence through four times history.
+        assert!(valid_texture_scale(0.0));
+        assert!(valid_texture_scale(1.0));
+        assert!(valid_texture_scale(4.0));
+        assert!(!valid_texture_scale(-0.1));
+        assert!(!valid_texture_scale(4.1));
+        assert!(!valid_texture_scale(f64::NAN));
+        assert!(!valid_texture_scale(f64::INFINITY));
+        // The live setter wires through on the accept path.
+        let mut dsp = simulation_dsp();
+        assert!(dsp.set_texture_scale(0.5).is_ok());
+        assert_eq!(dsp.texture_scale(), 0.5);
+    }
+
+    #[test]
+    fn gesture_smoothing_bypass_assigns_the_mapped_rate() {
+        let mut dsp = simulation_dsp();
+        assert_eq!(AcousticConfig::default().gesture_smoothing, 0.0);
+        dsp.set_motion(0.0, 1.0, 0.0);
+        dsp.frames_since_motion = 480;
+        dsp.set_motion(0.0, 2.0, 0.0);
+        // Bypassed, the latest sample always wins, exactly as before.
+        assert_eq!(dsp.target_rate, 2.0);
+    }
+
+    #[test]
+    fn gesture_smoothing_lags_fast_rate_changes_but_not_the_grab() {
+        let mut dsp = simulation_dsp();
+        dsp.config.gesture_smoothing = 1.0;
+        // No interval behind the grab: lands immediately.
+        dsp.set_motion(0.0, 1.0, 0.0);
+        assert!((dsp.target_rate - 1.0).abs() < 1e-12);
+        // 10 ms later a doubled rate only partly arrives.
+        dsp.frames_since_motion = 480;
+        dsp.set_motion(0.0, 2.0, 0.0);
+        let alpha = 1.0 - (-480.0 / 48_000.0 / GESTURE_SMOOTHING_MAX_TAU_SECONDS).exp();
+        assert!((dsp.target_rate - (1.0 + (2.0 - 1.0) * alpha)).abs() < 1e-12);
+        assert!(dsp.target_rate > 1.0 && dsp.target_rate < 2.0);
     }
 
     fn simulation_dsp() -> ScratchAcousticDsp {
