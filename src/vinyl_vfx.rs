@@ -169,25 +169,32 @@ const ELLIPTICAL_RELEASE_HZ: f64 = 3.0;
 /// hearing. Measured on a locked groove cut from a master already at 0.98,
 /// with LAYERS at full:
 ///
-/// | gain | build | peak | clipped | side/mid bass |
-/// | ---- | ----- | ---- | ------- | ------------- |
-/// | 0.40 | 1.1dB | 0.87 |       0 |         0.009 |
-/// | 0.85 | 3.9dB | 0.92 |       0 |         0.031 |
-/// | 1.15 | 4.7dB | 0.93 |       0 |         0.053 |
-/// | 1.45 | 5.9dB | 0.95 |       0 |         0.060 |
+/// Measured on a master already at 0.98, at full LAYERS. `locked` is one
+/// revolution repeated; `playing` is a record walking through the passage.
+///
+/// | gain | locked | playing | peak | clipped | side/mid bass |
+/// | ---- | ------ | ------- | ---- | ------- | ------------- |
+/// | 0.50 |  1.6dB |  -0.4dB | 0.88 |       0 |         0.012 |
+/// | 0.70 |  2.5dB |  +0.1dB | 0.90 |       0 |         0.021 |
+/// | 0.85 |  3.2dB |  +0.6dB | 0.91 |       0 |         0.031 |
 ///
 /// Neither the ceiling nor the sides set this. The knee holds the peak well
 /// past a gain of one, and the elliptical circuit acts at a side-to-middle
 /// figure of 0.5, which the loop does not approach.
 ///
-/// Stability sets it. What one revolution returns is `gain` less what the
-/// 7 kHz lowpass, the floor and the interpolation of the polar read take —
-/// about half of it for ordinary programme, but nearly all of it for content
-/// that is low, coherent and repeating, which is exactly what a locked
-/// groove hands back. A gain of one against a return of one is a loop that
-/// never decays, so the range stops short of it with room to spare.
+/// Two things do. Stability is the hard limit: what one revolution returns is
+/// `gain` less what the 7 kHz lowpass, the floor and the interpolation of the
+/// polar read take — about half of it for ordinary programme, but nearly all
+/// of it for content that is low, coherent and repeating, which is exactly
+/// what a locked groove hands back. A gain of one against a return of one is
+/// a loop that never decays, so the range stops well short of it.
+///
+/// Taste is the other, and it is what set the figure. At 0.70 a playing
+/// record keeps the level it came in at, so LAYERS changes the record rather
+/// than its loudness, and the build arrives on the locked groove where the
+/// scene is for.
 const OVERCUT_LAYER_MINIMUM: f64 = 0.15;
-const OVERCUT_LAYER_RANGE: f64 = 0.70;
+const OVERCUT_LAYER_RANGE: f64 = 0.55;
 
 /// Where a pivoted arm is tangent to the groove, as a fraction of the way
 /// through the programme — the outer null first, because a record plays
