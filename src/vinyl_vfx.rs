@@ -192,9 +192,12 @@ const ELLIPTICAL_RELEASE_HZ: f64 = 3.0;
 /// Taste is the other, and it is what set the figure. At 0.70 a playing
 /// record keeps the level it came in at, so LAYERS changes the record rather
 /// than its loudness, and the build arrives on the locked groove where the
-/// scene is for.
-const OVERCUT_LAYER_MINIMUM: f64 = 0.15;
-const OVERCUT_LAYER_RANGE: f64 = 0.55;
+/// scene is for. The sum is taken through `tanh`, so the loop must not drive
+/// it far past the knee: at a layer near the old 0.70 the resonant return
+/// reached about 1.7 times the dry and every peak arrived compressed, which
+/// reads as crackle. A ceiling of 0.45 keeps the return under about 0.8.
+const OVERCUT_LAYER_MINIMUM: f64 = 0.10;
+const OVERCUT_LAYER_RANGE: f64 = 0.35;
 
 /// Where a pivoted arm is tangent to the groove, as a fraction of the way
 /// through the programme — the outer null first, because a record plays
@@ -518,11 +521,17 @@ impl VinylVfxProcessor {
             VINYL_VFX_ADJACENT_GHOST => {
                 let previous_turn = self.read_polar(turns - direction, channel_count);
                 let transfer = self.amount * 0.72;
+                // The ghost is summed with the dry, and a correlated previous
+                // turn sums toward twice the dry, deep into `soft_limit` — the
+                // crackle. Normalise by the most it can add, so the dry keeps
+                // its level and the sum cannot leave the linear region.
+                let normalise = 1.0 / (1.0 + transfer);
                 for channel in 0..channel_count {
                     self.lowpass[channel] +=
                         (f64::from(previous_turn[channel]) - self.lowpass[channel]) * 0.22;
-                    frame[channel] =
-                        soft_limit(f64::from(dry[channel]) + self.lowpass[channel] * transfer);
+                    frame[channel] = soft_limit(
+                        (f64::from(dry[channel]) + self.lowpass[channel] * transfer) * normalise,
+                    );
                 }
             }
             VINYL_VFX_THREE_NEEDLES => {
@@ -1439,5 +1448,36 @@ mod tests {
         };
         let kept = middle(&wet) / middle(&wide);
         assert!(kept > 0.8, "the circuit took the middle with it: {kept}");
+    }
+
+    /// The house scenes add to the groove, they do not overload it. GHOST
+    /// sums a correlated previous turn with the dry and OVERCUT recirculates;
+    /// at the old gains the sum reached deep into `soft_limit` and read as
+    /// crackle. Both must keep clear of the knee on a hot, wide bass.
+    #[test]
+    fn ghost_and_overcut_do_not_overdrive_the_limiter() {
+        let bass: Vec<f32> = (0..REVOLUTION)
+            .flat_map(|i| {
+                let t = i as f64 / 48_000.0;
+                let mid = (t * TAU * 82.0).sin() * 0.55;
+                let side = (t * TAU * 55.0).sin() * 0.42;
+                [(mid + side) as f32, (mid - side) as f32]
+            })
+            .collect();
+        let hot = |frames: &[f32]| frames.iter().filter(|s| s.abs() > 0.95).count();
+        for (name, scene, turns) in [
+            ("adjacent ghost", VINYL_VFX_ADJACENT_GHOST, 3),
+            ("overcut", VINYL_VFX_OVERCUT, 12),
+        ] {
+            let mut processor = VinylVfxProcessor::new();
+            processor.set_scene(scene, 1.0);
+            let mut worst = 0;
+            for turn in 0..turns {
+                let mut wet = bass.clone();
+                processor.process_interleaved(&mut wet, 2, locked_groove(turn));
+                worst = worst.max(hot(&wet));
+            }
+            assert_eq!(worst, 0, "{name} drove the limiter into saturation");
+        }
     }
 }
