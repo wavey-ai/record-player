@@ -731,13 +731,28 @@ pub struct AcousticConfig {
     /// it exactly; `1` applies the full soft-knee reduction.
     #[serde(default = "default_high_frequency_acceleration_limit")]
     pub high_frequency_acceleration_limit: f64,
-    /// Scales the scratch-excited friction terms: contact noise (with its
-    /// acceleration lift), needle-drop impulse noise, and the
+    /// Scales the scratch-excited friction terms as a master: contact noise
+    /// (with its acceleration lift), needle-drop impulse noise, and the
     /// slope/curvature source texture. `1` is the historical level, bit for
-    /// bit — multiplying by exactly one changes no sample. The surface bed,
-    /// dust, groove position noise and wear crackle are untouched.
+    /// bit. Dust, groove position noise and wear crackle are untouched by it.
     #[serde(default = "default_texture_scale")]
     pub texture_scale: f64,
+    /// Per-component levels on the surface bed and the source texture, each
+    /// `1` at the historical level so a default changes no sample. They trim
+    /// what `texture_scale` carries as a master, and each has its own slider
+    /// in ACOUSTICS: the contact roar, the dust flecks, the needle-drop
+    /// impulse, the wear crackle, and the texture the source's own shape
+    /// makes.
+    #[serde(default = "default_texture_scale")]
+    pub contact_gain: f64,
+    #[serde(default = "default_texture_scale")]
+    pub dust_gain: f64,
+    #[serde(default = "default_texture_scale")]
+    pub impulse_gain: f64,
+    #[serde(default = "default_texture_scale")]
+    pub wear_gain: f64,
+    #[serde(default = "default_texture_scale")]
+    pub source_texture_gain: f64,
     /// Replaces the final hard clamp with a tanh saturator. `false` keeps
     /// the historical digital clamp, bit for bit. `tanh` has unity slope at
     /// silence, so small signals render identically and only would-be-clipped
@@ -823,6 +838,11 @@ impl Default for AcousticConfig {
             stylus_tracing_limit: default_stylus_tracing_limit(),
             high_frequency_acceleration_limit: default_high_frequency_acceleration_limit(),
             texture_scale: default_texture_scale(),
+            contact_gain: default_texture_scale(),
+            dust_gain: default_texture_scale(),
+            impulse_gain: default_texture_scale(),
+            wear_gain: default_texture_scale(),
+            source_texture_gain: default_texture_scale(),
             soft_clip: false,
         }
     }
@@ -884,6 +904,7 @@ struct AcousticReplaySnapshot {
     riaa_tilt: RiaaSpeedTilt,
     riaa_voicing: RiaaSpeedTilt,
     vinyl_voicing: VinylVoicingFilter,
+    surface_voicing: VinylVoicingFilter,
     voicing_mix: f64,
     active: bool,
     needle_lifted: bool,
@@ -1019,6 +1040,10 @@ pub struct ScratchAcousticDsp {
     riaa_voicing: RiaaSpeedTilt,
     /// The fixed seed curve blended by `voicing_mix`.
     vinyl_voicing: VinylVoicingFilter,
+    /// The same curve over the surface bed and wear crackle, which are summed
+    /// outside the gate. A second filter, because one stateful instance cannot
+    /// colour two signals at once.
+    surface_voicing: VinylVoicingFilter,
     /// Eased blend of `vinyl_voicing`, so enabling the stage does not click.
     voicing_mix: f64,
     active: bool,
@@ -1142,6 +1167,17 @@ impl ScratchAcousticDsp {
                 "textureScale must be between 0 and 4",
             ));
         }
+        for gain in [
+            config.contact_gain,
+            config.dust_gain,
+            config.impulse_gain,
+            config.wear_gain,
+            config.source_texture_gain,
+        ] {
+            if !valid_texture_scale(gain) {
+                return Err(JsValue::from_str("surface gains must be between 0 and 4"));
+            }
+        }
         if !valid_riaa_voicing_rate(config.riaa_voicing_rate) {
             return Err(JsValue::from_str("riaaVoicing must be positive"));
         }
@@ -1186,6 +1222,11 @@ impl ScratchAcousticDsp {
             riaa_tilt: RiaaSpeedTilt::new(output_sample_rate),
             riaa_voicing: RiaaSpeedTilt::new(output_sample_rate),
             vinyl_voicing: {
+                let mut filter = VinylVoicingFilter::new(output_sample_rate);
+                filter.set_curve(config.vinyl_voicing_curve as usize);
+                filter
+            },
+            surface_voicing: {
                 let mut filter = VinylVoicingFilter::new(output_sample_rate);
                 filter.set_curve(config.vinyl_voicing_curve as usize);
                 filter
@@ -1350,6 +1391,7 @@ impl ScratchAcousticDsp {
         self.riaa_tilt.reset();
         self.riaa_voicing.reset();
         self.vinyl_voicing.reset();
+        self.surface_voicing.reset();
         self.voicing_mix = self.config.vinyl_voicing;
     }
 
@@ -1537,6 +1579,9 @@ impl ScratchAcousticDsp {
             snapshot.riaa_tilt.clone_from(&self.riaa_tilt);
             snapshot.riaa_voicing.clone_from(&self.riaa_voicing);
             snapshot.vinyl_voicing.clone_from(&self.vinyl_voicing);
+            snapshot
+                .surface_voicing
+                .clone_from(&self.surface_voicing);
             snapshot.voicing_mix = self.voicing_mix;
             snapshot.active = self.active;
             snapshot.needle_lifted = self.needle_lifted;
@@ -1616,6 +1661,7 @@ impl ScratchAcousticDsp {
             riaa_tilt: self.riaa_tilt.clone(),
             riaa_voicing: self.riaa_voicing.clone(),
             vinyl_voicing: self.vinyl_voicing.clone(),
+            surface_voicing: self.surface_voicing.clone(),
             voicing_mix: self.voicing_mix,
             active: self.active,
             needle_lifted: self.needle_lifted,
@@ -1704,6 +1750,7 @@ impl ScratchAcousticDsp {
         swap_replay_field!(riaa_tilt);
         swap_replay_field!(riaa_voicing);
         swap_replay_field!(vinyl_voicing);
+        swap_replay_field!(surface_voicing);
         swap_replay_field!(voicing_mix);
         swap_replay_field!(active);
         swap_replay_field!(needle_lifted);
@@ -2195,6 +2242,63 @@ impl ScratchAcousticDsp {
     #[wasm_bindgen(getter, js_name = textureScale)]
     pub fn texture_scale(&self) -> f64 {
         self.config.texture_scale
+    }
+
+    /// Per-component levels on the surface bed and source texture, each `0`
+    /// to `4`, `1` the historical level. A default changes no sample.
+    #[wasm_bindgen(js_name = setContactGain)]
+    pub fn set_contact_gain(&mut self, gain: f64) -> Result<(), JsValue> {
+        self.config.contact_gain = valid_surface_gain(gain)?;
+        Ok(())
+    }
+
+    #[wasm_bindgen(getter, js_name = contactGain)]
+    pub fn contact_gain(&self) -> f64 {
+        self.config.contact_gain
+    }
+
+    #[wasm_bindgen(js_name = setDustGain)]
+    pub fn set_dust_gain(&mut self, gain: f64) -> Result<(), JsValue> {
+        self.config.dust_gain = valid_surface_gain(gain)?;
+        Ok(())
+    }
+
+    #[wasm_bindgen(getter, js_name = dustGain)]
+    pub fn dust_gain(&self) -> f64 {
+        self.config.dust_gain
+    }
+
+    #[wasm_bindgen(js_name = setImpulseGain)]
+    pub fn set_impulse_gain(&mut self, gain: f64) -> Result<(), JsValue> {
+        self.config.impulse_gain = valid_surface_gain(gain)?;
+        Ok(())
+    }
+
+    #[wasm_bindgen(getter, js_name = impulseGain)]
+    pub fn impulse_gain(&self) -> f64 {
+        self.config.impulse_gain
+    }
+
+    #[wasm_bindgen(js_name = setWearGain)]
+    pub fn set_wear_gain(&mut self, gain: f64) -> Result<(), JsValue> {
+        self.config.wear_gain = valid_surface_gain(gain)?;
+        Ok(())
+    }
+
+    #[wasm_bindgen(getter, js_name = wearGain)]
+    pub fn wear_gain(&self) -> f64 {
+        self.config.wear_gain
+    }
+
+    #[wasm_bindgen(js_name = setSourceTextureGain)]
+    pub fn set_source_texture_gain(&mut self, gain: f64) -> Result<(), JsValue> {
+        self.config.source_texture_gain = valid_surface_gain(gain)?;
+        Ok(())
+    }
+
+    #[wasm_bindgen(getter, js_name = sourceTextureGain)]
+    pub fn source_texture_gain(&self) -> f64 {
+        self.config.source_texture_gain
     }
 
     /// The speed-dependent half of the phono chain, live. At nominal speed
@@ -3097,7 +3201,11 @@ impl ScratchAcousticDsp {
                 (compute_contact_noise_gain(abs_rate) + acceleration_noise)
                     * self.config.texture_scale;
             let impulse_noise = if self.config.surface_enabled && self.contact_impulse > 0.0001 {
-                self.next_noise() * self.contact_impulse * 0.004 * self.config.texture_scale
+                self.next_noise()
+                    * self.contact_impulse
+                    * 0.004
+                    * self.config.texture_scale
+                    * self.config.impulse_gain
             } else {
                 0.0
             };
@@ -3107,17 +3215,21 @@ impl ScratchAcousticDsp {
                 0.0
             };
             let source_texture_gain = if self.config.acoustic_enabled {
-                compute_source_texture_gain(abs_rate, rate_delta) * self.config.texture_scale
+                compute_source_texture_gain(abs_rate, rate_delta)
+                    * self.config.texture_scale
+                    * self.config.source_texture_gain
             } else {
                 0.0
             };
             let dust_fleck = if self.config.surface_enabled {
-                self.compute_dust_fleck(self.position, abs_rate)
+                self.compute_dust_fleck(self.position, abs_rate) * self.config.dust_gain
             } else {
                 0.0
             };
             let contact_texture = if self.config.surface_enabled {
-                (groove_surface * 0.76 + highpassed_noise * 0.18) * contact_noise_gain
+                (groove_surface * 0.76 + highpassed_noise * 0.18)
+                    * contact_noise_gain
+                    * self.config.contact_gain
             } else {
                 0.0
             };
@@ -3187,6 +3299,9 @@ impl ScratchAcousticDsp {
             let voicing_curve = self.config.vinyl_voicing_curve as usize;
             if self.vinyl_voicing.curve() != voicing_curve {
                 self.vinyl_voicing.set_curve(voicing_curve);
+            }
+            if self.surface_voicing.curve() != voicing_curve {
+                self.surface_voicing.set_curve(voicing_curve);
             }
 
             for channel_index in 0..output_channel_count {
@@ -3260,12 +3375,14 @@ impl ScratchAcousticDsp {
                 } else {
                     music
                 };
-                // Both styli feed one phono stage, so the tilt lands on their
-                // sum rather than on each pickup separately.
+                // Both styli feed one phono stage, and so does the texture the
+                // source's own shape makes: the preamp colours the whole
+                // cartridge output, not the music alone.
+                let cartridge = music + source_texture;
                 let mut staged = if self.config.riaa_speed_tilt {
-                    self.riaa_tilt.process(channel_index, music)
+                    self.riaa_tilt.process(channel_index, cartridge)
                 } else {
-                    music
+                    cartridge
                 };
                 // Then the optional constant-rate RIAA mismatch and the seed
                 // voicing curve, both part of the same phono stage.
@@ -3276,7 +3393,7 @@ impl ScratchAcousticDsp {
                         .process(channel_index, staged, voicing_mix);
                 }
                 programme[channel_index] = staged;
-                source_textures[channel_index] = source_texture;
+                source_textures[channel_index] = 0.0;
             }
 
             let programme = self.high_frequency_acceleration_limiter.process_frame(
@@ -3299,8 +3416,19 @@ impl ScratchAcousticDsp {
                         * worn
                         * 0.012
                         * (abs_rate / 1.4).clamp(0.1, 1.0)
+                        * self.config.wear_gain
                 } else {
                     0.0
+                };
+                // The surface bed and the wear crackle are stylus output too,
+                // so the phono stage colours them with the same curve. They
+                // still ride outside the gate above.
+                let surface_bed = contact_texture + dust_fleck + impulse_noise + wear_crackle;
+                let surface_bed = if voicing_mix > 0.0 {
+                    self.surface_voicing
+                        .process(channel_index, surface_bed, voicing_mix)
+                } else {
+                    surface_bed
                 };
                 let mixed = (programme[channel_index]
                     + source_textures[channel_index])
@@ -3308,10 +3436,7 @@ impl ScratchAcousticDsp {
                     * edge_gain
                     * warp_gain
                     * self.angle_gate_gain
-                    + contact_texture
-                    + dust_fleck
-                    + impulse_noise
-                    + wear_crackle;
+                    + surface_bed;
                 // A clamp rectifies overs into broadband grit; tanh folds
                 // them the way a saturating stage does. Unity slope at
                 // silence keeps small signals identical either way.
@@ -4823,6 +4948,15 @@ fn valid_unit_interval(value: f64) -> bool {
 /// The friction terms scale from silent to four times the historical level.
 fn valid_texture_scale(value: f64) -> bool {
     value.is_finite() && (0.0..=4.0).contains(&value)
+}
+
+/// One per-component surface gain, checked and returned for the setter.
+fn valid_surface_gain(value: f64) -> Result<f64, JsValue> {
+    if valid_texture_scale(value) {
+        Ok(value)
+    } else {
+        Err(JsValue::from_str("surface gains must be between 0 and 4"))
+    }
 }
 
 /// The fixed RIAA voicing is a rate, so it only has to be positive and
@@ -6701,6 +6835,74 @@ mod tests {
         assert!(
             voiced < 0.5 * 2.5,
             "the voicing lifted a settled programme past its seed bound: {voiced}"
+        );
+    }
+
+    /// The surface gains are trims: each is exactly one by default, so the
+    /// historical path is bit for bit.
+    #[test]
+    fn surface_gains_default_to_unity() {
+        let config = AcousticConfig::default();
+        for gain in [
+            config.contact_gain,
+            config.dust_gain,
+            config.impulse_gain,
+            config.wear_gain,
+            config.source_texture_gain,
+        ] {
+            assert_eq!(gain, 1.0);
+        }
+    }
+
+    #[test]
+    fn surface_gain_setters_round_trip() {
+        let mut dsp = simulation_dsp();
+        dsp.set_contact_gain(2.0).unwrap();
+        assert_eq!(dsp.contact_gain(), 2.0);
+        dsp.set_dust_gain(0.5).unwrap();
+        assert_eq!(dsp.dust_gain(), 0.5);
+        dsp.set_impulse_gain(3.0).unwrap();
+        assert_eq!(dsp.impulse_gain(), 3.0);
+        dsp.set_wear_gain(0.0).unwrap();
+        assert_eq!(dsp.wear_gain(), 0.0);
+        dsp.set_source_texture_gain(4.0).unwrap();
+        assert_eq!(dsp.source_texture_gain(), 4.0);
+        // The rejection predicate is checked directly: building the
+        // wasm-bindgen error is not possible off the wasm target.
+        assert!(!valid_texture_scale(-0.1));
+        assert!(!valid_texture_scale(4.1));
+        assert!(!valid_texture_scale(f64::NAN));
+        assert!(valid_texture_scale(1.0));
+    }
+
+    /// The surface bed is stylus output, so a character colours it with the
+    /// same curve as the music. A needle-drop impulse over a silent programme
+    /// leaves only the bed to hear.
+    #[test]
+    fn voicing_colours_the_surface_bed() {
+        fn render_impulse(voicing: f64) -> f32 {
+            let mut config = AcousticConfig::default();
+            config.surface_enabled = true;
+            config.vinyl_voicing = voicing;
+            let mut dsp = ScratchAcousticDsp::new_internal(48_000.0, config);
+            dsp.source_sample_rate = 48_000.0;
+            dsp.channels = Arc::new(vec![vec![0.0_f32; 4_800]]);
+            dsp.window_start = 0;
+            dsp.window_end = 4_800;
+            dsp.total_frames = 4_800;
+            dsp.start();
+            dsp.set_transport(false, 1.0, 0.0, 0.0);
+            dsp.contact_impulse = 1.0;
+            dsp.render(8, 1);
+            *dsp.rendered_samples().last().unwrap()
+        }
+
+        let dry = render_impulse(0.0);
+        let wet = render_impulse(1.0);
+        assert!(dry != 0.0, "no surface impulse rendered to colour");
+        assert!(
+            dry != wet,
+            "voicing did not reach the surface bed: {dry} vs {wet}"
         );
     }
 
