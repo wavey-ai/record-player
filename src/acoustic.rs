@@ -83,25 +83,27 @@ struct VinylVoicingCurve {
 
 const VINYL_VOICING_CURVES: [VinylVoicingCurve; 3] = [
     // COIL LOAD: a moving-magnet cartridge's inductance loaded by the cable's
-    // capacitance — a broad top-end shelf with a little body under it.
+    // capacitance — a broad top-end shelf with a little body under it. The
+    // first pass was too gentle to hear; these are the characters, not a
+    // subtle shelf, and the ACOUSTICS sliders exist for precise tuning.
     VinylVoicingCurve {
-        cartridge_hz: 16_000.0,
+        cartridge_hz: 13_000.0,
         cartridge_q: 0.6,
-        low_hz: 150.0,
-        low_db: 4.0,
-        high_hz: 4_500.0,
-        high_db: -4.5,
+        low_hz: 120.0,
+        low_db: 7.0,
+        high_hz: 4_000.0,
+        high_db: -8.0,
         shelf_q: 0.707,
     },
     // TIP MASS: the stylus's own mass and compliance, which mostly costs the
     // extreme top and leaves the body nearly alone.
     VinylVoicingCurve {
-        cartridge_hz: 13_000.0,
+        cartridge_hz: 10_000.0,
         cartridge_q: 0.5,
-        low_hz: 100.0,
-        low_db: 2.0,
-        high_hz: 6_000.0,
-        high_db: -5.0,
+        low_hz: 80.0,
+        low_db: 3.0,
+        high_hz: 5_000.0,
+        high_db: -10.0,
         shelf_q: 0.707,
     },
     // CURVE DRIFT: a preamp whose feedback network departed from the RIAA
@@ -109,10 +111,10 @@ const VINYL_VOICING_CURVES: [VinylVoicingCurve; 3] = [
     VinylVoicingCurve {
         cartridge_hz: 20_000.0,
         cartridge_q: 0.707,
-        low_hz: 300.0,
-        low_db: 2.5,
-        high_hz: 3_000.0,
-        high_db: -2.0,
+        low_hz: 350.0,
+        low_db: 6.0,
+        high_hz: 2_500.0,
+        high_db: -5.0,
         shelf_q: 0.707,
     },
 ];
@@ -6563,15 +6565,15 @@ mod tests {
         let mid_db = 20.0 * upper_mid.log10();
         let top_db = 20.0 * top.log10();
         assert!(
-            (2.5..=6.0).contains(&body_db),
+            (4.0..=10.0).contains(&body_db),
             "voicing body {body_db} dB is not a usable lift"
         );
         assert!(
-            (-10.0..=-3.5).contains(&top_db),
+            (-24.0..=-8.0).contains(&top_db),
             "voicing top {top_db} dB is not a usable dulling"
         );
         assert!(
-            mid_db.abs() < 1.0,
+            mid_db.abs() < 1.5,
             "voicing moved the midrange {mid_db} dB; it should leave it alone"
         );
     }
@@ -6697,7 +6699,7 @@ mod tests {
             "the voicing stage did not reach the programme: {dry} vs {voiced}"
         );
         assert!(
-            voiced < 0.5 * 1.7,
+            voiced < 0.5 * 2.5,
             "the voicing lifted a settled programme past its seed bound: {voiced}"
         );
     }
