@@ -58,6 +58,64 @@ const RIAA_TILT_MAX_RATE: f64 = 4.0;
 /// A cartridge really does put out more voltage the faster the groove passes,
 /// without limit. Bound it so a runaway rate cannot blow up the programme.
 const MAX_CARTRIDGE_VELOCITY_GAIN: f64 = 4.0;
+/// Opt-in vinyl voicing seed: a fixed, deliberately non-RIAA curve blended
+/// over the transparent master. A matched cut/playback RIAA pair is exactly
+/// identity, so warmth cannot come from the standard curve. What is left is
+/// the parts that do not cancel — the cartridge and arm losing the top end,
+/// and a real preamp departing from the textbook curve. These are seed
+/// values, not a calibrated hardware profile.
+///
+/// `AcousticConfig.vinyl_voicing_curve` selects one of these shapes. Each is
+/// a real phono-chain mechanism, not an arbitrary EQ:
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct VinylVoicingCurve {
+    /// The cartridge/arm mechanical top-end loss.
+    cartridge_hz: f64,
+    cartridge_q: f64,
+    /// The preamp's departure from flat below the mids.
+    low_hz: f64,
+    low_db: f64,
+    /// The preamp's departure from flat above the mids.
+    high_hz: f64,
+    high_db: f64,
+    shelf_q: f64,
+}
+
+const VINYL_VOICING_CURVES: [VinylVoicingCurve; 3] = [
+    // COIL LOAD: a moving-magnet cartridge's inductance loaded by the cable's
+    // capacitance — a broad top-end shelf with a little body under it.
+    VinylVoicingCurve {
+        cartridge_hz: 16_000.0,
+        cartridge_q: 0.6,
+        low_hz: 150.0,
+        low_db: 4.0,
+        high_hz: 4_500.0,
+        high_db: -4.5,
+        shelf_q: 0.707,
+    },
+    // TIP MASS: the stylus's own mass and compliance, which mostly costs the
+    // extreme top and leaves the body nearly alone.
+    VinylVoicingCurve {
+        cartridge_hz: 13_000.0,
+        cartridge_q: 0.5,
+        low_hz: 100.0,
+        low_db: 2.0,
+        high_hz: 6_000.0,
+        high_db: -5.0,
+        shelf_q: 0.707,
+    },
+    // CURVE DRIFT: a preamp whose feedback network departed from the RIAA
+    // curve — a low-mid lift and a broad presence dip, no cartridge pole.
+    VinylVoicingCurve {
+        cartridge_hz: 20_000.0,
+        cartridge_q: 0.707,
+        low_hz: 300.0,
+        low_db: 2.5,
+        high_hz: 3_000.0,
+        high_db: -2.0,
+        shelf_q: 0.707,
+    },
+];
 const DRAG_LOWPASS_MAX_HZ: f64 = 19_000.0;
 const DRAG_LOWPASS_RATE_KNEE: f64 = 0.95;
 const TRACING_LOSS_START_RATE: f64 = 2.5;
@@ -286,6 +344,208 @@ impl RiaaSpeedTilt {
     }
 }
 
+/// A direct-form-I RBJ biquad, used only by the opt-in voicing stage. The
+/// coefficients come from the Audio EQ Cookbook forms so the seed curve is a
+/// plain, inspectable filter rather than a fitted table.
+#[derive(Clone, Copy, Debug, Default)]
+struct VoicingBiquad {
+    b0: f64,
+    b1: f64,
+    b2: f64,
+    a1: f64,
+    a2: f64,
+    x1: f64,
+    x2: f64,
+    y1: f64,
+    y2: f64,
+}
+
+impl VoicingBiquad {
+    fn from_coefficients(b0: f64, b1: f64, b2: f64, a0: f64, a1: f64, a2: f64) -> Self {
+        Self {
+            b0: b0 / a0,
+            b1: b1 / a0,
+            b2: b2 / a0,
+            a1: a1 / a0,
+            a2: a2 / a0,
+            ..Default::default()
+        }
+    }
+
+    fn lowpass(cutoff_hz: f64, q: f64, sample_rate: f64) -> Self {
+        let w0 = std::f64::consts::TAU * (cutoff_hz / sample_rate).clamp(0.0, 0.5);
+        let cos_w0 = w0.cos();
+        let alpha = w0.sin() / (2.0 * q.max(1e-4));
+        Self::from_coefficients(
+            (1.0 - cos_w0) / 2.0,
+            1.0 - cos_w0,
+            (1.0 - cos_w0) / 2.0,
+            1.0 + alpha,
+            -2.0 * cos_w0,
+            1.0 - alpha,
+        )
+    }
+
+    fn low_shelf(freq_hz: f64, q: f64, gain_db: f64, sample_rate: f64) -> Self {
+        let a = 10.0_f64.powf(gain_db / 40.0);
+        let w0 = std::f64::consts::TAU * (freq_hz / sample_rate).clamp(0.0, 0.5);
+        let cos_w0 = w0.cos();
+        let alpha = w0.sin() / (2.0 * q.max(1e-4));
+        let root = 2.0 * a.sqrt() * alpha;
+        Self::from_coefficients(
+            a * ((a + 1.0) - (a - 1.0) * cos_w0 + root),
+            2.0 * a * ((a - 1.0) - (a + 1.0) * cos_w0),
+            a * ((a + 1.0) - (a - 1.0) * cos_w0 - root),
+            (a + 1.0) + (a - 1.0) * cos_w0 + root,
+            -2.0 * ((a - 1.0) + (a + 1.0) * cos_w0),
+            (a + 1.0) + (a - 1.0) * cos_w0 - root,
+        )
+    }
+
+    fn high_shelf(freq_hz: f64, q: f64, gain_db: f64, sample_rate: f64) -> Self {
+        let a = 10.0_f64.powf(gain_db / 40.0);
+        let w0 = std::f64::consts::TAU * (freq_hz / sample_rate).clamp(0.0, 0.5);
+        let cos_w0 = w0.cos();
+        let alpha = w0.sin() / (2.0 * q.max(1e-4));
+        let root = 2.0 * a.sqrt() * alpha;
+        Self::from_coefficients(
+            a * ((a + 1.0) + (a - 1.0) * cos_w0 + root),
+            -2.0 * a * ((a - 1.0) + (a + 1.0) * cos_w0),
+            a * ((a + 1.0) + (a - 1.0) * cos_w0 - root),
+            (a + 1.0) - (a - 1.0) * cos_w0 + root,
+            2.0 * ((a - 1.0) - (a + 1.0) * cos_w0),
+            (a + 1.0) - (a - 1.0) * cos_w0 - root,
+        )
+    }
+
+    fn process(&mut self, x: f64) -> f64 {
+        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
+            - self.a1 * self.y1
+            - self.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = y;
+        y
+    }
+
+    fn reset(&mut self) {
+        self.x1 = 0.0;
+        self.x2 = 0.0;
+        self.y1 = 0.0;
+        self.y2 = 0.0;
+    }
+
+    /// New coefficients over the existing delay state, so changing curve does
+    /// not zero a running filter and click.
+    fn retuned(mut self, previous: &Self) -> Self {
+        self.x1 = previous.x1;
+        self.x2 = previous.x2;
+        self.y1 = previous.y1;
+        self.y2 = previous.y2;
+        self
+    }
+}
+
+/// The opt-in "vinyl voicing" seed curve: the non-cancelling half of a real
+/// phono chain. A matched RIAA cut/playback pair is exactly the identity, so
+/// the audible character of a record is not the standard curve — it is the
+/// mismatch left after it. One inspectable seed is blended over the
+/// transparent master by `amount`. At `amount == 0` the stage adds no
+/// arithmetic to the signal. The shape is one of [`VINYL_VOICING_CURVES`].
+#[derive(Clone, Debug)]
+struct VinylVoicingFilter {
+    curve: usize,
+    sample_rate: f64,
+    cartridge: [VoicingBiquad; 2],
+    low_shelf: [VoicingBiquad; 2],
+    high_shelf: [VoicingBiquad; 2],
+}
+
+impl VinylVoicingFilter {
+    fn new(sample_rate: f64) -> Self {
+        let sample_rate = if sample_rate.is_finite() && sample_rate > 0.0 {
+            sample_rate
+        } else {
+            48_000.0
+        };
+        let mut filter = Self {
+            curve: usize::MAX,
+            sample_rate,
+            cartridge: [VoicingBiquad::default(); 2],
+            low_shelf: [VoicingBiquad::default(); 2],
+            high_shelf: [VoicingBiquad::default(); 2],
+        };
+        filter.set_curve(0);
+        filter
+    }
+
+    fn curve(&self) -> usize {
+        self.curve
+    }
+
+    /// Rebuild the coefficients for one of [`VINYL_VOICING_CURVES`], keeping
+    /// the running delay so a curve change does not click. Unknown indices
+    /// clamp to the last curve; the host validates before it gets here.
+    fn set_curve(&mut self, curve: usize) {
+        let curve = curve.min(VINYL_VOICING_CURVES.len() - 1);
+        if curve == self.curve {
+            return;
+        }
+        self.curve = curve;
+        let spec = VINYL_VOICING_CURVES[curve];
+        for channel in 0..2 {
+            let previous = self.cartridge[channel];
+            self.cartridge[channel] = VoicingBiquad::lowpass(
+                spec.cartridge_hz,
+                spec.cartridge_q,
+                self.sample_rate,
+            )
+            .retuned(&previous);
+            let previous = self.low_shelf[channel];
+            self.low_shelf[channel] = VoicingBiquad::low_shelf(
+                spec.low_hz,
+                spec.shelf_q,
+                spec.low_db,
+                self.sample_rate,
+            )
+            .retuned(&previous);
+            let previous = self.high_shelf[channel];
+            self.high_shelf[channel] = VoicingBiquad::high_shelf(
+                spec.high_hz,
+                spec.shelf_q,
+                spec.high_db,
+                self.sample_rate,
+            )
+            .retuned(&previous);
+        }
+    }
+
+    fn reset(&mut self) {
+        for filter in self
+            .cartridge
+            .iter_mut()
+            .chain(self.low_shelf.iter_mut())
+            .chain(self.high_shelf.iter_mut())
+        {
+            filter.reset();
+        }
+    }
+
+    /// Blend the fixed curve over the dry signal. `amount == 0` returns the
+    /// input unchanged for any finite `wet`, so the default path is bit-exact.
+    fn process(&mut self, channel: usize, sample: f64, amount: f64) -> f64 {
+        if channel >= 2 {
+            return sample;
+        }
+        let dry = sample;
+        let cartridge = self.cartridge[channel].process(dry);
+        let body = self.low_shelf[channel].process(cartridge);
+        let wet = self.high_shelf[channel].process(body);
+        dry + amount * (wet - dry)
+    }
+}
+
 /// A one-pole low-pass and its exact residual form a complementary split. The
 /// shared envelope only scales that residual; the base band is never run
 /// through a blanket low-pass or full-band gain stage.
@@ -496,10 +756,34 @@ pub struct AcousticConfig {
     /// `cartridge_velocity_gain`; the two are meant to run together.
     #[serde(default = "default_true")]
     pub riaa_speed_tilt: bool,
+    /// A fixed, deliberate mismatch of the RIAA pair: the same pre-emphasis /
+    /// de-emphasis residue as [`RiaaSpeedTilt`], but held at a constant,
+    /// caller-chosen rate rather than following the record. `1.0` is exactly
+    /// the standard curve and is bit-exact transparent. Above `1.0` it trades
+    /// top end for body — the warmth a matched cut and playback cannot
+    /// otherwise produce. Off by default; a seed, not a calibrated hardware
+    /// profile.
+    #[serde(default = "default_riaa_voicing_rate")]
+    pub riaa_voicing_rate: f64,
+    /// Opt-in vinyl voicing amount in `[0, 1]`: blends a fixed seed curve
+    /// (a low-end preamp shelf plus cartridge/arm top-end loss) over the
+    /// transparent master. `0` is bypassed bit-exactly. The full amount is a
+    /// clearly audible warmth, not a subtle shelf. See
+    /// [`VinylVoicingFilter`].
+    #[serde(default)]
+    pub vinyl_voicing: f64,
+    /// Which [`VINYL_VOICING_CURVES`] shape `vinyl_voicing` blends: `0` coil
+    /// load, `1` tip mass, `2` curve drift. Out-of-range values are rejected.
+    #[serde(default)]
+    pub vinyl_voicing_curve: u32,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_riaa_voicing_rate() -> f64 {
+    1.0
 }
 
 fn default_max_rate() -> f64 {
@@ -531,6 +815,9 @@ impl Default for AcousticConfig {
             surface_enabled: false,
             cartridge_velocity_gain: default_true(),
             riaa_speed_tilt: default_true(),
+            riaa_voicing_rate: default_riaa_voicing_rate(),
+            vinyl_voicing: 0.0,
+            vinyl_voicing_curve: 0,
             stylus_tracing_limit: default_stylus_tracing_limit(),
             high_frequency_acceleration_limit: default_high_frequency_acceleration_limit(),
             texture_scale: default_texture_scale(),
@@ -593,6 +880,9 @@ struct AcousticReplaySnapshot {
     drag_lowpass_state: Vec<f64>,
     high_frequency_acceleration_limiter: HighFrequencyAccelerationLimiter,
     riaa_tilt: RiaaSpeedTilt,
+    riaa_voicing: RiaaSpeedTilt,
+    vinyl_voicing: VinylVoicingFilter,
+    voicing_mix: f64,
     active: bool,
     needle_lifted: bool,
     hand_contact: bool,
@@ -722,6 +1012,13 @@ pub struct ScratchAcousticDsp {
     drag_lowpass_state: Vec<f64>,
     high_frequency_acceleration_limiter: HighFrequencyAccelerationLimiter,
     riaa_tilt: RiaaSpeedTilt,
+    /// Constant-rate RIAA mismatch for optional vinyl warmth. Always run so a
+    /// change eases from a warm state and `1.0` stays bit-exact.
+    riaa_voicing: RiaaSpeedTilt,
+    /// The fixed seed curve blended by `voicing_mix`.
+    vinyl_voicing: VinylVoicingFilter,
+    /// Eased blend of `vinyl_voicing`, so enabling the stage does not click.
+    voicing_mix: f64,
     active: bool,
     needle_lifted: bool,
     hand_contact: bool,
@@ -843,6 +1140,17 @@ impl ScratchAcousticDsp {
                 "textureScale must be between 0 and 4",
             ));
         }
+        if !valid_riaa_voicing_rate(config.riaa_voicing_rate) {
+            return Err(JsValue::from_str("riaaVoicing must be positive"));
+        }
+        if !valid_unit_interval(config.vinyl_voicing) {
+            return Err(JsValue::from_str(
+                "vinylVoicing must be between 0 and 1",
+            ));
+        }
+        if config.vinyl_voicing_curve as usize >= VINYL_VOICING_CURVES.len() {
+            return Err(JsValue::from_str("vinylVoicingCurve is out of range"));
+        }
         Ok(Self::new_internal(output_sample_rate, config))
     }
 
@@ -874,6 +1182,13 @@ impl ScratchAcousticDsp {
             drag_lowpass_state: Vec::new(),
             high_frequency_acceleration_limiter: HighFrequencyAccelerationLimiter::default(),
             riaa_tilt: RiaaSpeedTilt::new(output_sample_rate),
+            riaa_voicing: RiaaSpeedTilt::new(output_sample_rate),
+            vinyl_voicing: {
+                let mut filter = VinylVoicingFilter::new(output_sample_rate);
+                filter.set_curve(config.vinyl_voicing_curve as usize);
+                filter
+            },
+            voicing_mix: config.vinyl_voicing,
             active: false,
             needle_lifted: false,
             hand_contact: false,
@@ -1026,6 +1341,16 @@ impl ScratchAcousticDsp {
         Ok(())
     }
 
+    /// Clear the phono-stage filters together. The voicing blend returns to
+    /// its configured target so a deck that starts with voicing on is at the
+    /// target immediately rather than fading in.
+    fn reset_phono_filters(&mut self) {
+        self.riaa_tilt.reset();
+        self.riaa_voicing.reset();
+        self.vinyl_voicing.reset();
+        self.voicing_mix = self.config.vinyl_voicing;
+    }
+
     #[wasm_bindgen(js_name = clearWindow)]
     pub fn clear_window(&mut self) {
         self.channels = Arc::new(Vec::new());
@@ -1041,7 +1366,7 @@ impl ScratchAcousticDsp {
         self.frames_since_motion = 0;
         self.last_output_samples.clear();
         self.high_frequency_acceleration_limiter.reset();
-        self.riaa_tilt.reset();
+        self.reset_phono_filters();
         self.window_miss_frames = 0;
         self.window_programme_gain = 1.0;
         self.ended = false;
@@ -1073,7 +1398,7 @@ impl ScratchAcousticDsp {
         self.contact_impulse = 0.0;
         self.last_output_samples.clear();
         self.high_frequency_acceleration_limiter.reset();
-        self.riaa_tilt.reset();
+        self.reset_phono_filters();
         self.window_miss_frames = 0;
         self.window_programme_gain = 1.0;
         self.ended = false;
@@ -1208,6 +1533,9 @@ impl ScratchAcousticDsp {
                 .high_frequency_acceleration_limiter
                 .clone_from(&self.high_frequency_acceleration_limiter);
             snapshot.riaa_tilt.clone_from(&self.riaa_tilt);
+            snapshot.riaa_voicing.clone_from(&self.riaa_voicing);
+            snapshot.vinyl_voicing.clone_from(&self.vinyl_voicing);
+            snapshot.voicing_mix = self.voicing_mix;
             snapshot.active = self.active;
             snapshot.needle_lifted = self.needle_lifted;
             snapshot.hand_contact = self.hand_contact;
@@ -1284,6 +1612,9 @@ impl ScratchAcousticDsp {
             drag_lowpass_state: self.drag_lowpass_state.clone(),
             high_frequency_acceleration_limiter: self.high_frequency_acceleration_limiter.clone(),
             riaa_tilt: self.riaa_tilt.clone(),
+            riaa_voicing: self.riaa_voicing.clone(),
+            vinyl_voicing: self.vinyl_voicing.clone(),
+            voicing_mix: self.voicing_mix,
             active: self.active,
             needle_lifted: self.needle_lifted,
             hand_contact: self.hand_contact,
@@ -1369,6 +1700,9 @@ impl ScratchAcousticDsp {
         swap_replay_field!(drag_lowpass_state);
         swap_replay_field!(high_frequency_acceleration_limiter);
         swap_replay_field!(riaa_tilt);
+        swap_replay_field!(riaa_voicing);
+        swap_replay_field!(vinyl_voicing);
+        swap_replay_field!(voicing_mix);
         swap_replay_field!(active);
         swap_replay_field!(needle_lifted);
         swap_replay_field!(hand_contact);
@@ -1661,7 +1995,7 @@ impl ScratchAcousticDsp {
         self.platter_rotation_turns = rotation_turns;
         self.drag_lowpass_state.clear();
         self.high_frequency_acceleration_limiter.reset();
-        self.riaa_tilt.reset();
+        self.reset_phono_filters();
         self.hand_contact = false;
         self.grip = 0.0;
         self.release_grip = 0.0;
@@ -1873,6 +2207,59 @@ impl ScratchAcousticDsp {
     #[wasm_bindgen(getter, js_name = riaaSpeedTilt)]
     pub fn riaa_speed_tilt(&self) -> bool {
         self.config.riaa_speed_tilt
+    }
+
+    /// Optional constant-rate RIAA mismatch for vinyl warmth, live. `1.0` is
+    /// the standard curve and is bit-exact transparent; values above it trade
+    /// top end for body. The rate is clamped to the same `[0.1, 4.0]` window
+    /// as the speed tilt.
+    #[wasm_bindgen(js_name = setRiaaVoicing)]
+    pub fn set_riaa_voicing(&mut self, rate: f64) -> Result<(), JsValue> {
+        if !valid_riaa_voicing_rate(rate) {
+            return Err(JsValue::from_str("riaaVoicing must be positive"));
+        }
+        self.config.riaa_voicing_rate = rate;
+        Ok(())
+    }
+
+    #[wasm_bindgen(getter, js_name = riaaVoicing)]
+    pub fn riaa_voicing(&self) -> f64 {
+        self.config.riaa_voicing_rate
+    }
+
+    /// Optional vinyl voicing amount in `[0, 1]`, live. `0` is bypassed
+    /// bit-exactly and the blend eases, so toggling it does not click.
+    #[wasm_bindgen(js_name = setVinylVoicing)]
+    pub fn set_vinyl_voicing(&mut self, amount: f64) -> Result<(), JsValue> {
+        if !valid_unit_interval(amount) {
+            return Err(JsValue::from_str(
+                "vinylVoicing must be between 0 and 1",
+            ));
+        }
+        self.config.vinyl_voicing = amount;
+        Ok(())
+    }
+
+    #[wasm_bindgen(getter, js_name = vinylVoicing)]
+    pub fn vinyl_voicing(&self) -> f64 {
+        self.config.vinyl_voicing
+    }
+
+    /// Selects one of the voicing shapes live: `0` coil load, `1` tip mass,
+    /// `2` curve drift. The running filter keeps its delay, so switching does
+    /// not click.
+    #[wasm_bindgen(js_name = setVinylVoicingCurve)]
+    pub fn set_vinyl_voicing_curve(&mut self, curve: u32) -> Result<(), JsValue> {
+        if curve as usize >= VINYL_VOICING_CURVES.len() {
+            return Err(JsValue::from_str("vinylVoicingCurve is out of range"));
+        }
+        self.config.vinyl_voicing_curve = curve;
+        Ok(())
+    }
+
+    #[wasm_bindgen(getter, js_name = vinylVoicingCurve)]
+    pub fn vinyl_voicing_curve(&self) -> u32 {
+        self.config.vinyl_voicing_curve
     }
 
     #[wasm_bindgen(js_name = setSoftClip)]
@@ -2770,6 +3157,35 @@ impl ScratchAcousticDsp {
                     1.0 - (-1.0 / (self.output_sample_rate * MOVEMENT_GAIN_SECONDS)).exp();
                 self.riaa_tilt.follow_rate(abs_rate, alpha);
             }
+            // The opt-in fixed mismatch eases toward its configured rate from
+            // the same warm state, so a change never restructures the filter in
+            // one sample. At the default 1.0 it is bit-exact and costless.
+            {
+                let alpha =
+                    1.0 - (-1.0 / (self.output_sample_rate * MOVEMENT_GAIN_SECONDS)).exp();
+                self.riaa_voicing
+                    .follow_rate(self.config.riaa_voicing_rate, alpha);
+            }
+            // Same easing for the voicing blend, so switching the stage on or
+            // off ramps over a few milliseconds instead of stepping.
+            let voicing_target = self.config.vinyl_voicing.clamp(0.0, 1.0);
+            if self.voicing_mix.is_nan() {
+                self.voicing_mix = voicing_target;
+            } else {
+                let voicing_alpha =
+                    1.0 - (-1.0 / (self.output_sample_rate * MOVEMENT_GAIN_SECONDS)).exp();
+                self.voicing_mix += (voicing_target - self.voicing_mix) * voicing_alpha;
+                // Converged is equal: a fully-on or fully-off stage is exact.
+                if (self.voicing_mix - voicing_target).abs() < 1.0e-6 {
+                    self.voicing_mix = voicing_target;
+                }
+            }
+            let voicing_mix = self.voicing_mix;
+            // The curve only moves when the host selects another character.
+            let voicing_curve = self.config.vinyl_voicing_curve as usize;
+            if self.vinyl_voicing.curve() != voicing_curve {
+                self.vinyl_voicing.set_curve(voicing_curve);
+            }
 
             for channel_index in 0..output_channel_count {
                 if self.needle_lifted {
@@ -2844,11 +3260,20 @@ impl ScratchAcousticDsp {
                 };
                 // Both styli feed one phono stage, so the tilt lands on their
                 // sum rather than on each pickup separately.
-                programme[channel_index] = if self.config.riaa_speed_tilt {
+                let mut staged = if self.config.riaa_speed_tilt {
                     self.riaa_tilt.process(channel_index, music)
                 } else {
                     music
                 };
+                // Then the optional constant-rate RIAA mismatch and the seed
+                // voicing curve, both part of the same phono stage.
+                staged = self.riaa_voicing.process(channel_index, staged);
+                if voicing_mix > 0.0 {
+                    staged = self
+                        .vinyl_voicing
+                        .process(channel_index, staged, voicing_mix);
+                }
+                programme[channel_index] = staged;
                 source_textures[channel_index] = source_texture;
             }
 
@@ -4396,6 +4821,12 @@ fn valid_unit_interval(value: f64) -> bool {
 /// The friction terms scale from silent to four times the historical level.
 fn valid_texture_scale(value: f64) -> bool {
     value.is_finite() && (0.0..=4.0).contains(&value)
+}
+
+/// The fixed RIAA voicing is a rate, so it only has to be positive and
+/// finite; the tilt clamps it to its own `[0.1, 4.0]` window.
+fn valid_riaa_voicing_rate(value: f64) -> bool {
+    value.is_finite() && value > 0.0
 }
 
 fn sign_nonzero(primary: f64, fallback: f64) -> f64 {
@@ -6058,6 +6489,217 @@ mod tests {
                 "presence at rate {rate} should survive the speed change"
             );
         }
+    }
+
+    /// Both opt-in voicing stages must be neutral out of the box, or the
+    /// transparent-master rule is broken by default.
+    #[test]
+    fn default_config_leaves_voicing_transparent() {
+        let config = AcousticConfig::default();
+        assert_eq!(config.riaa_voicing_rate, 1.0);
+        assert_eq!(config.vinyl_voicing, 0.0);
+    }
+
+    /// The fixed-rate voicing is the same filter as the speed tilt, so at a
+    /// rate above nominal it holds DC flat and softens the top by `1/rate` —
+    /// the only way a matched RIAA pair can colour anything.
+    #[test]
+    fn riaa_voicing_matches_the_fixed_riaa_curve() {
+        assert!((tilt_gain(1.3, false) - 1.0).abs() < 1.0e-6);
+        assert!((tilt_gain(1.3, true) - 1.0 / 1.3).abs() < 1.0e-6);
+        // And the default rate is the identity, not merely close to it.
+        assert!((tilt_gain(1.0, true) - 1.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn riaa_voicing_setter_validates_and_round_trips() {
+        let mut dsp = simulation_dsp();
+        assert_eq!(dsp.riaa_voicing(), 1.0);
+        dsp.set_riaa_voicing(1.25).unwrap();
+        assert_eq!(dsp.riaa_voicing(), 1.25);
+        // The rejection predicate is checked directly: building the
+        // wasm-bindgen error is not possible off the wasm target.
+        assert!(!valid_riaa_voicing_rate(0.0));
+        assert!(!valid_riaa_voicing_rate(-1.0));
+        assert!(!valid_riaa_voicing_rate(f64::NAN));
+        assert!(valid_riaa_voicing_rate(0.5));
+    }
+
+    /// Steady-state gain of the seed curve, measured by driving a sine and
+    /// comparing RMS in and out. Phase is irrelevant to a magnitude read.
+    fn voicing_gain(filter: &mut VinylVoicingFilter, frequency_hz: f64, amount: f64) -> f64 {
+        let sample_rate = 48_000.0;
+        let omega = std::f64::consts::TAU * frequency_hz / sample_rate;
+        let period = (sample_rate / frequency_hz).max(1.0) as usize;
+        let settle = period * 40;
+        let measure = period * 200;
+        let mut phase = 0.0_f64;
+        let mut input_energy = 0.0_f64;
+        let mut output_energy = 0.0_f64;
+        for n in 0..(settle + measure) {
+            phase += omega;
+            let input = phase.sin();
+            let output = filter.process(0, input, amount);
+            if n >= settle {
+                input_energy += input * input;
+                output_energy += output * output;
+            }
+        }
+        (output_energy / input_energy).sqrt()
+    }
+
+    /// The seed curve must actually colour the programme: a real lift in the
+    /// body and a real dulling of the top, not a shelf so small the ear
+    /// cannot tell it moved. Measured on the pray4me reference, the old
+    /// ±1.5 dB seed was under 1 dB of change on the track and read as no
+    /// effect; this pins a clearly audible tilt.
+    #[test]
+    fn vinyl_voicing_seed_curve_adds_body_and_softens_the_top() {
+        let mut filter = VinylVoicingFilter::new(48_000.0);
+        let body = voicing_gain(&mut filter, 60.0, 1.0);
+        let upper_mid = voicing_gain(&mut filter, 1_000.0, 1.0);
+        let top = voicing_gain(&mut filter, 15_000.0, 1.0);
+        let body_db = 20.0 * body.log10();
+        let mid_db = 20.0 * upper_mid.log10();
+        let top_db = 20.0 * top.log10();
+        assert!(
+            (2.5..=6.0).contains(&body_db),
+            "voicing body {body_db} dB is not a usable lift"
+        );
+        assert!(
+            (-10.0..=-3.5).contains(&top_db),
+            "voicing top {top_db} dB is not a usable dulling"
+        );
+        assert!(
+            mid_db.abs() < 1.0,
+            "voicing moved the midrange {mid_db} dB; it should leave it alone"
+        );
+    }
+
+    /// `amount == 0` must be bit-exact, not approximately transparent, for
+    /// every curve.
+    #[test]
+    fn vinyl_voicing_is_bit_exact_at_zero() {
+        for curve in 0..VINYL_VOICING_CURVES.len() {
+            let mut filter = VinylVoicingFilter::new(48_000.0);
+            filter.set_curve(curve);
+            let mut phase = 0.0_f64;
+            for _ in 0..10_000 {
+                phase += 0.13;
+                let input = (phase.sin() * 0.8).clamp(-1.0, 1.0);
+                assert_eq!(filter.process(0, input, 0.0), input);
+                assert_eq!(filter.process(1, input, 0.0), input);
+            }
+        }
+    }
+
+    #[test]
+    fn vinyl_voicing_setter_validates_and_round_trips() {
+        let mut dsp = simulation_dsp();
+        assert_eq!(dsp.vinyl_voicing(), 0.0);
+        dsp.set_vinyl_voicing(0.5).unwrap();
+        assert_eq!(dsp.vinyl_voicing(), 0.5);
+        assert!(!valid_unit_interval(1.5));
+        assert!(!valid_unit_interval(-0.1));
+        assert!(!valid_unit_interval(f64::NAN));
+        assert!(valid_unit_interval(0.5));
+    }
+
+    /// Every curve is a usable tilt: body up, top down, the mids alone.
+    #[test]
+    fn every_voicing_curve_tilts_body_up_and_top_down() {
+        for curve in 0..VINYL_VOICING_CURVES.len() {
+            let mut filter = VinylVoicingFilter::new(48_000.0);
+            filter.set_curve(curve);
+            let body = 20.0 * voicing_gain(&mut filter, 60.0, 1.0).log10();
+            let mid = 20.0 * voicing_gain(&mut filter, 1_000.0, 1.0).log10();
+            let top = 20.0 * voicing_gain(&mut filter, 15_000.0, 1.0).log10();
+            assert!(body > 0.5, "curve {curve} body {body} dB");
+            assert!(top < -1.0, "curve {curve} top {top} dB");
+            assert!(body - top > 4.0, "curve {curve} tilt {} dB too small", body - top);
+            assert!(mid.abs() < 3.0, "curve {curve} mid {mid} dB");
+        }
+    }
+
+    /// The curves are genuinely different shapes, not one shape at three
+    /// amounts: tip mass costs the top and leaves the body, curve drift is
+    /// the mildest, and coil load sits between them at the very top.
+    #[test]
+    fn voicing_curves_are_distinct_shapes() {
+        let mut coil = VinylVoicingFilter::new(48_000.0);
+        coil.set_curve(0);
+        let mut tip = VinylVoicingFilter::new(48_000.0);
+        tip.set_curve(1);
+        let mut drift = VinylVoicingFilter::new(48_000.0);
+        drift.set_curve(2);
+        let coil_top = voicing_gain(&mut coil, 15_000.0, 1.0);
+        let tip_top = voicing_gain(&mut tip, 15_000.0, 1.0);
+        let drift_top = voicing_gain(&mut drift, 15_000.0, 1.0);
+        assert!(
+            tip_top < coil_top,
+            "tip mass {tip_top} should dull more than coil load {coil_top}"
+        );
+        assert!(
+            drift_top > tip_top,
+            "curve drift {drift_top} should dull less than tip mass {tip_top}"
+        );
+        // Tip mass is the top-only shape: its body lift is the smallest.
+        let tip_body = voicing_gain(&mut tip, 60.0, 1.0);
+        let coil_body = voicing_gain(&mut coil, 60.0, 1.0);
+        assert!(
+            tip_body < coil_body,
+            "tip mass body {tip_body} should sit under coil load {coil_body}"
+        );
+    }
+
+    #[test]
+    fn vinyl_voicing_curve_setter_round_trips() {
+        let mut dsp = simulation_dsp();
+        assert_eq!(dsp.vinyl_voicing_curve(), 0);
+        for curve in 0..VINYL_VOICING_CURVES.len() as u32 {
+            dsp.set_vinyl_voicing_curve(curve).unwrap();
+            assert_eq!(dsp.vinyl_voicing_curve(), curve);
+        }
+        assert!(VINYL_VOICING_CURVES.len() >= 3);
+    }
+
+    /// The stage really is in the programme path, not just unit-tested. A
+    /// settled constant programme is the low shelf's easiest target: with the
+    /// seed curve off it renders the source sample unchanged, and with it on
+    /// it comes out lifted but bounded.
+    #[test]
+    fn vinyl_voicing_reaches_the_rendered_programme() {
+        fn render_settled_dc(voicing: f64) -> f32 {
+            let mut config = AcousticConfig::default();
+            config.vinyl_voicing = voicing;
+            let mut dsp = ScratchAcousticDsp::new_internal(48_000.0, config);
+            dsp.source_sample_rate = 48_000.0;
+            dsp.channels = Arc::new(vec![vec![0.5_f32; 96_000]]);
+            dsp.window_start = 0;
+            dsp.window_end = 96_000;
+            dsp.total_frames = 96_000;
+            dsp.set_effects(false, false);
+            dsp.start();
+            dsp.set_transport(false, 1.0, 0.0, 0.0);
+            dsp.render(48_000, 1);
+            dsp.render(512, 1);
+            *dsp.rendered_samples().last().unwrap()
+        }
+
+        let dry = render_settled_dc(0.0);
+        let voiced = render_settled_dc(1.0);
+        assert!(
+            (dry - 0.5).abs() < 1.0e-4,
+            "the default path must pass the source through, got {dry}"
+        );
+        assert!(
+            voiced > dry + 1.0e-3,
+            "the voicing stage did not reach the programme: {dry} vs {voiced}"
+        );
+        assert!(
+            voiced < 0.5 * 1.7,
+            "the voicing lifted a settled programme past its seed bound: {voiced}"
+        );
     }
 
     /// A cartridge is a velocity transducer: output rides the rate, exactly

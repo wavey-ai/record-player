@@ -819,3 +819,107 @@ sitting seven milliseconds behind the hand. Offline hand-spin went from
 
 So the next thing to try is not the servo pair. It is the double-filtered gesture
 trackers below, which sit upstream of both.
+
+## Opt-in vinyl voicing: the RIAA pair cannot colour, so expose the mismatch (2026-09-12)
+
+A request to "add the inverse RIAA to make a more authentic vinyl sound" was
+resolved by first pinning what the RIAA curve can and cannot do. Channel D's
+Pure Vinyl applies an inverse-RIAA (playback de-emphasis) to a *flat* transfer
+to cancel the cut and reach an accurate master. A matched pre-emphasis/playback
+pair is the identity operator, so applying "the inverse" to already-mastered PCM
+cannot add warmth — it either pre-emphasises the file (thin and bright) or, if
+de-emphasis is applied alone, introduces a deliberate curve error. The only way
+an RIAA-shaped mechanism colours anything is as a *mismatch*.
+
+The engine already had the one physical mismatch: `RiaaSpeedTilt`, which exists
+only off nominal speed. Two opt-in stages now expose the fixed mismatches a
+listener associates with vinyl. Both are off/neutral by default, so the
+transparent-master rule still holds:
+
+- `AcousticConfig.riaa_voicing_rate` (WASM `setRiaaVoicing` / `riaaVoicing`),
+  default `1.0`. A second `RiaaSpeedTilt` held at a constant, caller-chosen
+  rate instead of following the record. `1.0` is the standard curve and passes
+  the programme bit-exactly; values above `1.0` trade top end for body. The
+  rate is clamped to the tilt's existing `[0.1, 4.0]`, and changes ease through
+  `follow_rate` so the filter never restructures in one sample.
+- `AcousticConfig.vinyl_voicing` (WASM `setVinylVoicing` / `vinylVoicing`),
+  default `0.0`, amount `[0, 1]`. Blends a fixed seed curve over the master:
+  a 2nd-order cartridge/arm top-end loss (20 kHz, Q 0.707) into a small preamp
+  low shelf (120 Hz, +1.5 dB) and high shelf (6 kHz, -1.5 dB). `0` is bypassed
+  bit-exactly. The blend is eased over the same 3 ms constant as the movement
+  gain, so toggling it ramps rather than steps, and the biquads are skipped
+  entirely while the blend is zero.
+
+Both stages sit in the existing per-channel phono section, after the live speed
+tilt (`src/acoustic.rs`), and are carried in the replay snapshot so deterministic
+replay is unchanged.
+
+The seed curve is a seed, not a calibrated hardware profile — the same caveat
+that already attaches to the motor, slipmat, and cartridge seed values. The
+bounded-response test keeps any future change honest (±3.5 dB) but does not
+prove authenticity; that needs listening evidence and preferably a measured
+preamp/cartridge sweep.
+
+Tests added: the default config is neutral; the fixed-rate stage holds DC flat
+and scales the top as `1/rate`; the voicing curve lifts the low end and softens
+the top within its bound; both stages are bit-exact at their neutral settings;
+and the setters round-trip. The C ABI and `WASM_API.md` are untouched — those
+describe `PhysicalHostRenderer`, not `ScratchAcousticDsp`; the acoustic surface
+is consumed through the generated WASM bindings.
+
+
+### Follow-up: the voicing seed was too small, measured on real material (2026-09-12)
+
+The first seed curve was a 1.5 dB low shelf at 120 Hz, a 1.5 dB high shelf at
+6 kHz, and a 20 kHz cartridge pole. Played through the browser rack it read as
+no effect, so it was measured on the actual programme rather than argued about.
+
+Fixture: `gcp-decoded.wav` — the 48 kHz stereo decode of the `pray-for-me`
+12 kbps `.ecdc` from `lori-asha-btc/pray-for-me-confirmation`. The offline
+filters and the compiled `ScratchAcousticDsp` (both amount `1.0`) agreed:
+
+| curve | overall RMS | HF (first difference) | LF < 200 Hz |
+| --- | ---: | ---: | ---: |
+| first seed (1.5 / 1.5 / 20k) | +1.0 dB | −0.8 dB | +0.8 dB |
+| current seed (4.0 / 4.5 / 16k) | +2.6 dB | −2.8 dB | +3.2 dB |
+
+The first seed moved the track by under 1 dB in every metric, which is why it
+was inaudible. The constants are now a 150 Hz / +4.0 dB low shelf, a 4.5 kHz /
+−4.5 dB high shelf, and a 16 kHz / Q 0.6 cartridge pole: a clearly audible
+warmth rather than a shelf the ear cannot resolve.
+
+The material is itself dark — its own spectrum is about −23 dB at 8 kHz and
+−33 dB at 14 kHz relative to 1 kHz — so the top-end half of any voicing is
+inherently muted on this EP and the effect reads mostly as body. `RIAA VOICE`
+at `1.5` is the more obvious control there (−2.2 dB overall, −2.8 dB top). A
+brighter, full-band master is the right fixture for judging the top-end half.
+
+The seed-curve test bounds moved with the curve: body is now pinned to
+`+2.5…+6 dB` at 60 Hz and the top to `−10…−3.5 dB` at 15 kHz, with the
+midrange required to stay inside ±1 dB. The rendered-programme test's bound
+moved from `1.2` to `1.7` for the larger low shelf.
+
+### Follow-up: the voicing became a table of curves (2026-09-12)
+
+One fixed shape with an amount turned out to be the wrong surface for the
+browser's `VOICE` row: three named characters that differ only in how much of
+the same filter is applied are not three characters. `AcousticConfig` now
+carries `vinyl_voicing_curve`, an index into `VINYL_VOICING_CURVES`:
+
+| index | name | shape |
+| --- | --- | --- |
+| 0 | COIL LOAD | broad cartridge/arm top-end loss with body under it |
+| 1 | TIP MASS | tip mass dulling the top, body nearly left alone |
+| 2 | CURVE DRIFT | low-mid lift and a broad presence dip, no cartridge pole |
+
+`VinylVoicingFilter::set_curve` rebuilds the three biquad coefficients in
+place and carries the running delay across (`VoicingBiquad::retuned`), so a
+character change does not zero the filter and click. The render loop only
+calls it when the configured index differs from the active one, so steady
+playback does no work. Out-of-range indices are rejected by the constructor
+and the WASM setter. `amount == 0` is still bit-exact for every curve.
+
+Tests: all curves tint body up and top down within usable bounds; the curves
+are distinct shapes (tip mass dulls more and lifts less than coil load, curve
+drift dulls least); the setter round-trips; zero stays bit-exact across all
+curves. The pre-existing single-curve tests now run on curve 0.
