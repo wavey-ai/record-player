@@ -32,24 +32,8 @@ pub const RECORD_PLAYER_STATUS_NULL_POINTER: RecordPlayerStatus = 1;
 pub const RECORD_PLAYER_STATUS_MISALIGNED_POINTER: RecordPlayerStatus = 2;
 pub const RECORD_PLAYER_STATUS_INVALID_ARGUMENT: RecordPlayerStatus = 3;
 pub const RECORD_PLAYER_STATUS_UNSUPPORTED_ABI_VERSION: RecordPlayerStatus = 4;
-pub const RECORD_PLAYER_STATUS_UNSUPPORTED_OUTPUT_SAMPLE_RATE: RecordPlayerStatus = 5;
-pub const RECORD_PLAYER_STATUS_ALLOCATION_FAILED: RecordPlayerStatus = 6;
-pub const RECORD_PLAYER_STATUS_CREATE_FAILED: RecordPlayerStatus = 7;
 pub const RECORD_PLAYER_STATUS_BUSY: RecordPlayerStatus = 8;
-pub const RECORD_PLAYER_STATUS_GROOVE_CUT_FAILED: RecordPlayerStatus = 10;
-pub const RECORD_PLAYER_STATUS_GROOVE_LAYOUT_MISMATCH: RecordPlayerStatus = 11;
-pub const RECORD_PLAYER_STATUS_GROOVE_PROGRAMME_DOES_NOT_FIT: RecordPlayerStatus = 12;
-pub const RECORD_PLAYER_STATUS_GROOVE_OVERCUT: RecordPlayerStatus = 13;
-pub const RECORD_PLAYER_STATUS_GROOVE_LOAD_FAILED: RecordPlayerStatus = 14;
 pub const RECORD_PLAYER_STATUS_CONTROL_INVALID: RecordPlayerStatus = 20;
-pub const RECORD_PLAYER_STATUS_CONTROL_LATE: RecordPlayerStatus = 21;
-pub const RECORD_PLAYER_STATUS_CONTROL_DUPLICATE: RecordPlayerStatus = 22;
-pub const RECORD_PLAYER_STATUS_CONTROL_NONMONOTONIC_FRAME: RecordPlayerStatus = 23;
-pub const RECORD_PLAYER_STATUS_CONTROL_NONMONOTONIC_SEQUENCE: RecordPlayerStatus = 24;
-pub const RECORD_PLAYER_STATUS_CONTROL_QUEUE_FULL: RecordPlayerStatus = 25;
-pub const RECORD_PLAYER_STATUS_RENDER_BLOCK_TOO_LARGE: RecordPlayerStatus = 30;
-pub const RECORD_PLAYER_STATUS_RENDER_FAILED: RecordPlayerStatus = 31;
-pub const RECORD_PLAYER_STATUS_CORE_ERROR: RecordPlayerStatus = 40;
 pub const RECORD_PLAYER_STATUS_GESTURE_INVALID: RecordPlayerStatus = 50;
 pub const RECORD_PLAYER_STATUS_GESTURE_STATE: RecordPlayerStatus = 51;
 pub const RECORD_PLAYER_STATUS_PANIC: RecordPlayerStatus = 127;
@@ -618,28 +602,8 @@ pub extern "C" fn record_player_status_message(status: RecordPlayerStatus) -> *c
         RECORD_PLAYER_STATUS_MISALIGNED_POINTER => b"a pointer has invalid alignment\0",
         RECORD_PLAYER_STATUS_INVALID_ARGUMENT => b"an argument is invalid\0",
         RECORD_PLAYER_STATUS_UNSUPPORTED_ABI_VERSION => b"the ABI version is unsupported\0",
-        RECORD_PLAYER_STATUS_UNSUPPORTED_OUTPUT_SAMPLE_RATE => {
-            b"the output sample rate is unsupported\0"
-        }
-        RECORD_PLAYER_STATUS_ALLOCATION_FAILED => b"memory allocation failed\0",
-        RECORD_PLAYER_STATUS_CREATE_FAILED => b"player construction failed\0",
         RECORD_PLAYER_STATUS_BUSY => b"the requested handle lane is busy\0",
-        RECORD_PLAYER_STATUS_GROOVE_CUT_FAILED => b"groove construction failed\0",
-        RECORD_PLAYER_STATUS_GROOVE_LAYOUT_MISMATCH => b"the groove layout does not match\0",
-        RECORD_PLAYER_STATUS_GROOVE_PROGRAMME_DOES_NOT_FIT => b"the programme does not fit\0",
-        RECORD_PLAYER_STATUS_GROOVE_OVERCUT => b"the groove clearance check failed\0",
-        RECORD_PLAYER_STATUS_GROOVE_LOAD_FAILED => b"groove loading failed\0",
         RECORD_PLAYER_STATUS_CONTROL_INVALID => b"the control is invalid\0",
-        RECORD_PLAYER_STATUS_CONTROL_LATE => b"the control frame is late\0",
-        RECORD_PLAYER_STATUS_CONTROL_DUPLICATE => b"the control key is duplicate\0",
-        RECORD_PLAYER_STATUS_CONTROL_NONMONOTONIC_FRAME => b"control frames are not monotonic\0",
-        RECORD_PLAYER_STATUS_CONTROL_NONMONOTONIC_SEQUENCE => {
-            b"control sequences are not monotonic\0"
-        }
-        RECORD_PLAYER_STATUS_CONTROL_QUEUE_FULL => b"the control queue is full\0",
-        RECORD_PLAYER_STATUS_RENDER_BLOCK_TOO_LARGE => b"the render block is too large\0",
-        RECORD_PLAYER_STATUS_RENDER_FAILED => b"rendering failed\0",
-        RECORD_PLAYER_STATUS_CORE_ERROR => b"the physical engine rejected the operation\0",
         RECORD_PLAYER_STATUS_GESTURE_INVALID => b"the scratch gesture input is invalid\0",
         RECORD_PLAYER_STATUS_GESTURE_STATE => b"the scratch gesture state is invalid\0",
         RECORD_PLAYER_STATUS_PANIC => b"Rust stopped an unwind at the ABI boundary\0",
