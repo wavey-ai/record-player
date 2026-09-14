@@ -153,7 +153,7 @@ dependencies = [
 
 [[package]]
 name = "record-player"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "approx",
  "assert_no_alloc",
