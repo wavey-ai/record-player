@@ -1,12 +1,13 @@
 [package]
 name = "record-player-capi"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Native C ABI for the record-player physical engine"
+description = "Native C ABI for the record-player scratch gesture mapper"
 license = "Apache-2.0"
+repository = "https://github.com/wavey-ai/record-player"
 
 [lib]
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-record-player = { path = "../.." }
+record-player = { path = "../..", version = "0.2.0" }
