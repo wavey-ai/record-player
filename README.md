@@ -5,9 +5,8 @@ programme audio and hand motion into the sound of a record on a deck: platter
 and slipmat motion, scratching, timed controls, and record-surface behavior.
 
 You give the engine bounded PCM windows and sample-timed controls. It gives
-you host-rate audio, metering, and serializable deck state. The engine does
-not decode source formats, schedule audio callbacks, or draw UI — your host
-application owns those.
+you host-rate audio, metering, and serializable deck state. Source decoding,
+audio callbacks, and UI belong to the host application.
 
 `ScratchAcousticDsp` is the renderer. It owns the deck, the record's acoustic
 behavior, and the scratch gate in one host-rate path, so a settled record at
@@ -37,8 +36,7 @@ The workspace contains two crates:
 - **Phone.** `bitneedle-native-core` wraps one `ScratchAcousticDsp` in
   `record_player_bridge.rs` and exposes it through the
   `bitneedle_native_record_player_*` C ABI; the `Deck` Swift package drives
-  that. The live pointer tracker is BITNEEDLE's own, not the capi's gesture
-  mapper.
+  that. The live pointer tracker is BITNEEDLE's own.
 - **Browser.** `web.mk` builds this crate's WASM, and the AudioWorklet and
   take-render worker instantiate `ScratchAcousticDsp` directly.
 
@@ -67,8 +65,9 @@ behavior, or gesture policy out of this repository into an application.
 
 The audio path is `#![forbid(unsafe_code)]` and uses bounded, preallocated
 storage; under `cargo test` an allocation guard fails a test that allocates on
-it. Timed controls use absolute frames. Inside an audio callback, hosts must
-not decode, allocate whole-record buffers, or do network or UI work.
+it. Timed controls use absolute frames. The audio callback is for rendering,
+so keep source decoding, whole-record allocation, network work, and UI work on
+the host's other threads.
 
 ## Build and test
 
@@ -104,6 +103,6 @@ scripts/check-record-player-capi.sh
 - [`docs/PHYSICS_INVESTIGATION_LOG.md`](./docs/PHYSICS_INVESTIGATION_LOG.md)
   tracks model evidence, uncertainty, and rejected assumptions.
 
-The SL-1200MK7 deck mechanics profile is a seed profile, not a calibrated
-accuracy claim. Unit tests establish deterministic software behavior; they do
-not replace hardware measurements or independent listening tests.
+The SL-1200MK7 deck mechanics profile is a seed profile. Unit tests establish
+deterministic software behavior; hardware measurements and independent
+listening tests remain the reference.

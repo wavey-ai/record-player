@@ -1,11 +1,9 @@
 //! Provides a thin C ABI for the record-player scratch gesture mapper.
 //!
-//! This crate validates ABI values and transfers them to `record-player`.
-//! It does not define physics values or gesture behavior.
+//! This crate validates ABI values and transfers them to `record-player`,
+//! where the physics values and gesture behavior live.
 //!
-//! The physical host renderer's C surface (`record_player_create` and the
-//! render/telemetry calls that hung off it) went with the physical module it
-//! wrapped; the gesture mapper is what remains and what callers use.
+//! The gesture mapper is the surface callers use.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
@@ -347,10 +345,8 @@ pub struct RecordPlayerScratchGestureHandle {
 // SAFETY: The atomic guard permits only one mapper reference at a time.
 unsafe impl Sync for RecordPlayerScratchGestureHandle {}
 
-/// The rate the gesture mapper resolves hand motion at. It was
-/// `physical::PHYSICAL_OUTPUT_INPUT_RATE_HZ` before that module was removed;
-/// the mapper is the only thing that still needs the value, so it lives here
-/// now rather than pulling a renderer back in for one constant.
+/// The rate the gesture mapper resolves hand motion at. The mapper is the one
+/// caller that needs the value, so it lives here.
 const GESTURE_INTERNAL_RATE_HZ: u32 = 192_000;
 
 struct AccessGuard<'a> {
@@ -466,7 +462,7 @@ fn timed_control(
         hand_target_angular_velocity_rad_s: value.control.hand_target_angular_velocity_rad_s,
         hand_normal_force_n: value.control.hand_normal_force_n,
         hand_contact_radius_m: value.control.hand_contact_radius_m,
-        // The physical player owns stylus reaction torque. Hosts cannot inject it.
+        // Stylus reaction torque is the player's to derive.
         stylus_torque_nm: 0.0,
     };
     let preset = scratch_preset(value.control.scratch_preset)?;

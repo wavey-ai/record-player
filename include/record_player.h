@@ -40,7 +40,7 @@ typedef uint32_t RecordPlayerScratchPreset;
 
 typedef struct RecordPlayerScratchGestureHandle RecordPlayerScratchGestureHandle;
 
-/* This value contains one complete control state. It is not a control delta. */
+/* This value contains one complete control state. */
 typedef struct RecordPlayerControl {
     RecordPlayerMotorMode motor_mode;
     uint8_t hand_contact;
